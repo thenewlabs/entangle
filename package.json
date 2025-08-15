@@ -13,7 +13,9 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "dev": "npm run dev --workspace=@sunpix/entangle-server",
-    "test": "npm run test --workspaces --if-present",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
     "clean": "npm run clean --workspaces --if-present"
   },
   "keywords": ["security", "relay", "cli", "remote"],
@@ -24,6 +26,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "typescript": "^5.3.3"
+    "@vitest/coverage-v8": "^1.2.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
   }
 }

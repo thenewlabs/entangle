@@ -24,8 +24,8 @@ export function decodeFrameHeader(header: Uint8Array): { type: FrameType; length
 export class FrameReader {
   private buffer: Uint8Array = new Uint8Array(0);
   private headerParsed = false;
-  private currentType?: FrameType;
-  private currentLength?: bigint;
+  private currentType: FrameType | undefined;
+  private currentLength: bigint | undefined;
   
   push(chunk: Uint8Array): Frame[] {
     const frames: Frame[] = [];

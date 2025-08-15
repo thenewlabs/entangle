@@ -127,12 +127,22 @@ export class RoutingState {
   
   cleanupStale(maxAge: number = 300000): void {
     const now = Date.now();
+    const staleAgents: string[] = [];
     
     for (const [agentId, agent] of this.agents) {
       if (now - agent.lastHeartbeat > maxAge) {
         logger.warn({ agentId, namespace: agent.namespace }, 'Removing stale agent');
+        staleAgents.push(agentId);
+      }
+    }
+    
+    // Remove stale agents in a separate loop to avoid iterator issues
+    for (const agentId of staleAgents) {
+      const agent = this.agents.get(agentId);
+      if (agent) {
+        // Close the WebSocket, which will trigger the 'close' event
+        // that calls removeAgent automatically
         agent.ws.close();
-        this.removeAgent(agentId);
       }
     }
   }

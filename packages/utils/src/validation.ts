@@ -29,14 +29,48 @@ export function validateCwd(cwd: string, allowedPrefixes?: string[]): void {
     return;
   }
   
+  // Normalize path separators
   const normalized = cwd.replace(/\\/g, '/');
-  const allowed = allowedPrefixes.some(prefix => 
-    normalized.startsWith(prefix.replace(/\\/g, '/'))
-  );
+  
+  // Resolve relative path components like '../' to prevent traversal
+  const resolved = resolvePath(normalized);
+  
+  const allowed = allowedPrefixes.some(prefix => {
+    const normalizedPrefix = prefix.replace(/\\/g, '/');
+    // Remove trailing slash from prefix for consistent comparison
+    const cleanPrefix = normalizedPrefix.endsWith('/') ? normalizedPrefix.slice(0, -1) : normalizedPrefix;
+    return resolved.startsWith(cleanPrefix + '/') || resolved === cleanPrefix;
+  });
   
   if (!allowed) {
     throw new Error(`CWD not in allowed directories: ${cwd}`);
   }
+}
+
+// Simple path resolution to handle '..' and '.' components
+function resolvePath(path: string): string {
+  if (!path.startsWith('/')) {
+    // Convert relative paths to absolute by prefixing with '/'
+    path = '/' + path;
+  }
+  
+  const parts = path.split('/').filter(Boolean);
+  const resolved: string[] = [];
+  
+  for (const part of parts) {
+    if (part === '..') {
+      // Go up one directory (remove last component)
+      if (resolved.length > 0) {
+        resolved.pop();
+      }
+      // If we're already at root, ignore additional '..'
+    } else if (part !== '.') {
+      // Add normal directory component (ignore '.')
+      resolved.push(part);
+    }
+  }
+  
+  return '/' + resolved.join('/');
 }
 
 export function validateLimits(limits?: {

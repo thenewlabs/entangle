@@ -20,7 +20,13 @@ export async function initCrypto(): Promise<void> {
 }
 
 export function extractSaltFromCapId(capId: string): Uint8Array {
-  const decoded = base64UrlDecode(capId);
+  let decoded: Uint8Array;
+  try {
+    decoded = base64UrlDecode(capId);
+  } catch (error) {
+    throw new Error('Invalid capId length');
+  }
+  
   if (decoded.length !== CRYPTO_PARAMS.SALT_CAP_BYTES + CRYPTO_PARAMS.CAP_RAND_BYTES) {
     throw new Error('Invalid capId length');
   }
