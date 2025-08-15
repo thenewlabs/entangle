@@ -147,11 +147,13 @@ export class RelayClient {
         
         switch (frame.type) {
           case FrameType.STDOUT:
-            this.terminal.write(new Uint8Array(decrypted.msg.chunk));
+            // chunk is already a Uint8Array after decryption
+            this.terminal.write(decrypted.msg.chunk);
             break;
             
           case FrameType.STDERR:
-            this.terminal.write(new Uint8Array(decrypted.msg.chunk));
+            // chunk is already a Uint8Array after decryption
+            this.terminal.write(decrypted.msg.chunk);
             break;
             
           case FrameType.EXIT:

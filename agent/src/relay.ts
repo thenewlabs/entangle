@@ -24,7 +24,7 @@ import {
   validateLimits,
   getConfig,
 } from '@sunpix/entangle-utils';
-import { encode } from 'cborg';
+import { encode, decode } from 'cborg';
 import { runCommand } from './runner.js';
 import type { CapabilityInfo } from './capability.js';
 
@@ -200,7 +200,9 @@ async function handleRun(session: Session, payload: Uint8Array): Promise<void> {
   }
   
   try {
-    const decrypted = aeadDecrypt(session.keys.K_enc, FrameType.RUN, payload.slice(0, 24), payload.slice(24));
+    // Payload is CBOR-encoded {nonce, cipher}
+    const encrypted = decode(payload) as any;
+    const decrypted = aeadDecrypt(session.keys.K_enc, FrameType.RUN, encrypted.nonce, encrypted.cipher);
     session.counters.incoming.validate(decrypted.ctr);
     
     const runMsg = decrypted.msg as RunMessage['msg'];
@@ -242,7 +244,9 @@ async function handleAbort(session: Session, payload: Uint8Array): Promise<void>
   if (!session.authenticated || !session.keys) return;
   
   try {
-    const decrypted = aeadDecrypt(session.keys.K_enc, FrameType.ABORT, payload.slice(0, 24), payload.slice(24));
+    // Payload is CBOR-encoded {nonce, cipher}
+    const encrypted = decode(payload) as any;
+    const decrypted = aeadDecrypt(session.keys.K_enc, FrameType.ABORT, encrypted.nonce, encrypted.cipher);
     session.counters.incoming.validate(decrypted.ctr);
     
     const abortMsg = decrypted.msg as any;

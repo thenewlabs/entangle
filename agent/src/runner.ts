@@ -153,5 +153,9 @@ function getMinimalEnv(): NodeJS.ProcessEnv {
     LANG: 'en_US.UTF-8',
     LC_ALL: 'en_US.UTF-8',
     TZ: 'UTC',
+    // Terminal settings to help commands format output properly
+    TERM: 'xterm-256color',
+    COLUMNS: '120',  // Wider default to reduce column wrapping
+    LINES: '40',
   };
 }

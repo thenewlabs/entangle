@@ -68,7 +68,7 @@ export function InvokeView({ capability }: Props) {
       relayClient.disconnect();
       term.dispose();
     };
-  }, [capability]);
+  }, [capability.namespace, capability.capId, capability.S]);
   
   const handleRun = async () => {
     if (!client || !connected || running || !command.trim()) return;

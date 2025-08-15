@@ -1,0 +1,3 @@
+- [ ] Entangle draaien op een client, stuurt claude etc. Door
+- [ ] Webservice zorgt ervoor dat het benaderbaar is (via suncoder.dev)
+- [ ] 
