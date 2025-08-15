@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { createLogger, getConfig } from '@sunpix/entangle-utils';
 import { FrameType, encodeFrame } from '@sunpix/entangle-protocol';
-import { generateNamespace } from '@sunpix/entangle-crypto';
+// import { generateNamespace } from '@sunpix/entangle-crypto';
 import { encode } from 'cborg';
 import { handleInvokerConnection } from './relay.js';
 import { loadCapabilities } from './capability.js';

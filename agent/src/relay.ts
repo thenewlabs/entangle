@@ -12,7 +12,7 @@ import {
   extractSaltFromCapId,
   aeadEncrypt,
   aeadDecrypt,
-  computeHmac,
+  // computeHmac,
   verifyHmac,
   hashPolicy,
 } from '@sunpix/entangle-crypto';
@@ -24,7 +24,7 @@ import {
   validateLimits,
   getConfig,
 } from '@sunpix/entangle-utils';
-import { encode, decode } from 'cborg';
+import { encode } from 'cborg';
 import { runCommand } from './runner.js';
 import type { CapabilityInfo } from './capability.js';
 
@@ -114,7 +114,7 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     session.keys = await deriveKeys(S, saltCap);
     
     const expectedData = new TextEncoder().encode('hello' + session.cap.capId);
-    const expectedHmac = computeHmac(session.keys.K_auth, expectedData);
+    // const expectedHmac = computeHmac(session.keys.K_auth, expectedData);
     
     session.nonceB = require('crypto').randomBytes(16).toString('hex');
     expectedData.set(new TextEncoder().encode(session.nonceB), expectedData.length - 32);
@@ -192,7 +192,14 @@ async function handleRun(session: Session, payload: Uint8Array): Promise<void> {
       validateCwd(runMsg.cwd, config.agentAllowedCwd);
     }
     
-    validateLimits(runMsg.limits);
+    if (runMsg.limits) {
+      const limits: any = {};
+      if (runMsg.limits.cpuMs !== undefined) limits.cpuMs = runMsg.limits.cpuMs;
+      if (runMsg.limits.memMB !== undefined) limits.memMB = runMsg.limits.memMB;
+      if (runMsg.limits.wallMs !== undefined) limits.wallMs = runMsg.limits.wallMs;
+      if (runMsg.limits.maxOutBytes !== undefined) limits.maxOutBytes = runMsg.limits.maxOutBytes;
+      validateLimits(limits);
+    }
     
     session.hasRun = true;
     session.currentCommand = runMsg.commandId;

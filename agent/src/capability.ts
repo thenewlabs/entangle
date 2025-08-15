@@ -22,7 +22,7 @@ export async function createCapability(options: {
 }): Promise<CapabilityInfo> {
   await initCrypto();
   
-  const { capId, saltCap } = generateCapId();
+  const { capId } = generateCapId();
   const S = generateSecret();
   
   const policy: Policy = {

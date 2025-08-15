@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MonotonicCounter, BidirectionalCounters } from './counters';
+import { MonotonicCounter, BidirectionalCounters } from './counters.js';
 
 describe('Counters', () => {
   describe('MonotonicCounter', () => {

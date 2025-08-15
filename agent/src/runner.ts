@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from 'child_process';
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { spawn } from 'child_process';
+import { createLogger } from '@sunpix/entangle-utils';
 import { 
   FrameType, 
   encodeFrame,
@@ -17,7 +17,7 @@ export async function runCommand(
   session: Session,
   runMsg: any
 ): Promise<void> {
-  const config = getConfig();
+  // const config = getConfig();
   const { commandId, tool, argv, cwd, limits } = runMsg;
   
   logger.info({ commandId, tool, argv, cwd }, 'Running command');
@@ -76,8 +76,8 @@ export async function runCommand(
     logger.info({ commandId, code, signal, duration, bytesOut }, 'Command exited');
     
     sendExit(session, commandId, code, signal, bytesOut);
-    session.currentCommand = undefined;
-    session.abortController = undefined;
+    delete session.currentCommand;
+    delete session.abortController;
   });
   
   child.on('error', (error) => {

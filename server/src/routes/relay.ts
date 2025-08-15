@@ -1,7 +1,7 @@
 import type WebSocket from 'ws';
 import { createLogger, getConfig } from '@sunpix/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
-import { FrameReader } from '@sunpix/entangle-protocol';
+// import { FrameReader } from '@sunpix/entangle-protocol';
 
 const logger = createLogger('relay-route');
 
@@ -30,8 +30,8 @@ export function setupRelayRoute(
     socketId: invokerId,
   }));
   
-  const invokerReader = new FrameReader();
-  const agentReader = new FrameReader();
+  // const invokerReader = new FrameReader();
+  // const agentReader = new FrameReader();
   
   let lastActivity = Date.now();
   

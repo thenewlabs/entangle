@@ -27,14 +27,14 @@ export async function startServer(): Promise<void> {
   app.use(cors());
   app.use(express.json());
   
-  app.get('/__health', (req, res) => {
+  app.get('/__health', (_req, res) => {
     res.json({ status: 'ok', namespaces: routing.getNamespaceCount() });
   });
   
   const webDistPath = join(__dirname, '../../web/dist');
   if (existsSync(webDistPath)) {
     app.use(express.static(webDistPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(join(webDistPath, 'index.html'));
     });
   }
@@ -50,7 +50,7 @@ export async function startServer(): Promise<void> {
       });
     } else if (url.pathname.startsWith('/relay/')) {
       const parts = url.pathname.split('/');
-      if (parts.length === 4) {
+      if (parts.length === 4 && parts[2] && parts[3]) {
         const namespace = parts[2];
         const capId = parts[3];
         

@@ -14,7 +14,7 @@ interface Props {
 
 export function InvokeView({ capability }: Props) {
   const terminalRef = useRef<HTMLDivElement>(null);
-  const [terminal, setTerminal] = useState<Terminal | null>(null);
+  const [_terminal, setTerminal] = useState<Terminal | null>(null);
   const [client, setClient] = useState<RelayClient | null>(null);
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);

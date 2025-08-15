@@ -13,7 +13,7 @@ import {
   base64UrlDecode,
   generateNamespace,
   hashPolicy,
-} from './index';
+} from './index.js';
 
 describe('Crypto Package', () => {
   beforeAll(async () => {
@@ -146,7 +146,7 @@ describe('Crypto Package', () => {
       const plaintext = { test: 'data' };
       const { nonce, cipher } = aeadEncrypt(keys.K_enc, 0x10, 1, plaintext);
       
-      cipher[0] ^= 0xFF; // Tamper with first byte
+      cipher[0]! ^= 0xFF; // Tamper with first byte
       
       expect(() => aeadDecrypt(keys.K_enc, 0x10, nonce, cipher)).toThrow();
     });

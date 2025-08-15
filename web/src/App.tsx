@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { InvokeView } from './views/Invoke';
 
 export function App() {
@@ -14,8 +14,8 @@ export function App() {
     
     if (path.length === 2 && hash.startsWith('#S=')) {
       setCapability({
-        namespace: path[0],
-        capId: path[1],
+        namespace: path[0]!,
+        capId: path[1]!,
         S: hash.substring(3),
       });
     }

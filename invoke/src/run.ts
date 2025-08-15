@@ -27,10 +27,10 @@ interface RunOptions {
   S: string;
   tool: string;
   argv: string[];
-  cwd?: string;
+  cwd: string | undefined;
   serverUrl: string;
-  abortAfterMs?: number;
-  maxOutBytes?: number;
+  abortAfterMs: number | undefined;
+  maxOutBytes: number | undefined;
 }
 
 export async function runCommand(options: RunOptions): Promise<number> {
@@ -71,8 +71,8 @@ export async function runCommand(options: RunOptions): Promise<number> {
       for (const frame of frames) {
         try {
           if (frame.type === FrameType.AUTH2 && !authenticated) {
-            const encrypted = decode(frame.payload) as any;
-            const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH2, encrypted.nonce, encrypted.cipher);
+            const auth2Encrypted = decode(frame.payload) as any;
+            const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH2, auth2Encrypted.nonce, auth2Encrypted.cipher);
             
             const auth2 = decrypted.msg as any;
             if (!auth2.ok || auth2.nonceB !== nonceB) {
@@ -100,8 +100,8 @@ export async function runCommand(options: RunOptions): Promise<number> {
               },
             };
             
-            const encrypted = aeadEncrypt(keys.K_enc, FrameType.RUN, runMsg.ctr, runMsg.msg);
-            ws.send(encodeFrame(FrameType.RUN, encode(encrypted)));
+            const runEncrypted = aeadEncrypt(keys.K_enc, FrameType.RUN, runMsg.ctr, runMsg.msg);
+            ws.send(encodeFrame(FrameType.RUN, encode(runEncrypted)));
             
             if (options.abortAfterMs) {
               abortTimer = setTimeout(() => {
@@ -113,13 +113,13 @@ export async function runCommand(options: RunOptions): Promise<number> {
                     reason: 'Timeout',
                   },
                 };
-                const encrypted = aeadEncrypt(keys.K_enc, FrameType.ABORT, abortMsg.ctr, abortMsg.msg);
-                ws.send(encodeFrame(FrameType.ABORT, encode(encrypted)));
+                const abortEncrypted = aeadEncrypt(keys.K_enc, FrameType.ABORT, abortMsg.ctr, abortMsg.msg);
+                ws.send(encodeFrame(FrameType.ABORT, encode(abortEncrypted)));
               }, options.abortAfterMs);
             }
           } else if (authenticated) {
-            const encrypted = decode(frame.payload) as any;
-            const decrypted = aeadDecrypt(keys.K_enc, frame.type, encrypted.nonce, encrypted.cipher);
+            const msgEncrypted = decode(frame.payload) as any;
+            const decrypted = aeadDecrypt(keys.K_enc, frame.type, msgEncrypted.nonce, msgEncrypted.cipher);
             counters.incoming.validate(decrypted.ctr);
             
             switch (frame.type) {

@@ -23,8 +23,8 @@ export interface Config {
   spaBasePath: string;
   relayRateRps: number;
   relayBurst: number;
-  agentTool?: string;
-  agentAllowedCwd?: string[];
+  agentTool: string | undefined;
+  agentAllowedCwd: string[] | undefined;
   maxArgCount: number;
   maxArgLen: number;
 }

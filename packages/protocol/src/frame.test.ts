@@ -105,8 +105,8 @@ describe('Frame Codec', () => {
       const frames = reader.push(frame);
       
       expect(frames).toHaveLength(1);
-      expect(frames[0].type).toBe(type);
-      expect(frames[0].payload).toEqual(payload);
+      expect(frames[0]!.type).toBe(type);
+      expect(frames[0]!.payload).toEqual(payload);
     });
 
     it('should handle fragmented frames', () => {
@@ -129,8 +129,8 @@ describe('Frame Codec', () => {
       
       frames = reader.push(chunk3);
       expect(frames).toHaveLength(1);
-      expect(frames[0].type).toBe(type);
-      expect(frames[0].payload).toEqual(payload);
+      expect(frames[0]!.type).toBe(type);
+      expect(frames[0]!.payload).toEqual(payload);
     });
 
     it('should handle multiple frames in one push', () => {
@@ -148,12 +148,12 @@ describe('Frame Codec', () => {
       const frames = reader.push(combined);
       
       expect(frames).toHaveLength(3);
-      expect(frames[0].type).toBe(FrameType.AUTH1);
-      expect(frames[0].payload).toEqual(new Uint8Array([1]));
-      expect(frames[1].type).toBe(FrameType.AUTH2);
-      expect(frames[1].payload).toEqual(new Uint8Array([2, 3]));
-      expect(frames[2].type).toBe(FrameType.AUTH3);
-      expect(frames[2].payload).toEqual(new Uint8Array([4, 5, 6]));
+      expect(frames[0]!.type).toBe(FrameType.AUTH1);
+      expect(frames[0]!.payload).toEqual(new Uint8Array([1]));
+      expect(frames[1]!.type).toBe(FrameType.AUTH2);
+      expect(frames[1]!.payload).toEqual(new Uint8Array([2, 3]));
+      expect(frames[2]!.type).toBe(FrameType.AUTH3);
+      expect(frames[2]!.payload).toEqual(new Uint8Array([4, 5, 6]));
     });
 
     it('should handle partial header then complete frame', () => {
@@ -170,8 +170,8 @@ describe('Frame Codec', () => {
       // Send rest of frame
       frames = reader.push(frame.slice(3));
       expect(frames).toHaveLength(1);
-      expect(frames[0].type).toBe(type);
-      expect(frames[0].payload).toEqual(payload);
+      expect(frames[0]!.type).toBe(type);
+      expect(frames[0]!.payload).toEqual(payload);
     });
 
     it('should handle zero-length payload', () => {
@@ -183,8 +183,8 @@ describe('Frame Codec', () => {
       const frames = reader.push(frame);
       
       expect(frames).toHaveLength(1);
-      expect(frames[0].type).toBe(type);
-      expect(frames[0].payload).toHaveLength(0);
+      expect(frames[0]!.type).toBe(type);
+      expect(frames[0]!.payload).toHaveLength(0);
     });
 
     it('should maintain state across multiple pushes', () => {
@@ -205,11 +205,11 @@ describe('Frame Codec', () => {
       
       frames = reader.push(chunk2);
       expect(frames).toHaveLength(1);
-      expect(frames[0].type).toBe(FrameType.RUN);
+      expect(frames[0]!.type).toBe(FrameType.RUN);
       
       frames = reader.push(chunk3);
       expect(frames).toHaveLength(1);
-      expect(frames[0].type).toBe(FrameType.STDOUT);
+      expect(frames[0]!.type).toBe(FrameType.STDOUT);
     });
   });
 });

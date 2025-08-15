@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateArguments, validateCwd, validateLimits } from './validation';
+import { validateArguments, validateCwd, validateLimits } from './validation.js';
 
 describe('Validation Utils', () => {
   describe('validateArguments', () => {
