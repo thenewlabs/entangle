@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Entangle** is a secure blind relay system that allows exposing a single whitelisted CLI tool from a client machine to remote invokers via an encrypted relay. The relay server never sees plaintext commands, arguments, outputs, or secrets.
+**Entangle** is a secure blind relay system that allows exposing one or more whitelisted CLI tools from a client machine to remote invokers via an encrypted relay. The relay server never sees plaintext commands, arguments, outputs, or secrets.
 
 ## Architecture
 
@@ -23,9 +23,9 @@
 
 ### Key Guarantees
 - Server is **completely blind** - never sees plaintext commands/outputs/secrets
-- **Single whitelisted tool** enforcement - agent rejects other tools
+- **Whitelisted tools** enforcement - agent only runs configured tools
 - **Monotonic counters** prevent replay and reordering attacks
-- **One RUN per session** by default (configurable)
+- **Multiple RUNs per session** by default (single-run optionally configurable)
 - **Resource limits** (CPU, memory, wall time, output bytes)
 - **Argument validation** (count, length, NUL bytes, surrogates)
 
@@ -34,7 +34,10 @@
 namespace: server-generated (ns_BASE32)
 capId: saltCap(16B) || capRand(16B) -> base64url (routing ID)
 S: 32-byte secret -> base64url (known only to invoker & agent)
+tool: path to the specific tool this capability grants access to
 ```
+
+The agent creates a single multi-tool capability that works for all whitelisted tools. You can specify which tool to use when invoking.
 
 ## Wire Protocol
 
@@ -56,6 +59,34 @@ All messages except AUTH1/AUTH3 use AEAD with per-direction monotonic counters:
 cipher = AEAD_Enc(K_enc, nonce=random24B, plaintext=CBOR({ctr, msg}), aad=CBOR({type}))
 ```
 
+## Multi-Tool Usage Examples
+
+When starting an agent with multiple tools, a single multi-tool capability is created:
+
+```bash
+# Start agent with multiple tools
+entangle-agent start --tool /usr/bin/claude --tool /usr/bin/git --tool /usr/bin/rg
+
+# Output will show a single multi-tool capability:
+# =====================================
+# Multi-tool capability created
+# namespace: ns_ABC123
+# capId: xKZa3b_7Q...
+# S: 9Hj2_xPmL...
+# 
+# Whitelisted tools:
+#   - /usr/bin/claude
+#   - /usr/bin/git  
+#   - /usr/bin/rg
+# 
+# Web link: https://suncoder.dev/ns_ABC123/xKZa3b_7Q...#S=9Hj2_xPmL...
+# 
+# Invoke command example:
+# entangle-invoke --namespace ns_ABC123 --cap-id xKZa3b_7Q... --secret-s 9Hj2_xPmL... --tool <toolname> --argv '["--help"]'
+```
+
+All tools share the same capability. When invoking, specify which tool you want to use with the --tool parameter.
+
 ## Development Workflow
 
 ### Build & Run
@@ -69,11 +100,14 @@ npm run build
 # Start server
 npm run dev  # or cd server && npm start
 
-# Start agent (separate terminal)
+# Start agent with single tool (separate terminal)
 cd agent && AGENT_TOOL=/usr/bin/claude npm start
 
-# Create capability
-cd agent && npm run create-cap -- --namespace ns_ABC123
+# Or start agent with multiple tools
+cd agent && npm start -- --tool /usr/bin/claude --tool /usr/bin/rg --tool /usr/bin/git
+
+# Create capability for specific tool
+cd agent && npm run create-cap -- --namespace ns_ABC123 --tool /usr/bin/claude
 
 # Invoke command
 cd invoke && npm start -- \
@@ -121,11 +155,17 @@ LOG_LEVEL=info
 
 ### Agent Commands
 ```bash
-# Start agent and register with server
+# Start agent with single tool
 entangle-agent start --tool /usr/bin/claude --server http://localhost:8080
 
-# Create capability for current namespace
-entangle-agent create-cap --namespace ns_ABC123 --single-run
+# Start agent with multiple tools
+entangle-agent start --tool /usr/bin/claude --tool /usr/bin/git --tool /usr/bin/rg
+
+# Create capability for specific tool (single-run mode)
+entangle-agent create-cap --namespace ns_ABC123 --tool /usr/bin/claude --single-run
+
+# Create capability for specific tool (multi-run mode, default)
+entangle-agent create-cap --namespace ns_ABC123 --tool /usr/bin/claude
 
 # Example output:
 # namespace: ns_7R6B2P
@@ -219,8 +259,8 @@ entangle/
 
 ### entangle-agent
 ```bash
-entangle-agent start [--tool <path>] [--server <url>]
-entangle-agent create-cap --namespace <ns> [--single-run]
+entangle-agent start [--tool <path>...] [--server <url>]
+entangle-agent create-cap --namespace <ns> --tool <path> [--single-run]
 ```
 
 ### entangle-server  
@@ -247,7 +287,7 @@ entangle-invoke \
 - **Permission denied**: Check tool executable permissions and CWD access
 - **Connection failed**: Verify server is running and network connectivity
 - **Auth failed**: Ensure capId, namespace, and secret S match exactly
-- **Tool mismatch**: Agent rejects tools different from configured tool
+- **Tool mismatch**: Agent rejects tools not in the whitelist
 
 ### Debug Commands
 ```bash

@@ -125,6 +125,16 @@ export class RoutingState {
     return this.namespaceToAgent.size;
   }
   
+  findInvoker(invokerId: string): InvokerInfo | null {
+    return this.invokers.get(invokerId) || null;
+  }
+  
+  getAgentByNamespace(namespace: string): AgentInfo | null {
+    const agentId = this.namespaceToAgent.get(namespace);
+    if (!agentId) return null;
+    return this.agents.get(agentId) || null;
+  }
+  
   cleanupStale(maxAge: number = 300000): void {
     const now = Date.now();
     const staleAgents: string[] = [];

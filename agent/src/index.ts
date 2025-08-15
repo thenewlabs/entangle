@@ -51,7 +51,7 @@ program
   .description('Create a new capability')
   .option('--namespace <ns>', 'Namespace from server registration')
   .option('--tool <path>', 'Path to the tool for this capability')
-  .option('--single-run', 'Allow only one run per session', true)
+  .option('--single-run', 'Allow only one run per session (default: multiple runs allowed)')
   .action(async (options) => {
     try {
       const config = getConfig();

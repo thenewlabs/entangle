@@ -14,11 +14,14 @@ npm run build
 # Start server (in one terminal)
 npm run server
 
-# Start agent (in another terminal)
+# Start agent with single tool (in another terminal)
 AGENT_TOOL=/usr/bin/claude npm run agent
 
-# Create capability
-npm run agent:create-cap -- --namespace ns_ABC123
+# Or start agent with multiple tools (creates single multi-tool capability)
+npm run agent -- --tool /usr/bin/claude --tool /usr/bin/git
+
+# Create capability for specific tool (with single-run option)
+npm run agent:create-cap -- --namespace ns_ABC123 --tool /usr/bin/claude --single-run
 
 # Invoke from CLI
 npm run invoke -- \
@@ -42,7 +45,7 @@ npm run invoke -- \
 - Argon2id key derivation from secret S
 - Monotonic counters prevent replay attacks
 - Server never sees plaintext
-- Single whitelisted tool per agent
+- Whitelisted tools enforcement (supports multiple tools per agent)
 - Resource limits and sandboxing
 
 ## Development

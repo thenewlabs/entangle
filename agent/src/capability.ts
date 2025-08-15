@@ -13,6 +13,7 @@ export interface CapabilityInfo {
   S: string;
   tool: string;
   policy: Policy;
+  tools?: string[]; // Optional: for multi-tool capabilities
 }
 
 export async function createCapability(options: {
@@ -27,7 +28,7 @@ export async function createCapability(options: {
   
   const policy: Policy = {
     tool: options.tool,
-    singleRun: options.singleRun ?? true,
+    singleRun: options.singleRun ?? false,
   };
   
   const cap: CapabilityInfo = {

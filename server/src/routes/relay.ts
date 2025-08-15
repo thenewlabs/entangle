@@ -41,19 +41,17 @@ export function setupRelayRoute(
     lastActivity = Date.now();
     
     if (agentWs.readyState === invokerWs.OPEN) {
-      agentWs.send(data);
+      // Wrap the frame with metadata so agent knows which invoker it's from
+      agentWs.send(JSON.stringify({
+        type: 'RELAY_MSG',
+        socketId: invokerId,
+        frame: data.toString('base64')
+      }));
     }
   });
   
-  agentWs.on('message', (data) => {
-    if (!(data instanceof Buffer)) return;
-    
-    lastActivity = Date.now();
-    
-    if (invokerWs.readyState === invokerWs.OPEN) {
-      invokerWs.send(data);
-    }
-  });
+  // Note: Agent responses are handled by the agent route's central message handler
+  // This avoids duplicate listeners on the agent WebSocket
   
   const idleCheck = setInterval(() => {
     if (Date.now() - lastActivity > config.relayIdleTimeoutMs) {

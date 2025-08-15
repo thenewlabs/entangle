@@ -9,7 +9,7 @@ import {
 } from '@sunpix/entangle-protocol';
 import { aeadEncrypt } from '@sunpix/entangle-crypto';
 import { encode } from 'cborg';
-import type { Session } from './relay.js';
+import { type Session, sendRelayResponse } from './relay.js';
 
 const logger = createLogger('runner');
 
@@ -100,7 +100,7 @@ function sendStdout(session: Session, commandId: string, chunk: Buffer): void {
   const encrypted = aeadEncrypt(session.keys.K_enc, FrameType.STDOUT, msg.ctr, msg.msg);
   const frame = encodeFrame(FrameType.STDOUT, encode(encrypted));
   
-  session.ws.send(frame);
+  sendRelayResponse(session, frame);
 }
 
 function sendStderr(session: Session, commandId: string, chunk: Buffer): void {
@@ -117,7 +117,7 @@ function sendStderr(session: Session, commandId: string, chunk: Buffer): void {
   const encrypted = aeadEncrypt(session.keys.K_enc, FrameType.STDERR, msg.ctr, msg.msg);
   const frame = encodeFrame(FrameType.STDERR, encode(encrypted));
   
-  session.ws.send(frame);
+  sendRelayResponse(session, frame);
 }
 
 function sendExit(
@@ -142,7 +142,7 @@ function sendExit(
   const encrypted = aeadEncrypt(session.keys.K_enc, FrameType.EXIT, msg.ctr, msg.msg);
   const frame = encodeFrame(FrameType.EXIT, encode(encrypted));
   
-  session.ws.send(frame);
+  sendRelayResponse(session, frame);
 }
 
 function getMinimalEnv(): NodeJS.ProcessEnv {

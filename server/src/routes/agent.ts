@@ -30,6 +30,13 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
         }
       } else if (msg.type === 'HEARTBEAT' && namespace) {
         routing.updateHeartbeat(namespace);
+      } else if (msg.type === 'RELAY_RESPONSE') {
+        // Route the message to the appropriate invoker
+        const invoker = routing.findInvoker(msg.socketId);
+        if (invoker && invoker.ws.readyState === ws.OPEN) {
+          // Send the unwrapped frame to the invoker
+          invoker.ws.send(Buffer.from(msg.frame, 'base64'));
+        }
       }
     } catch (error) {
       logger.error({ error }, 'Failed to handle agent message');

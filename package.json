@@ -11,8 +11,7 @@
     "web"
   ],
   "scripts": {
-    "build": "npm run build --workspaces",
-    "build:dist": "npm run build && node scripts/build-dist.js",
+    "build": "npm run build --workspaces && node scripts/build-dist.js",
     "dev": "npm run dev --workspace=@sunpix/entangle-server",
     "test": "vitest",
     "test:watch": "vitest --watch",

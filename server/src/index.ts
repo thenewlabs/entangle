@@ -31,12 +31,33 @@ export async function startServer(): Promise<void> {
     res.json({ status: 'ok', namespaces: routing.getNamespaceCount() });
   });
   
-  const webDistPath = join(__dirname, '../../web/dist');
-  if (existsSync(webDistPath)) {
+  // Try multiple paths to find the web dist directory
+  const possibleWebPaths = [
+    join(__dirname, 'web'),           // When running from dist/server.js
+    join(__dirname, '../web'),        // Alternative dist structure
+    join(__dirname, '../../web/dist') // When running from server/dist/index.js
+  ];
+  
+  let webDistPath: string | undefined;
+  for (const path of possibleWebPaths) {
+    if (existsSync(path) && existsSync(join(path, 'index.html'))) {
+      webDistPath = path;
+      logger.info({ webDistPath }, 'Found web assets');
+      break;
+    }
+  }
+  
+  if (webDistPath) {
+    // Serve static files first
     app.use(express.static(webDistPath));
+    
+    // Catch all routes to serve the SPA for client-side routing
+    // This includes capability URLs like /ns_ABC123/capId_xyz
     app.get('*', (_req, res) => {
       res.sendFile(join(webDistPath, 'index.html'));
     });
+  } else {
+    logger.warn('Web assets not found');
   }
   
   const wss = new WebSocketServer({ noServer: true });

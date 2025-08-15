@@ -70,6 +70,9 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
     ws.send(JSON.stringify(hello));
   });
   
+  // Store active relay sessions
+  const relaySessions = new Map<string, any>();
+  
   ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
@@ -81,6 +84,9 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         // Create capabilities for each tool if none exist
         if (state.capabilities.size === 0) {
           await createCapabilitiesForTools(state);
+        } else {
+          // Display existing capabilities
+          displayCapabilities(state);
         }
         
         for (const capId of state.capabilities.keys()) {
@@ -97,11 +103,30 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         
         logger.info({ capId, socketId }, 'Invoker connected');
         
-        // Find the tool path from the capability
-        const toolPath = cap.tool || state.tools[0];
-        handleInvokerConnection(state.ws!, socketId, cap, toolPath);
+        // Pass the whitelisted tools from the capability or agent state
+        const whitelistedTools = cap.tools || state.tools;
+        const session = await handleInvokerConnection(state.ws!, socketId, cap, whitelistedTools);
+        relaySessions.set(socketId, session);
+      } else if (msg.type === 'RELAY_MSG') {
+        // Handle forwarded frame from invoker
+        const session = relaySessions.get(msg.socketId);
+        if (session && session.handleFrame) {
+          const frameData = Buffer.from(msg.frame, 'base64');
+          session.handleFrame(frameData);
+        }
+      } else if (msg.type === 'INVOKER_DISCONNECT') {
+        // Clean up relay session
+        const session = relaySessions.get(msg.socketId);
+        if (session && session.cleanup) {
+          session.cleanup();
+        }
+        relaySessions.delete(msg.socketId);
       }
     } catch (error) {
+      // If it's not JSON, it might be a legacy binary frame - ignore it
+      if (data instanceof Buffer) {
+        return;
+      }
       logger.error({ error }, 'Failed to handle message');
     }
   });
@@ -118,30 +143,35 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
 
 async function createCapabilitiesForTools(state: AgentState): Promise<void> {
   const config = getConfig();
-  const relayUrl = config.relayUrl || config.publicOrigin || 'http://localhost:8080';
+  // Use the server URL provided when starting the agent
+  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'http://localhost:8080';
   
+  // Create a single capability that works for all whitelisted tools
+  const cap = await createCapability({
+    namespace: state.namespace!,
+    tool: '*', // Special marker for multi-tool capability
+    singleRun: false,
+  });
+  
+  // Store the capability with reference to all tools
+  cap.tools = state.tools; // Add tools array to capability
+  state.capabilities.set(cap.capId, cap);
+  
+  const link = `${relayUrl}/${cap.namespace}/${cap.capId}#S=${cap.S}`;
+  
+  console.log('\n=====================================');
+  console.log(`Multi-tool capability created`);
+  console.log(`namespace: ${cap.namespace}`);
+  console.log(`capId: ${cap.capId}`);
+  console.log(`S: ${cap.S}`);
+  console.log(`\nWhitelisted tools:`);
   for (const tool of state.tools) {
-    const cap = await createCapability({
-      namespace: state.namespace!,
-      tool,
-      singleRun: true,
-    });
-    
-    state.capabilities.set(cap.capId, cap);
-    
-    const toolName = tool.split('/').pop() || 'tool';
-    const link = `${relayUrl}/${cap.namespace}/${cap.capId}#S=${cap.S}`;
-    
-    console.log('\n=====================================');
-    console.log(`Capability created for tool: ${tool}`);
-    console.log(`namespace: ${cap.namespace}`);
-    console.log(`capId: ${cap.capId}`);
-    console.log(`S: ${cap.S}`);
-    console.log(`\nWeb link: ${link}`);
-    console.log(`\nInvoke command example:`);
-    console.log(`entangle-invoke "${link}" ${toolName} --help`);
-    console.log('=====================================\n');
+    console.log(`  - ${tool}`);
   }
+  console.log(`\nWeb link: ${link}`);
+  console.log(`\nInvoke command example:`);
+  console.log(`entangle-invoke --namespace ${cap.namespace} --cap-id ${cap.capId} --secret-s ${cap.S} --tool <toolname> --argv '["--help"]'`);
+  console.log('=====================================\n');
 }
 
 function announceCapability(state: AgentState, capId: string): void {
@@ -165,4 +195,35 @@ function sendHeartbeat(state: AgentState): void {
 
 function getMachineId(): string {
   return require('crypto').randomBytes(16).toString('hex');
+}
+
+function displayCapabilities(state: AgentState): void {
+  if (state.capabilities.size === 0) return;
+  
+  const config = getConfig();
+  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'http://localhost:8080';
+  
+  console.log('\n=====================================');
+  console.log('Using existing capabilities:');
+  
+  for (const [capId, cap] of state.capabilities) {
+    console.log(`\nnamespace: ${state.namespace}`);
+    console.log(`capId: ${capId}`);
+    console.log(`S: ${cap.S}`);
+    
+    if (cap.tools) {
+      console.log(`\nWhitelisted tools:`);
+      for (const tool of cap.tools) {
+        console.log(`  - ${tool}`);
+      }
+    } else if (cap.tool) {
+      console.log(`tool: ${cap.tool}`);
+    }
+    
+    const link = `${relayUrl}/${state.namespace}/${capId}#S=${cap.S}`;
+    console.log(`\nWeb link: ${link}`);
+    console.log(`\nInvoke command example:`);
+    console.log(`entangle-invoke --namespace ${state.namespace} --cap-id ${capId} --secret-s ${cap.S} --tool <toolname> --argv '["--help"]'`);
+  }
+  console.log('=====================================\n');
 }
