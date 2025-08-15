@@ -14,6 +14,7 @@ export function loadConfig(): void {
 
 export interface Config {
   port: number;
+  host: string;
   publicOrigin: string;
   maxFrameBytes: number;
   relayIdleTimeoutMs: number;
@@ -27,6 +28,7 @@ export interface Config {
   agentAllowedCwd: string[] | undefined;
   maxArgCount: number;
   maxArgLen: number;
+  relayUrl: string | undefined;
 }
 
 export function getConfig(): Config {
@@ -34,6 +36,7 @@ export function getConfig(): Config {
   
   return {
     port: parseInt(process.env.PORT || '8080', 10),
+    host: process.env.HOST || '0.0.0.0',
     publicOrigin: process.env.PUBLIC_ORIGIN || 'http://localhost:8080',
     maxFrameBytes: parseInt(process.env.MAX_FRAME_BYTES || '1048576', 10),
     relayIdleTimeoutMs: parseInt(process.env.RELAY_IDLE_TIMEOUT_MS || '120000', 10),
@@ -47,5 +50,6 @@ export function getConfig(): Config {
     agentAllowedCwd: process.env.AGENT_ALLOWED_CWD?.split(':').filter(Boolean),
     maxArgCount: parseInt(process.env.MAX_ARG_COUNT || '64', 10),
     maxArgLen: parseInt(process.env.MAX_ARG_LEN || '4096', 10),
+    relayUrl: process.env.RELAY_URL,
   };
 }

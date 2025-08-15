@@ -1,56 +1,74 @@
 #!/usr/bin/env node
 
-import { Command } from 'commander';
 import { runCommand } from './run.js';
 import { createLogger } from '@sunpix/entangle-utils';
 
 const logger = createLogger('invoke');
 
-const program = new Command();
-
-program
-  .name('entangle-invoke')
-  .description('Invoke remote CLI tools via Entangle')
-  .version('1.0.0')
-  .requiredOption('--namespace <ns>', 'Namespace from agent')
-  .requiredOption('--cap-id <id>', 'Capability ID')
-  .requiredOption('--secret-s <secret>', 'Secret key S')
-  .requiredOption('--tool <tool>', 'Tool to run')
-  .requiredOption('--argv <json>', 'Arguments as JSON array')
-  .option('--cwd <path>', 'Working directory')
-  .option('--server <url>', 'Server URL', 'http://localhost:8080')
-  .option('--abort-after-ms <ms>', 'Abort after milliseconds')
-  .option('--max-out-bytes <bytes>', 'Maximum output bytes')
-  .action(async (options) => {
-    try {
-      let argv: string[];
-      try {
-        argv = JSON.parse(options.argv);
-        if (!Array.isArray(argv)) {
-          throw new Error('argv must be an array');
-        }
-      } catch (error) {
-        logger.error('Invalid argv JSON');
-        process.exit(1);
-      }
-      
-      const exitCode = await runCommand({
-        namespace: options.namespace,
-        capId: options.capId,
-        S: options.secretS,
-        tool: options.tool,
-        argv,
-        cwd: options.cwd,
-        serverUrl: options.server,
-        abortAfterMs: options.abortAfterMs ? parseInt(options.abortAfterMs) : undefined,
-        maxOutBytes: options.maxOutBytes ? parseInt(options.maxOutBytes) : undefined,
-      });
-      
-      process.exit(exitCode);
-    } catch (error) {
-      logger.error({ error }, 'Command failed');
-      process.exit(1);
+function parseUrl(urlStr: string): { serverUrl: string; namespace: string; capId: string; S: string } {
+  try {
+    const url = new URL(urlStr);
+    const pathParts = url.pathname.split('/').filter(Boolean);
+    
+    if (pathParts.length !== 2) {
+      throw new Error('Invalid URL format. Expected: https://server/namespace/capId#S=secret');
     }
-  });
+    
+    const namespace = pathParts[0]!;
+    const capId = pathParts[1]!;
+    const hashPart = url.hash.slice(1);
+    
+    if (!hashPart || !hashPart.startsWith('S=')) {
+      throw new Error('Missing secret in URL hash. Expected: #S=secret');
+    }
+    
+    const S = hashPart.slice(2);
+    
+    const serverUrl = `${url.protocol}//${url.host}`;
+    
+    return { serverUrl, namespace, capId, S };
+  } catch (error) {
+    logger.error('Invalid URL format. Expected: https://server/namespace/capId#S=secret');
+    throw error;
+  }
+}
 
-program.parse();
+async function main() {
+  const args = process.argv.slice(2);
+  
+  if (args.length < 2) {
+    console.error('Usage: entangle-invoke <URL> <TOOL> [ARGS...]');
+    console.error('Example: entangle-invoke "https://suncoder.dev/ns_ABC123/capId#S=secret" claude --help');
+    process.exit(1);
+  }
+  
+  const [urlStr, tool, ...toolArgs] = args;
+  
+  if (!urlStr || !tool) {
+    console.error('Missing required arguments');
+    process.exit(1);
+  }
+  
+  try {
+    const { serverUrl, namespace, capId, S } = parseUrl(urlStr);
+    
+    const exitCode = await runCommand({
+      namespace,
+      capId,
+      S,
+      tool,
+      argv: toolArgs,
+      cwd: undefined,
+      serverUrl,
+      abortAfterMs: undefined,
+      maxOutBytes: undefined,
+    });
+    
+    process.exit(exitCode);
+  } catch (error) {
+    logger.error({ error }, 'Command failed');
+    process.exit(1);
+  }
+}
+
+main();

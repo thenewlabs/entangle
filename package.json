@@ -12,13 +12,19 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
+    "build:dist": "npm run build && node scripts/build-dist.js",
     "dev": "npm run dev --workspace=@sunpix/entangle-server",
     "test": "vitest",
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",
     "clean": "npm run clean --workspaces --if-present"
   },
-  "keywords": ["security", "relay", "cli", "remote"],
+  "keywords": [
+    "security",
+    "relay",
+    "cli",
+    "remote"
+  ],
   "author": "Sunpix",
   "license": "MIT",
   "engines": {
@@ -27,6 +33,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@vitest/coverage-v8": "^1.2.0",
+    "esbuild": "^0.25.9",
     "typescript": "^5.3.3",
     "vitest": "^1.2.0"
   }

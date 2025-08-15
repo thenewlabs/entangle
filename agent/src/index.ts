@@ -16,22 +16,28 @@ program
 program
   .command('start')
   .description('Start the agent and register with server')
-  .option('--tool <path>', 'Path to the tool to expose')
-  .option('--server <url>', 'Server URL', 'http://localhost:8080')
+  .option('--tool <path...>', 'Path(s) to the tool(s) to expose (can specify multiple)')
+  .option('--server <url>', 'Server URL')
   .option('--policy-file <path>', 'Path to policy JSON file')
   .action(async (options) => {
     try {
       const config = getConfig();
-      const toolPath = options.tool || config.agentTool;
+      const serverUrl = options.server || config.relayUrl || 'http://localhost:8080';
       
-      if (!toolPath) {
+      // Handle multiple tools
+      let tools: string[] = [];
+      if (options.tool && options.tool.length > 0) {
+        tools = options.tool;
+      } else if (config.agentTool) {
+        tools = [config.agentTool];
+      } else {
         logger.error('No tool specified. Use --tool or set AGENT_TOOL');
         process.exit(1);
       }
       
       await startAgent({
-        toolPath,
-        serverUrl: options.server,
+        tools,
+        serverUrl,
         policyFile: options.policyFile,
       });
     } catch (error) {
@@ -44,14 +50,15 @@ program
   .command('create-cap')
   .description('Create a new capability')
   .option('--namespace <ns>', 'Namespace from server registration')
+  .option('--tool <path>', 'Path to the tool for this capability')
   .option('--single-run', 'Allow only one run per session', true)
   .action(async (options) => {
     try {
       const config = getConfig();
-      const toolPath = config.agentTool;
+      const toolPath = options.tool || config.agentTool;
       
       if (!toolPath) {
-        logger.error('No tool configured. Set AGENT_TOOL');
+        logger.error('No tool specified. Use --tool or set AGENT_TOOL');
         process.exit(1);
       }
       
@@ -66,7 +73,7 @@ program
         singleRun: options.singleRun,
       });
       
-      console.log('Capability created:');
+      console.log('\nCapability created:');
       console.log(`namespace: ${cap.namespace}`);
       console.log(`capId: ${cap.capId}`);
       console.log(`S: ${cap.S}`);
@@ -74,8 +81,14 @@ program
       console.log(`policy: singleRun=${cap.policy.singleRun}`);
       
       const config2 = getConfig();
-      const link = `${config2.publicOrigin}/${cap.namespace}/${cap.capId}#S=${cap.S}`;
+      const relayUrl = config2.relayUrl || config2.publicOrigin || 'http://localhost:8080';
+      const link = `${relayUrl}/${cap.namespace}/${cap.capId}#S=${cap.S}`;
       console.log(`\nWeb link: ${link}`);
+      
+      // Extract tool name from path
+      const toolName = toolPath.split('/').pop() || 'tool';
+      console.log(`\nInvoke command example:`);
+      console.log(`entangle-invoke "${link}" ${toolName} --help`);
     } catch (error) {
       logger.error({ error }, 'Failed to create capability');
       process.exit(1);

@@ -19,7 +19,8 @@ export function InvokeView({ capability }: Props) {
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);
   const [cwd, setCwd] = useState('');
-  const [args, setArgs] = useState('');
+  const [command, setCommand] = useState('');
+  const [availableTools, setAvailableTools] = useState<string[]>([]);
   
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -56,6 +57,11 @@ export function InvokeView({ capability }: Props) {
     
     setClient(relayClient);
     
+    // For now, we'll infer tools from the capability URL pattern
+    // In a full implementation, this could be fetched from the server
+    // or embedded in the capability metadata
+    setAvailableTools(['claude', 'ls', 'cat', 'echo']);
+    
     relayClient.connect().catch(console.error);
     
     return () => {
@@ -65,12 +71,20 @@ export function InvokeView({ capability }: Props) {
   }, [capability]);
   
   const handleRun = async () => {
-    if (!client || !connected || running) return;
+    if (!client || !connected || running || !command.trim()) return;
     
     try {
-      const argv = args.split(' ').filter(Boolean);
+      const parts = command.trim().split(' ');
+      const tool = parts[0];
+      const argv = parts.slice(1);
+      
+      if (!tool) {
+        console.error('No tool specified');
+        return;
+      }
+      
       setRunning(true);
-      await client.run('claude', argv, cwd || undefined);
+      await client.run(tool, argv, cwd || undefined);
     } catch (error) {
       console.error('Failed to run:', error);
       setRunning(false);
@@ -86,6 +100,11 @@ export function InvokeView({ capability }: Props) {
     <div className="app">
       <div className="header">
         <h1>Entangle Terminal</h1>
+        {availableTools.length > 0 && (
+          <div className="tools-hint">
+            Available tools: {availableTools.join(', ')}
+          </div>
+        )}
         <div className="controls">
           <input
             type="text"
@@ -96,10 +115,16 @@ export function InvokeView({ capability }: Props) {
           />
           <input
             type="text"
-            placeholder="Arguments"
-            value={args}
-            onChange={(e) => setArgs(e.target.value)}
+            placeholder="Command (e.g., claude --help, ls -la)"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !running) {
+                handleRun();
+              }
+            }}
             disabled={running}
+            style={{ flex: 1 }}
           />
           {running ? (
             <button onClick={handleAbort}>Abort</button>

@@ -65,8 +65,8 @@ export async function startServer(): Promise<void> {
     }
   });
   
-  server.listen(config.port, () => {
-    logger.info({ port: config.port }, 'Server started');
+  server.listen(config.port, config.host, () => {
+    logger.info({ port: config.port, host: config.host }, 'Server started');
   });
   
   process.on('SIGINT', () => {

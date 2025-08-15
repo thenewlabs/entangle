@@ -4,12 +4,12 @@ import { FrameType, encodeFrame } from '@sunpix/entangle-protocol';
 // import { generateNamespace } from '@sunpix/entangle-crypto';
 import { encode } from 'cborg';
 import { handleInvokerConnection } from './relay.js';
-import { loadCapabilities } from './capability.js';
+import { loadCapabilities, createCapability } from './capability.js';
 
 const logger = createLogger('agent');
 
 interface AgentOptions {
-  toolPath: string;
+  tools: string[];
   serverUrl: string;
   policyFile?: string;
 }
@@ -17,18 +17,20 @@ interface AgentOptions {
 interface AgentState {
   namespace?: string;
   ws?: WebSocket;
-  toolPath: string;
+  tools: string[];
   capabilities: Map<string, any>;
+  serverUrl: string;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
   const config = getConfig();
   const state: AgentState = {
-    toolPath: options.toolPath,
+    tools: options.tools,
     capabilities: new Map(),
+    serverUrl: options.serverUrl,
   };
   
-  logger.info({ tool: options.toolPath }, 'Starting agent');
+  logger.info({ tools: options.tools }, 'Starting agent with tools');
   
   const caps = await loadCapabilities();
   for (const cap of caps) {
@@ -62,7 +64,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
     const hello = {
       type: 'CLIENT_HELLO',
       machineId: getMachineId(),
-      tools: [state.toolPath],
+      tools: state.tools,
     };
     
     ws.send(JSON.stringify(hello));
@@ -75,6 +77,11 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       if (msg.type === 'ASSIGN') {
         state.namespace = msg.namespace;
         logger.info({ namespace: msg.namespace }, 'Namespace assigned');
+        
+        // Create capabilities for each tool if none exist
+        if (state.capabilities.size === 0) {
+          await createCapabilitiesForTools(state);
+        }
         
         for (const capId of state.capabilities.keys()) {
           announceCapability(state, capId);
@@ -90,7 +97,9 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         
         logger.info({ capId, socketId }, 'Invoker connected');
         
-        handleInvokerConnection(state.ws!, socketId, cap, state.toolPath);
+        // Find the tool path from the capability
+        const toolPath = cap.tool || state.tools[0];
+        handleInvokerConnection(state.ws!, socketId, cap, toolPath);
       }
     } catch (error) {
       logger.error({ error }, 'Failed to handle message');
@@ -105,6 +114,34 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
     logger.info('Disconnected from server');
     setTimeout(() => connectToServer(state, serverUrl), 5000);
   });
+}
+
+async function createCapabilitiesForTools(state: AgentState): Promise<void> {
+  const config = getConfig();
+  const relayUrl = config.relayUrl || config.publicOrigin || 'http://localhost:8080';
+  
+  for (const tool of state.tools) {
+    const cap = await createCapability({
+      namespace: state.namespace!,
+      tool,
+      singleRun: true,
+    });
+    
+    state.capabilities.set(cap.capId, cap);
+    
+    const toolName = tool.split('/').pop() || 'tool';
+    const link = `${relayUrl}/${cap.namespace}/${cap.capId}#S=${cap.S}`;
+    
+    console.log('\n=====================================');
+    console.log(`Capability created for tool: ${tool}`);
+    console.log(`namespace: ${cap.namespace}`);
+    console.log(`capId: ${cap.capId}`);
+    console.log(`S: ${cap.S}`);
+    console.log(`\nWeb link: ${link}`);
+    console.log(`\nInvoke command example:`);
+    console.log(`entangle-invoke "${link}" ${toolName} --help`);
+    console.log('=====================================\n');
+  }
 }
 
 function announceCapability(state: AgentState, capId: string): void {
