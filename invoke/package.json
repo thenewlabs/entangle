@@ -1,0 +1,26 @@
+{
+  "name": "@sunpix/entangle-invoke",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "entangle-invoke": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@sunpix/entangle-protocol": "^1.0.0",
+    "@sunpix/entangle-crypto": "^1.0.0",
+    "@sunpix/entangle-utils": "^1.0.0",
+    "ws": "^8.17.1",
+    "commander": "^12.0.0",
+    "cborg": "^4.2.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.3"
+  }
+}
