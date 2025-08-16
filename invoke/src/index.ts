@@ -38,6 +38,8 @@ async function main() {
     outputMode = args[outputModeIndex + 1] || 'text';
     args.splice(outputModeIndex, 2);
   }
+  // Propagate to child loggers
+  process.env.OUTPUT_MODE = outputMode;
   
   const logger = createLogger('invoke', outputMode);
   const output = new OutputHandler({ mode: parseOutputMode(outputMode) });

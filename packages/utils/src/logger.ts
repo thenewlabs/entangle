@@ -1,4 +1,5 @@
 import pino from 'pino';
+import { Writable } from 'stream';
 import { OutputHandler, parseOutputMode } from './output.js';
 
 interface LoggerWithOutput extends pino.Logger {
@@ -10,32 +11,33 @@ export function createLogger(name: string, outputMode?: string): pino.Logger {
   const mode = parseOutputMode(outputMode || process.env.OUTPUT_MODE);
   const outputHandler = new OutputHandler({ mode });
   
-  // Create a custom destination that routes to OutputHandler
-  const customDestination = pino.destination({
-    write(chunk: string) {
+  // Create a custom writable stream that routes Pino logs through OutputHandler
+  const destination = new Writable({
+    write(chunk, _encoding, callback) {
       try {
-        const obj = JSON.parse(chunk);
-        const { level, msg, ...data } = obj;
+        const str = typeof chunk === 'string' ? chunk : chunk.toString();
+        const obj = JSON.parse(str);
+        const { level: lvl, msg, ...data } = obj as any;
         
-        // Convert pino level numbers to names
-        const levelName = pino.levels.labels[level as keyof typeof pino.levels.labels] || 'info';
+        // Convert pino numeric level to name; if already a string, keep it
+        const levelName = typeof lvl === 'number' 
+          ? (pino.levels.labels[lvl as keyof typeof pino.levels.labels] || 'info')
+          : (typeof lvl === 'string' ? (lvl as string) : 'info');
         
-        // Skip the 'name' field from data if it's just the logger name
-        if (data.name === name) {
-          delete data.name;
-        }
+        // Remove boilerplate fields
+        if ((data as any).name === name) delete (data as any).name;
+        delete (data as any).time;
+        delete (data as any).pid;
+        delete (data as any).hostname;
         
-        // Skip time, pid, hostname fields
-        delete data.time;
-        delete data.pid;
-        delete data.hostname;
-        
-        // Only include data if there are meaningful fields
         const hasData = Object.keys(data).length > 0;
         outputHandler.log(levelName, msg, hasData ? data : undefined);
-      } catch (err) {
-        // Fallback for non-JSON output
-        outputHandler.write(chunk);
+      } catch (_err) {
+        // Fallback for non-JSON chunk
+        const str = typeof chunk === 'string' ? chunk : chunk.toString();
+        outputHandler.write(str);
+      } finally {
+        callback();
       }
     }
   });
@@ -48,7 +50,7 @@ export function createLogger(name: string, outputMode?: string): pino.Logger {
         level: (label: string) => ({ level: label }),
       },
     },
-    customDestination
+    destination as unknown as pino.DestinationStream
   ) as LoggerWithOutput;
   
   // Attach outputHandler for direct access if needed

@@ -13,7 +13,7 @@
   "scripts": {
     "build": "npm run build --workspaces && node scripts/build-dist.js",
     "dev": "npm run dev --workspace=@sunpix/entangle-server",
-    "test": "vitest",
+    "test": "vitest run",
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",
     "clean": "npm run clean --workspaces --if-present"

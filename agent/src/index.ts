@@ -19,6 +19,8 @@ program
   .option('--server <url>', 'Server URL')
   .action(async (options) => {
     try {
+      // Propagate output mode to all loggers in this process
+      process.env.OUTPUT_MODE = program.opts().outputMode;
       const outputMode = parseOutputMode(program.opts().outputMode);
       const output = new OutputHandler({ mode: outputMode });
       
@@ -46,6 +48,7 @@ program
   .option('--single-run', 'Allow only one run per session (default: multiple runs allowed)')
   .action(async (options) => {
     try {
+      process.env.OUTPUT_MODE = program.opts().outputMode;
       const outputMode = parseOutputMode(program.opts().outputMode);
       const output = new OutputHandler({ mode: outputMode });
       

@@ -78,7 +78,8 @@ export function SingleCommandView({ capability }: SingleCommandViewProps) {
         });
         
         // Combine HMAC and nonceB for AUTH1 payload
-        const nonceBBytes = new TextEncoder().encode(nonceB);
+        // Important: send the same representation used in HMAC (hex)
+        const nonceBBytes = new TextEncoder().encode(nonceBHex);
         const auth1Payload = new Uint8Array(32 + nonceBBytes.length);
         auth1Payload.set(auth1Hmac, 0);
         auth1Payload.set(nonceBBytes, 32);

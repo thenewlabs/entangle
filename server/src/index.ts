@@ -16,6 +16,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 export async function startServer(outputMode: string = 'text'): Promise<void> {
+  // Ensure all loggers in this process share the same output mode
+  process.env.OUTPUT_MODE = outputMode;
   const logger = createLogger('server', outputMode);
   const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
   output.version('Entangle Server', getVersionInfo());
