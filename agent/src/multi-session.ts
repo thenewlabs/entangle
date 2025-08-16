@@ -67,7 +67,18 @@ async function sendEncrypted(
   const ciphertext = await streamAeadEncrypt(session.keys.K_enc, plaintext, aad);
   const frame = encodeFrame(frameType, ciphertext);
 
-  session.ws.send(frame);
+  // Relay via server: wrap in JSON envelope so the server can
+  // forward to the correct invoker socket.
+  try {
+    const envelope = {
+      type: 'RELAY_RESPONSE',
+      socketId: session.socketId,
+      frame: Buffer.from(frame).toString('base64'),
+    };
+    (session.ws as any).send(JSON.stringify(envelope));
+  } catch {
+    // Best-effort fallback: avoid crashing handler on send errors
+  }
 }
 
 // Handle stream open request
@@ -328,18 +339,26 @@ export async function handleMultiStreamFrame(
       message = decode(plaintext) as any;
     } catch (primaryErr: any) {
       output.warn(`Stream decrypt failed for type=${frame.type}, payloadLen=${frame.payload.length}: ${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}`);
+      // Secondary attempt: try minimal AAD = single-byte frame type for cross-impl compatibility
       try {
-        // Fallback: treat payload as CBOR { nonce, cipher }
-        const enc = decode(frame.payload) as any;
-        if (enc && enc.nonce && enc.cipher) {
-          const decoded = aeadDecrypt(session.keys.K_enc, frame.type, enc.nonce, enc.cipher);
-          message = decoded as any;
-        } else {
+        const altAad = new Uint8Array([frame.type]);
+        const plaintextAlt = await streamAeadDecrypt(session.keys.K_enc, frame.payload, altAad);
+        message = decode(plaintextAlt) as any;
+        output.info(`Stream decrypt succeeded with alternate AAD for type=${frame.type}`);
+      } catch (_altErr) {
+        try {
+          // Fallback: treat payload as CBOR { nonce, cipher }
+          const enc = decode(frame.payload) as any;
+          if (enc && enc.nonce && enc.cipher) {
+            const decoded = aeadDecrypt(session.keys.K_enc, frame.type, enc.nonce, enc.cipher);
+            message = decoded as any;
+          } else {
+            throw primaryErr;
+          }
+        } catch (_fallbackErr) {
+          output.warn(`Fallback decrypt also failed for type=${frame.type}`);
           throw primaryErr;
         }
-      } catch (_fallbackErr) {
-        output.warn(`Fallback decrypt also failed for type=${frame.type}`);
-        throw primaryErr;
       }
     }
 

@@ -48,10 +48,12 @@ export async function streamAeadDecrypt(
   const cipher = payload.slice(CRYPTO_PARAMS.NONCE_BYTES);
   
   try {
+    // NOTE: libsodium-wrappers signature is (nsec, cipher, aad, nonce, key)
+    // Keep it consistent with aeadDecrypt in index.ts
     const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+      null,
       cipher,
       aad,
-      null,
       nonce,
       K_enc
     );
