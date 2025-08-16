@@ -30,6 +30,8 @@ import { encode, decode } from 'cborg';
 import { runCommand } from './runner.js';
 import { PtyManager } from './pty.js';
 import type { CapabilityInfo } from './capability.js';
+import { handleMultiStreamFrame } from './multi-session.js';
+import { StreamCounters } from '@sunpix/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -112,6 +114,33 @@ export async function handleInvokerConnection(
 }
 
 async function handleFrame(session: Session, frame: { type: FrameType; payload: Uint8Array }): Promise<void> {
+  // Route multi-stream frames to the multi-stream handler
+  if (
+    frame.type === FrameType.STREAM_OPEN ||
+    frame.type === FrameType.STREAM_DATA ||
+    frame.type === FrameType.STREAM_RESIZE ||
+    frame.type === FrameType.STREAM_SIGNAL ||
+    frame.type === FrameType.STREAM_CLOSE ||
+    frame.type === FrameType.STREAM_ERROR ||
+    frame.type === FrameType.STREAM_EXIT
+  ) {
+    // Adapt legacy Session to MultiSession shape on the fly
+    const multiSession: any = {
+      socketId: session.socketId,
+      ws: session.ws,
+      cap: session.cap,
+      keys: session.keys,
+      counters: session.counters,
+      // Create a per-stream counter manager lazily within multi-session
+      streamCounters: new StreamCounters(),
+      authenticated: session.authenticated,
+      legacyMode: false,
+      hasRun: session.hasRun,
+    };
+    await handleMultiStreamFrame(multiSession as any, frame);
+    return;
+  }
+
   switch (frame.type) {
     case FrameType.AUTH1:
       await handleAuth1(session, frame.payload);
