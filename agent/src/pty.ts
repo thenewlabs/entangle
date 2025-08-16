@@ -1,4 +1,4 @@
-import { spawn as ptySpawn, IPty } from 'node-pty';
+import { spawn as ptySpawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 import { createLogger } from '@sunpix/entangle-utils';
 import { FrameType, TtyOpenMessage, TtyDataMessage, TtyResizeMessage, TtySignalMessage } from '@sunpix/entangle-protocol';
 // import type { Session } from './session.js';

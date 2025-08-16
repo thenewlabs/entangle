@@ -6,6 +6,9 @@
   "bin": {
     "entangle-agent": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -16,9 +19,9 @@
     "@sunpix/entangle-crypto": "^1.0.0",
     "@sunpix/entangle-protocol": "^1.0.0",
     "@sunpix/entangle-utils": "^1.0.0",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.11.14",
     "cborg": "^4.2.6",
     "commander": "^12.0.0",
-    "node-pty": "^1.0.0",
     "ws": "^8.17.1"
   },
   "devDependencies": {
