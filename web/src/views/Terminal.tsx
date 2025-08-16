@@ -240,6 +240,18 @@ export function TerminalView({ capability }: TerminalViewProps) {
       }
     };
   }, []);
+
+  // Auto-connect on mount if the CWD dialog is hidden
+  useEffect(() => {
+    if (!showCwdDialog) {
+      // No working directory prompt; start session immediately
+      // Intentionally not passing a cwd so server uses default
+      connect();
+    }
+    // Run only on initial mount to avoid double-connects
+    // when the dialog toggles from true -> false via user action
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   
   if (showCwdDialog) {
     return (
