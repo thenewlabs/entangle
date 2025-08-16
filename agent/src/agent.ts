@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { handleInvokerConnection } from './session.js';
 import { loadCapabilities, createCapability } from './capability.js';
 
@@ -13,21 +13,21 @@ interface AgentState {
   ws?: WebSocket;
   capabilities: Map<string, any>;
   serverUrl: string;
-  logger: ReturnType<typeof createLogger>;
+  output: OutputHandler;
   outputMode?: string;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
-  const logger = createLogger('agent', options.outputMode);
+  const output = new OutputHandler({ mode: parseOutputMode(options.outputMode || process.env.OUTPUT_MODE || 'text') });
   const config = getConfig();
   const state: AgentState = {
     capabilities: new Map(),
     serverUrl: options.serverUrl,
-    logger,
+    output,
     ...(options.outputMode && { outputMode: options.outputMode }),
   };
   
-  logger.info('Starting agent');
+  output.info('Starting agent');
   
   const caps = await loadCapabilities();
   for (const cap of caps) {
@@ -41,7 +41,7 @@ export async function startAgent(options: AgentOptions): Promise<void> {
   }, config.agentHeartbeatMs || 15000);
   
   process.on('SIGINT', () => {
-    state.logger.info('Shutting down');
+    state.output.info('Shutting down');
     state.ws?.close();
     process.exit(0);
   });
@@ -50,13 +50,13 @@ export async function startAgent(options: AgentOptions): Promise<void> {
 async function connectToServer(state: AgentState, serverUrl: string): Promise<void> {
   const wsUrl = serverUrl.replace(/^http/, 'ws') + '/agent/register';
   
-  state.logger.info({ url: wsUrl }, 'Connecting to server');
+  state.output.info(`Connecting to server: ${wsUrl}`);
   
   const ws = new WebSocket(wsUrl);
   state.ws = ws;
   
   ws.on('open', () => {
-    state.logger.info('Connected to server');
+    state.output.info('Connected to server');
     
     const hello = {
       type: 'CLIENT_HELLO',
@@ -75,7 +75,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       
       if (msg.type === 'ASSIGN') {
         state.agentId = msg.agentId;
-        state.logger.info({ agentId: msg.agentId }, 'Agent registered');
+        state.output.info(`Agent registered: ${msg.agentId}`);
         
         // Create capability if none exist
         if (state.capabilities.size === 0) {
@@ -94,11 +94,11 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         const cap = state.capabilities.get(capId);
         
         if (!cap) {
-          state.logger.warn({ capId }, 'Unknown capability');
+          state.output.warn(`Unknown capability: ${capId}`);
           return;
         }
         
-        state.logger.info({ capId, socketId }, 'Invoker connected');
+        state.output.info(`Invoker connected: socketId=${socketId}, capId=${capId}`);
         
         const session = await handleInvokerConnection(state.ws!, socketId, cap);
         relaySessions.set(socketId, session);
@@ -122,16 +122,16 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       if (data instanceof Buffer) {
         return;
       }
-      state.logger.error({ error }, 'Failed to handle message');
+      state.output.error('Failed to handle message', error instanceof Error ? error.message : String(error));
     }
   });
   
   ws.on('error', (error) => {
-    state.logger.error({ error }, 'WebSocket error');
+    state.output.error('WebSocket error', error instanceof Error ? error.message : String(error));
   });
   
   ws.on('close', () => {
-    state.logger.info('Disconnected from server');
+    state.output.info('Disconnected from server');
     setTimeout(() => connectToServer(state, serverUrl), 5000);
   });
 }
@@ -149,15 +149,15 @@ async function createAndDisplayCapability(state: AgentState): Promise<void> {
   
   const link = `${relayUrl}/cap/${cap.capId}#S=${cap.S}`;
   
-  state.logger.info('');
-  state.logger.info('=====================================');
-  state.logger.info('Capability created');
-  state.logger.info(`capId: ${cap.capId}`);
-  state.logger.info(`S: ${cap.S}`);
-  state.logger.info('');
-  state.logger.info(`Web URL: ${link}`);
-  state.logger.info('=====================================');
-  state.logger.info('');
+  state.output.info('');
+  state.output.info('=====================================');
+  state.output.info('Capability created');
+  state.output.info(`capId: ${cap.capId}`);
+  state.output.info(`S: ${cap.S}`);
+  state.output.info('');
+  state.output.info(`Web URL: ${link}`);
+  state.output.info('=====================================');
+  state.output.info('');
 }
 
 function announceCapability(state: AgentState, capId: string): void {
@@ -169,7 +169,7 @@ function announceCapability(state: AgentState, capId: string): void {
   };
   
   state.ws.send(JSON.stringify(announce));
-  state.logger.info({ capId }, 'Capability announced');
+  state.output.info(`Capability announced: ${capId}`);
 }
 
 function sendHeartbeat(state: AgentState): void {
@@ -193,19 +193,19 @@ function displayCapabilities(state: AgentState): void {
   const config = getConfig();
   const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'https://suncoder.dev';
   
-  state.logger.info('');
-  state.logger.info('=====================================');
-  state.logger.info('Using existing capabilities:');
+  state.output.info('');
+  state.output.info('=====================================');
+  state.output.info('Using existing capabilities:');
   
   for (const [capId, cap] of state.capabilities) {
-    state.logger.info('');
-    state.logger.info(`capId: ${capId}`);
-    state.logger.info(`S: ${cap.S}`);
+    state.output.info('');
+    state.output.info(`capId: ${capId}`);
+    state.output.info(`S: ${cap.S}`);
     
     const link = `${relayUrl}/cap/${capId}#S=${cap.S}`;
-    state.logger.info('');
-    state.logger.info(`Web URL: ${link}`);
+    state.output.info('');
+    state.output.info(`Web URL: ${link}`);
   }
-  state.logger.info('=====================================');
-  state.logger.info('');
+  state.output.info('=====================================');
+  state.output.info('');
 }

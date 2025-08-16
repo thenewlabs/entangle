@@ -4,9 +4,9 @@ import { promises as fs } from 'fs';
 import { chmod, stat } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { createLogger } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 
-const logger = createLogger('capability');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export interface CapabilityInfo {
   capId: string;
@@ -25,6 +25,7 @@ export async function createCapability(options: {
   
   const policy: Policy = {
     singleRun: options.singleRun ?? false,
+    maxStreams: 1, // Default to single stream for backward compatibility
   };
   
   const cap: CapabilityInfo = {
@@ -70,7 +71,7 @@ export async function loadCapabilities(): Promise<CapabilityInfo[]> {
       const s = await stat(capsFile);
       const mode = s.mode & 0o777;
       if (mode !== 0o600) {
-        logger.warn({ path: capsFile, mode: mode.toString(8) }, 'Insecure capability file permissions; expected 600');
+        output.warn(`Insecure capability file permissions: ${capsFile} has mode ${mode.toString(8)}; expected 600`);
       }
     } catch {}
     return JSON.parse(data);

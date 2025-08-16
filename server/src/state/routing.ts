@@ -1,7 +1,7 @@
 import type WebSocket from 'ws';
-import { createLogger } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 
-const logger = createLogger('routing');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 interface AgentInfo {
   ws: WebSocket;
@@ -33,7 +33,7 @@ export class RoutingState {
     
     this.agents.set(agentId, agent);
     
-    logger.info({ agentId, machineId }, 'Agent registered');
+    output.info(`Agent registered: ${agentId} (machine: ${machineId})`);
     
     ws.on('close', () => {
       this.removeAgent(agentId);
@@ -49,13 +49,13 @@ export class RoutingState {
     // Check if another agent already owns this capId
     const existingAgentId = this.capIdToAgent.get(capId);
     if (existingAgentId && existingAgentId !== agentId) {
-      logger.warn({ capId, agentId, existingAgentId }, 'Capability already owned by another agent');
+      output.warn(`Capability ${capId} already owned by agent ${existingAgentId} (requested by ${agentId})`);
       return false;
     }
     
     agent.capabilities.add(capId);
     this.capIdToAgent.set(capId, agentId);
-    logger.info({ agentId, capId }, 'Capability announced');
+    output.info(`Capability announced: ${capId} by agent ${agentId}`);
     
     return true;
   }
@@ -75,7 +75,7 @@ export class RoutingState {
     const relayBurst = parseInt(process.env.RELAY_BURST || '50', 10);
     const current = this.countInvokersForCap(capId);
     if (current >= relayBurst) {
-      logger.warn({ capId, current, relayBurst }, 'Too many concurrent invokers for capability');
+      output.warn(`Too many concurrent invokers for capability ${capId}: ${current}/${relayBurst}`);
       // Proactively close
       try { ws.close(1013, 'Over capacity'); } catch {}
       throw new Error('Over capacity');
@@ -90,7 +90,7 @@ export class RoutingState {
     
     this.invokers.set(invokerId, invoker);
     
-    logger.info({ capId, invokerId }, 'Invoker registered');
+    output.info(`Invoker registered: ${invokerId} for capability ${capId}`);
     
     ws.on('close', () => {
       this.removeInvoker(invokerId);
@@ -118,7 +118,7 @@ export class RoutingState {
     
     this.agents.delete(agentId);
     
-    logger.info({ agentId }, 'Agent removed');
+    output.info(`Agent removed: ${agentId}`);
   }
   
   private removeInvoker(invokerId: string): void {
@@ -127,7 +127,7 @@ export class RoutingState {
     
     this.invokers.delete(invokerId);
     
-    logger.info({ invokerId }, 'Invoker removed');
+    output.info(`Invoker removed: ${invokerId}`);
   }
   
   updateHeartbeat(agentId: string): void {
@@ -151,7 +151,7 @@ export class RoutingState {
     
     for (const [agentId, agent] of this.agents) {
       if (now - agent.lastHeartbeat > maxAge) {
-        logger.warn({ agentId }, 'Removing stale agent');
+        output.warn(`Removing stale agent: ${agentId}`);
         staleAgents.push(agentId);
       }
     }

@@ -1,10 +1,10 @@
 import { spawn as ptySpawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
-import { createLogger } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { FrameType, TtyOpenMessage, TtyDataMessage, TtyResizeMessage, TtySignalMessage } from '@sunpix/entangle-protocol';
 // import type { Session } from './session.js';
 import { resolveCwd, validateCwd } from './runner.js';
 
-const logger = createLogger('pty');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 interface PtySession {
   sessionId: string;
@@ -70,26 +70,26 @@ export class PtyManager {
           sessionId,
           chunk,
         }).catch((error: any) => {
-          logger.error({ error, sessionId }, 'Failed to send TTY_DATA');
+          output.error(`Failed to send TTY_DATA for session ${sessionId}`, error instanceof Error ? error.message : String(error));
         });
       });
 
       // Handle PTY exit
       ptyProcess.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
-        logger.info({ sessionId, exitCode, signal }, 'PTY process exited');
+        output.info(`PTY process exited for session ${sessionId}: exitCode=${exitCode}, signal=${signal}`);
         session.sendEncrypted(FrameType.TTY_EXIT, {
           sessionId,
           code: exitCode,
           signal,
         }).catch((error: any) => {
-          logger.error({ error, sessionId }, 'Failed to send TTY_EXIT');
+          output.error(`Failed to send TTY_EXIT for session ${sessionId}`, error instanceof Error ? error.message : String(error));
         });
         this.sessions.delete(sessionId);
       });
 
-      logger.info({ sessionId, cwd, cols, rows }, 'PTY session opened');
+      output.info(`PTY session opened: sessionId=${sessionId}, cwd=${cwd}, cols=${cols}, rows=${rows}`);
     } catch (error: any) {
-      logger.error({ error, sessionId }, 'Failed to spawn PTY');
+      output.error(`Failed to spawn PTY for session ${sessionId}`, error instanceof Error ? error.message : String(error));
       await session.sendError('INTERNAL_ERROR', 'Failed to spawn PTY');
     }
   }
@@ -118,7 +118,7 @@ export class PtyManager {
 
     ptySession.lastActivity = Date.now();
     ptySession.pty.resize(cols, rows);
-    logger.debug({ sessionId, cols, rows }, 'PTY resized');
+    output.debug(`PTY resized for session ${sessionId}: cols=${cols}, rows=${rows}`);
   }
 
   async handleTtySignal(session: any, msg: TtySignalMessage): Promise<void> {
@@ -143,7 +143,7 @@ export class PtyManager {
     const killSignal = signalMap[signal];
     if (killSignal) {
       ptySession.pty.kill(killSignal);
-      logger.info({ sessionId, signal }, 'Signal sent to PTY');
+      output.info(`Signal ${signal} sent to PTY session ${sessionId}`);
     }
   }
 
@@ -173,7 +173,7 @@ export class PtyManager {
 
     for (const [sessionId, ptySession] of this.sessions) {
       if (now - ptySession.lastActivity > idleTimeout) {
-        logger.info({ sessionId }, 'Closing idle PTY session');
+        output.info(`Closing idle PTY session: ${sessionId}`);
         ptySession.pty.kill('SIGHUP');
         // Let the onExit handler clean up the session
       }
@@ -186,7 +186,7 @@ export class PtyManager {
     }
 
     for (const [sessionId, ptySession] of this.sessions) {
-      logger.info({ sessionId }, 'Cleaning up PTY session');
+      output.info(`Cleaning up PTY session: ${sessionId}`);
       ptySession.pty.kill('SIGTERM');
     }
     this.sessions.clear();

@@ -103,18 +103,18 @@ export class OutputHandler {
       debug: '\x1b[90m',   // Gray
       reset: '\x1b[0m'
     };
-    
-    const levelUpper = level.toUpperCase().padEnd(5);
+  
+    const levelUpper = level.toLowerCase();
     
     if (isTTY && colors[level as keyof typeof colors]) {
-      return `${colors[level as keyof typeof colors]}[${levelUpper}]${colors.reset}`;
+      return `${colors[level as keyof typeof colors]}[${levelUpper}]${colors.reset}`
     }
 
     if (level === 'text') {
       return '';
     }
     
-    return `[${levelUpper}]`;
+    return `[${levelUpper}]`
   }
 
   private jsonOutput(level: string, message: string, data: any, timestamp?: string): void {

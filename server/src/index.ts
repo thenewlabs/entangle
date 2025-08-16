@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
+import { Command } from 'commander';
 import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { createLogger, getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { setupAgentRoute } from './routes/agent.js';
 import { setupRelayRoute } from './routes/relay.js';
 import { RoutingState } from './state/routing.js';
@@ -19,7 +20,6 @@ const __dirname = dirname(__filename);
 export async function startServer(outputMode: string = 'text'): Promise<void> {
   // Ensure all loggers in this process share the same output mode
   process.env.OUTPUT_MODE = outputMode;
-  const logger = createLogger('server', outputMode);
   const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
   output.version('Entangle Server', getVersionInfo());
   
@@ -47,7 +47,7 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
   for (const path of possibleWebPaths) {
     if (existsSync(path) && existsSync(join(path, 'index.html'))) {
       webDistPath = path;
-      logger.info({ webDistPath }, 'Found web assets');
+      output.info(`Found web assets at ${webDistPath}`);
       break;
     }
   }
@@ -62,7 +62,7 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
       res.sendFile(join(webDistPath, 'index.html'));
     });
   } else {
-    logger.warn('Web assets not found');
+    output.warn('Web assets not found');
   }
   
   const wss = new WebSocketServer({ noServer: true });
@@ -110,31 +110,43 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
   });
   
   server.listen(config.port, config.host, () => {
-    logger.info({ port: config.port, host: config.host }, 'Server started');
+    output.info(`Server started on ${config.host}:${config.port}`);
   });
   
   process.on('SIGINT', () => {
-    logger.info('Shutting down');
+    output.info('Shutting down');
     server.close();
     process.exit(0);
   });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  // Parse command line arguments
-  const args = process.argv.slice(2);
-  let outputMode = 'text';
-  
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--output-mode' && i + 1 < args.length) {
-      outputMode = args[i + 1] || 'text';
-      i++;
-    }
+  const program = new Command();
+
+  program
+    .name('entangle-server')
+    .description('Entangle blind relay server')
+    .version(getVersionInfo())
+    .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');
+
+  program
+    .command('start')
+    .description('Start the relay server')
+    .action(async () => {
+      try {
+        await startServer(program.opts().outputMode);
+      } catch (error) {
+        const outputMode = parseOutputMode(program.opts().outputMode);
+        const output = new OutputHandler({ mode: outputMode });
+        output.error('Failed to start server', error instanceof Error ? error.message : String(error));
+        process.exit(1);
+      }
+    });
+
+  // Default action when no command is specified
+  if (process.argv.length === 2 || (process.argv.length === 4 && process.argv[2] === '--output-mode')) {
+    program.outputHelp();
+  } else {
+    program.parse();
   }
-  
-  startServer(outputMode).catch((error) => {
-    const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
-    output.error('Failed to start server', error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  });
 }

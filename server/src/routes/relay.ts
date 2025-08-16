@@ -1,9 +1,9 @@
 import type WebSocket from 'ws';
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 // import { FrameReader } from '@sunpix/entangle-protocol';
 
-const logger = createLogger('relay-route');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export function setupRelayRoute(
   invokerWs: WebSocket,
@@ -14,7 +14,7 @@ export function setupRelayRoute(
   const agentWs = routing.findAgent(capId);
   
   if (!agentWs) {
-    logger.warn({ capId }, 'Agent not found for capability');
+    output.warn(`Agent not found for capability: ${capId}`);
     invokerWs.close(1008, 'Capability not found');
     return;
   }
@@ -27,7 +27,7 @@ export function setupRelayRoute(
     return;
   }
   
-  logger.info({ capId, invokerId }, 'Relay established');
+  output.info(`Relay established: capability=${capId}, invokerId=${invokerId}`);
   
   agentWs.send(JSON.stringify({
     type: 'INVOKER_CONNECT',
@@ -47,7 +47,7 @@ export function setupRelayRoute(
     
     // Enforce max frame size on incoming chunks to avoid amplification
     if (data.length > config.maxFrameBytes) {
-      logger.warn({ size: data.length, max: config.maxFrameBytes, invokerId }, 'Dropping oversize message from invoker');
+      output.warn(`Dropping oversize message from invoker: size=${data.length}, max=${config.maxFrameBytes}, invokerId=${invokerId}`);
       try { invokerWs.close(1009, 'Frame too large'); } catch {}
       return;
     }
@@ -67,7 +67,7 @@ export function setupRelayRoute(
   
   const idleCheck = setInterval(() => {
     if (Date.now() - lastActivity > config.relayIdleTimeoutMs) {
-      logger.info({ invokerId }, 'Closing idle relay');
+      output.info(`Closing idle relay: ${invokerId}`);
       invokerWs.close(1000, 'Idle timeout');
       clearInterval(idleCheck);
     }
@@ -75,7 +75,7 @@ export function setupRelayRoute(
   
   invokerWs.on('close', () => {
     clearInterval(idleCheck);
-    logger.info({ invokerId }, 'Invoker disconnected');
+    output.info(`Invoker disconnected: ${invokerId}`);
     
     agentWs.send(JSON.stringify({
       type: 'INVOKER_DISCONNECT',
@@ -84,6 +84,6 @@ export function setupRelayRoute(
   });
   
   invokerWs.on('error', (error) => {
-    logger.error({ error, invokerId }, 'Invoker WebSocket error');
+    output.error(`Invoker WebSocket error (invokerId: ${invokerId})`, error instanceof Error ? error.message : String(error));
   });
 }

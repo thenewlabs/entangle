@@ -1,6 +1,6 @@
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 
-const logger = createLogger('ws-rate-limit');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 interface Bucket {
   tokens: number;
@@ -60,7 +60,7 @@ export class PerIpRateLimiter {
     bucket.cooldownUntil = now + backoffMs;
     this.buckets.set(ip, bucket);
 
-    logger.warn({ ip, strikes: bucket.strikes, backoffMs }, 'WS upgrade rate-limited');
+    output.warn(`WS upgrade rate-limited for IP ${ip}: strikes=${bucket.strikes}, backoff=${backoffMs}ms`);
     return { allowed: false, retryAfterMs: backoffMs };
   }
 }
