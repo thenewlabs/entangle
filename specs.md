@@ -2,7 +2,11 @@
 
 ## Overview
 
-Entangle exposes a **single whitelisted CLI tool** from a client machine to remote invokers via a blind relay. The relay only routes ciphertext, never sees secrets, commands, outputs, or cwd. Namespaces are created by the server. Invokers can use the browser SPA or a headless CLI. The non-browser CLI accepts **namespace**, **capId** (includes salt), and **S** (secret) as arguments. No URLs required.
+Entangle is a secure relay system for exposing whitelisted CLI tools and terminal sessions from a client machine to remote invokers via a blind relay. The relay only routes ciphertext, never sees secrets, commands, outputs, or cwd. Namespaces are created by the server. Invokers can use the browser SPA or a headless CLI.
+
+The system supports two modes:
+1. **Command Execution Mode**: Run specific commands with arguments
+2. **Terminal Mode**: Interactive PTY (pseudo-terminal) sessions for full shell access
 
 ### Components
 
@@ -20,7 +24,9 @@ All build to separate outputs, share code via workspaces.
 
 * Server only learns routing metadata (namespace, capId). It never learns S, commands, args, outputs, or cwd.
 * Messages are end-to-end AEAD encrypted. Replay and reordering are blocked with monotonic counters.
-* Capability strictly binds to one tool. The agent enforces that only that tool can run and that **exactly one RUN** is allowed per session by default. No argument can be appended by the server because the relay never sees plaintext and the agent validates the AEAD with counters.
+* **Single-run mode** (default): Exactly one RUN is allowed per session. After command exit, the session closes.
+* **Multi-run mode**: Multiple commands can be executed in the same session (configurable).
+* No argument can be appended by the server because the relay never sees plaintext and the agent validates the AEAD with counters.
 * If the relay is compromised, attackers cannot run commands without S. They can only block or delay traffic.
 * The agent runs the tool with least privilege and no shell interpolation.
 
@@ -112,6 +118,10 @@ SPA_BASE_PATH=/
 # Optional: IP based coarse rate limits (relay only)
 RELAY_RATE_RPS=10
 RELAY_BURST=50
+
+# PTY Configuration
+AGENT_SHELL=/bin/bash
+TTY_IDLE_TIMEOUT_MS=1200000
 ```
 
 Each subproject can add overrides with its own `.env` if needed.
@@ -183,6 +193,11 @@ Types:
 0x15 ERROR
 0x16 ABORT
 0x17 KEEPALIVE
+0x20 TTY_OPEN    // Initialize PTY session
+0x21 TTY_DATA    // Bidirectional terminal data
+0x22 TTY_RESIZE  // Terminal resize event
+0x23 TTY_SIGNAL  // Send signal to PTY process
+0x24 TTY_EXIT    // PTY process exit
 ```
 
 ### Encrypted payloads
@@ -252,6 +267,51 @@ type ErrorMsg = { ctr: number, msg: { commandId: string|null, code: string, deta
 type AbortMsg = { ctr: number, msg: { commandId: string, reason?: string } }
 
 type KeepaliveMsg = { ctr: number, msg: { t: number } }
+
+// PTY Messages
+type TtyOpenMsg = {
+  ctr: number
+  msg: {
+    sessionId: string    // Unique session identifier
+    cols: number         // Terminal columns
+    rows: number         // Terminal rows
+    cwd?: string         // Working directory (optional)
+  }
+}
+
+type TtyDataMsg = {
+  ctr: number
+  msg: {
+    sessionId: string
+    data: Uint8Array     // Terminal input/output data
+  }
+}
+
+type TtyResizeMsg = {
+  ctr: number
+  msg: {
+    sessionId: string
+    cols: number
+    rows: number
+  }
+}
+
+type TtySignalMsg = {
+  ctr: number
+  msg: {
+    sessionId: string
+    signal: string       // e.g., "SIGINT", "SIGTERM"
+  }
+}
+
+type TtyExitMsg = {
+  ctr: number
+  msg: {
+    sessionId: string
+    code: number         // Exit code
+    signal?: string      // Signal that caused exit
+  }
+}
 ```
 
 ---
@@ -279,7 +339,6 @@ The server never stores secrets or plaintext.
 
 ## Agent Responsibilities
 
-* Discover and validate the whitelisted tool path (no symlinks outside allowed dirs, executable bit set).
 * Register with server to receive a unique `namespace`.
 * Create capabilities locally:
 
@@ -288,19 +347,25 @@ The server never stores secrets or plaintext.
   * Output a shareable capability tuple `{ namespace, capId, S }` and optional SPA link
 * Enforce policy at runtime:
 
-  * Tool name must match the single allowed tool
-  * Use `execFile` or `spawn` with `shell: false`
+  * Validate command arguments and CWD against policy
+  * Use `execFile` or `spawn` with `shell: false` for command execution
   * Apply cwd rules
   * Apply resource limits (see below)
-  * Single RUN per session unless configured otherwise
+  * Single RUN per session unless configured for multi-run
+* PTY session management:
+
+  * Create and manage PTY sessions with unique session IDs
+  * Handle terminal resizing and signal forwarding
+  * Clean up idle PTY sessions after timeout (default 20 minutes)
+  * Isolate PTY environment with minimal safe variables
 * Abort mapping:
 
   * On ABORT, send SIGTERM then SIGKILL after grace period
+  * For PTY: Forward signals directly to the PTY process
 
 ### Policy and validation
 
-* Allowed tool: exactly one, set at agent startup via flags or `.env`
-* Arguments: “anything” allowed, but length and count are capped to prevent abuse
+* Arguments: "anything" allowed, but length and count are capped to prevent abuse
 
   * `MAX_ARG_COUNT` default 64
   * `MAX_ARG_LEN` default 4096 bytes each
@@ -318,6 +383,11 @@ The server never stores secrets or plaintext.
   * Linux: `cgroups` v2 for CPU quota, memory limit, and pids
   * macOS: `taskpolicy` and `ulimit` as a fallback
   * Windows: Job Objects
+* PTY specific:
+
+  * `AGENT_SHELL` environment variable to override default shell
+  * `TTY_IDLE_TIMEOUT_MS` for idle session cleanup (default 1200000 = 20 minutes)
+  * Minimal environment variables passed to PTY process
 
 ### Privilege separation
 
@@ -332,48 +402,84 @@ The server never stores secrets or plaintext.
 ### Usage
 
 ```
+# Command execution mode
 entangle-invoke \
   --namespace ns_abcd123 \
   --cap-id AbCdEF...b64url... \
   --secret-s S_base64url... \
-  --tool claude \
   --cwd /home/lennard/app \
-  --argv '["project","--explain","src/index.ts"]' \
+  --argv '["claude","project","--explain","src/index.ts"]' \
   [--abort-after-ms 5000] \
-  [--max-out-bytes 1048576]
+  [--max-out-bytes 1048576] \
+  [--output-mode text|stream-json]
+
+# Interactive terminal mode (when no argv provided)
+entangle-invoke \
+  --namespace ns_abcd123 \
+  --cap-id AbCdEF...b64url... \
+  --secret-s S_base64url... \
+  --cwd /home/lennard/app \
+  [--cols 80] \
+  [--rows 24]
+
+# URL format (simplified)
+entangle-invoke https://suncoder.dev/cap/capId#S=secret [command args...]
 ```
 
 Notes
 
-* There is no URL. The CLI takes `namespace`, `capId`, and `S` directly.
-* The CLI derives keys from `S` and saltCap extracted from capId.
-* The CLI performs the exact same AUTH1/2/3 and AEAD flow as the SPA.
-* The CLI writes STDOUT and STDERR to the terminal, exits with the remote exit code.
+* The CLI accepts either individual parameters or a single URL format
+* When no `argv` is provided, the CLI enters interactive terminal mode
+* The CLI derives keys from `S` and saltCap extracted from capId
+* The CLI performs the exact same AUTH1/2/3 and AEAD flow as the SPA
+* In command mode: writes STDOUT/STDERR and exits with remote exit code
+* In terminal mode: provides full interactive PTY with proper signal handling
 
 ### Argument safety
 
-* `--tool` must match the tool in policy. CLI does not allow alternate tools.
-* The argv is a JSON array of strings. CLI does not expand shell globs.
-* The agent enforces the same constraints again, so the relay cannot append or mutate args.
+* The argv is a JSON array of strings where argv[0] is the command to execute
+* CLI does not expand shell globs
+* The agent enforces the same constraints again, so the relay cannot append or mutate args
+* In terminal mode, no argv validation is performed (full shell access)
 
 ---
 
 ## SPA (browser) behavior
 
-* On first load, SPA reads fragment `#S=...` and path `{namespace}/{capId}` if invoked via link generator
+The web SPA supports two modes:
+
+### Terminal Mode (default)
+* On first load, reads fragment `#S=...` and path `{namespace}/{capId}`
+* Prompts user for working directory via dialog
 * Derives keys client side and establishes WS to `/relay/{namespace}/{capId}`
-* Renders a simple terminal that streams output
-* Provides a CWD field and an Abort button
-* SPA never sends S to the server. The fragment is parsed entirely client side.
+* Renders full xterm.js terminal with:
+  * Terminal resizing support
+  * Copy/paste functionality
+  * Signal forwarding (Ctrl+C, etc.)
+  * Session management
+
+### Command Mode (?terminal=false)
+* Same capability parsing as terminal mode
+* Shows command input form
+* Accepts single command + args
+* Displays streaming stdout/stderr
+* Shows exit code
+
+Both modes:
+* SPA never sends S to the server. The fragment is parsed entirely client side
+* Automatic reconnection on connection loss
+* Proper cleanup on page unload
 
 ---
 
 ## Example End-to-End Flow
 
+### Command Execution Flow
+
 1. **Agent start**
 
 ```
-PUBLIC_ORIGIN=https://suncoder.dev AGENT_TOOL=/usr/bin/claude pnpm --filter @entangle/agent start
+PUBLIC_ORIGIN=https://suncoder.dev pnpm --filter @entangle/agent start
 ```
 
 * Agent registers to `ws /agent/register`
@@ -386,7 +492,6 @@ $ entangle-agent create-cap
 namespace: ns_7R6B2P
 capId: Q29e...b64url...(saltCap||capRand)
 S: yZJH...b64url...
-tool: claude
 policy: maxCpuMs=60000, maxMemMB=512, singleRun=true
 ```
 
@@ -399,9 +504,8 @@ entangle-invoke \
   --namespace ns_7R6B2P \
   --cap-id Q29e... \
   --secret-s yZJH... \
-  --tool claude \
   --cwd /home/lennard/app \
-  --argv '["project","--explain","src/index.ts"]' \
+  --argv '["claude","project","--explain","src/index.ts"]' \
   --abort-after-ms 5000
 ```
 
@@ -413,9 +517,9 @@ entangle-invoke \
 
 5. **Run**
 
-* Invoker sends RUN (AEAD)
-* Agent validates tool, argv, cwd, limits
-* Agent spawns `/usr/bin/claude project --explain src/index.ts` in cwd
+* Invoker sends RUN (AEAD) with argv[0] as command
+* Agent validates argv, cwd, limits
+* Agent spawns `claude project --explain src/index.ts` in cwd
 * Streams STDOUT/ERR back in AEAD frames
 
 6. **Abort**
@@ -423,6 +527,43 @@ entangle-invoke \
 * At 5 seconds, CLI sends ABORT
 * Agent sends SIGTERM, then SIGKILL after 2 seconds if needed
 * Agent returns EXIT with `signal="SIGTERM"`
+
+### Terminal Session Flow
+
+1. **Setup** (same agent start and capability creation)
+
+2. **Terminal invocation**
+
+```
+entangle-invoke \
+  --namespace ns_7R6B2P \
+  --cap-id Q29e... \
+  --secret-s yZJH... \
+  --cwd /home/lennard/app \
+  --cols 120 \
+  --rows 40
+```
+
+3. **PTY initialization**
+
+* After AUTH handshake, invoker sends TTY_OPEN with dimensions
+* Agent creates PTY session with unique sessionId
+* Agent spawns shell (from AGENT_SHELL or system default) in requested cwd
+* Agent sends TTY_OPEN acknowledgment
+
+4. **Interactive session**
+
+* User types commands in terminal
+* TTY_DATA frames flow bidirectionally
+* Terminal resize sends TTY_RESIZE
+* Ctrl+C sends TTY_SIGNAL with "SIGINT"
+
+5. **Session end**
+
+* User types `exit` or closes terminal
+* Agent detects PTY process exit
+* Agent sends TTY_EXIT with exit code
+* Connection closes
 
 ---
 
@@ -451,12 +592,18 @@ Backpressure: pause reading on one socket when the other write buffer exceeds a 
 
   * `start` — run agent, register, fetch namespace
   * `create-cap` — create capability for current policy, print tuple
-  * Flags: `--tool /usr/bin/claude`, `--policy-file ./policy.json`, `--single-run true|false`
+  * Flags: `--policy-file ./policy.json`, `--single-run true|false`
+  * Environment:
+    * `AGENT_SHELL` — Override default shell for PTY sessions
+    * `TTY_IDLE_TIMEOUT_MS` — PTY idle timeout (default 1200000 = 20 minutes)
 
 * `entangle-invoke`:
 
-  * Arguments as above
-  * Exit with remote exit code
+  * Command mode arguments as above
+  * Terminal mode when no `--argv` provided
+  * Exit with remote exit code (command mode)
+  * Full interactive terminal (terminal mode)
+  * `--output-mode text|stream-json` for programmatic output
 
 * `entangle-server`:
 
@@ -627,7 +774,9 @@ Pin versions in `package.json`:
     "ws": "^8.17.1",
     "zod": "^3.23.8",
     "pino": "^9.3.2",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.11.14",
+    "xterm": "^5.3.0"
   }
 }
 ```

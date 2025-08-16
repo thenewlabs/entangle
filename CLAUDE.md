@@ -2,7 +2,11 @@
 
 ## Project Overview
 
-**Entangle** is a secure blind relay system that allows exposing one or more whitelisted CLI tools from a client machine to remote invokers via an encrypted relay. The relay server never sees plaintext commands, arguments, outputs, or secrets.
+**Entangle** is a secure blind relay system that allows exposing CLI tools and terminal sessions from a client machine to remote invokers via an encrypted relay. The relay server never sees plaintext commands, arguments, outputs, or secrets.
+
+The system supports two modes:
+1. **Command Execution Mode**: Run specific commands with arguments
+2. **Terminal Mode**: Interactive PTY (pseudo-terminal) sessions for full shell access
 
 ## Architecture
 
@@ -23,29 +27,47 @@
 
 ### Key Guarantees
 - Server is **completely blind** - never sees plaintext commands/outputs/secrets
-- **Whitelisted tools** enforcement - agent only runs configured tools
 - **Monotonic counters** prevent replay and reordering attacks
-- **Multiple RUNs per session** by default (single-run optionally configurable)
+- **Single-run mode** (default) - one command per session
+- **Multi-run mode** (optional) - multiple commands per session
 - **Resource limits** (CPU, memory, wall time, output bytes)
 - **Argument validation** (count, length, NUL bytes, surrogates)
+- **PTY session support** with idle timeout and signal forwarding
 
 ### Capability Model
 ```
 namespace: server-generated (ns_BASE32)
 capId: saltCap(16B) || capRand(16B) -> base64url (routing ID)
 S: 32-byte secret -> base64url (known only to invoker & agent)
-tool: path to the specific tool this capability grants access to
 ```
-
-The agent creates a single multi-tool capability that works for all whitelisted tools. You can specify which tool to use when invoking.
 
 ## Wire Protocol
 
 ### Frame Format
 ```
-byte 0:     type (AUTH1=0x01, RUN=0x10, STDOUT=0x12, etc.)
+byte 0:     type (see frame types below)
 bytes 1-8:  payload length (u64 big endian)  
 bytes 9+:   payload (encrypted except AUTH1/AUTH3)
+```
+
+### Frame Types
+```
+0x01 AUTH1      // Authentication handshake
+0x02 AUTH2      
+0x03 AUTH3
+0x10 RUN        // Execute command
+0x11 STDIN      // Input stream
+0x12 STDOUT     // Output stream
+0x13 STDERR     // Error stream
+0x14 EXIT       // Process exit
+0x15 ERROR      // Error message
+0x16 ABORT      // Abort execution
+0x17 KEEPALIVE  // Keep connection alive
+0x20 TTY_OPEN   // Initialize PTY session
+0x21 TTY_DATA   // Bidirectional terminal data
+0x22 TTY_RESIZE // Terminal resize event
+0x23 TTY_SIGNAL // Send signal to PTY
+0x24 TTY_EXIT   // PTY process exit
 ```
 
 ### Auth Handshake
@@ -61,33 +83,38 @@ All messages except AUTH1/AUTH3 use AEAD with per-direction monotonic counters:
 cipher = AEAD_Enc(K_enc, nonce=random24B, plaintext=CBOR({ctr, msg}), aad=CBOR({type}))
 ```
 
-## Multi-Tool Usage Examples
+## Usage Modes
 
-When starting an agent with multiple tools, a single multi-tool capability is created:
-
+### Command Execution Mode
+Run specific commands with arguments:
 ```bash
-# Start agent with multiple tools
-entangle-agent start --tool /usr/bin/claude --tool /usr/bin/git --tool /usr/bin/rg
-
-# Output will show a single multi-tool capability:
-# =====================================
-# Multi-tool capability created
-# namespace: ns_ABC123
-# capId: xKZa3b_7Q...
-# S: 9Hj2_xPmL...
-# 
-# Whitelisted tools:
-#   - /usr/bin/claude
-#   - /usr/bin/git  
-#   - /usr/bin/rg
-# 
-# Web link: https://suncoder.dev/ns_ABC123/xKZa3b_7Q...#S=9Hj2_xPmL...
-# 
-# Invoke command example:
-# entangle-invoke --namespace ns_ABC123 --cap-id xKZa3b_7Q... --secret-s 9Hj2_xPmL... --tool <toolname> --argv '["--help"]'
+# Execute a command
+entangle-invoke \
+  --namespace ns_ABC123 \
+  --cap-id xKZa3b_7Q... \
+  --secret-s 9Hj2_xPmL... \
+  --argv '["claude","--help"]' \
+  --cwd /home/user
 ```
 
-All tools share the same capability. When invoking, specify which tool you want to use with the --tool parameter.
+### Terminal Mode
+Interactive PTY session (when no argv provided):
+```bash
+# Start interactive terminal
+entangle-invoke \
+  --namespace ns_ABC123 \
+  --cap-id xKZa3b_7Q... \
+  --secret-s 9Hj2_xPmL... \
+  --cwd /home/user \
+  --cols 120 \
+  --rows 40
+```
+
+### Simplified URL Format
+```bash
+# Using URL format
+entangle-invoke https://suncoder.dev/cap/capId#S=secret claude --help
+```
 
 ## Development Workflow
 
@@ -102,22 +129,24 @@ npm run build
 # Start server
 npm run dev  # or cd server && npm start
 
-# Start agent with single tool (separate terminal)
-cd agent && AGENT_TOOL=/usr/bin/claude npm start
+# Start agent (separate terminal)
+cd agent && npm start
 
-# Or start agent with multiple tools
-cd agent && npm start -- --tool /usr/bin/claude --tool /usr/bin/rg --tool /usr/bin/git
-
-# Create capability for specific tool
-cd agent && npm run create-cap -- --namespace ns_ABC123 --tool /usr/bin/claude
+# Create capability
+cd agent && npm run create-cap -- --namespace ns_ABC123
 
 # Invoke command
 cd invoke && npm start -- \
   --namespace ns_ABC123 \
   --cap-id <capId> \
   --secret-s <S> \
-  --tool claude \
-  --argv '["--help"]'
+  --argv '["claude","--help"]'
+
+# Or start interactive terminal
+cd invoke && npm start -- \
+  --namespace ns_ABC123 \
+  --cap-id <capId> \
+  --secret-s <S>
 ```
 
 ### Testing
@@ -144,30 +173,31 @@ PORT=8080
 PUBLIC_ORIGIN=https://suncoder.dev
 MAX_FRAME_BYTES=1048576
 RELAY_IDLE_TIMEOUT_MS=120000
+RELAY_RATE_RPS=10
+RELAY_BURST=50
 
 # Agent 
-AGENT_TOOL=/usr/bin/claude
 AGENT_ALLOWED_CWD=/home:/srv/projects
 MAX_ARG_COUNT=64
 MAX_ARG_LEN=4096
+AGENT_SHELL=/bin/bash
+TTY_IDLE_TIMEOUT_MS=1200000
 
 # Logging
 LOG_LEVEL=info
+OUTPUT_MODE=text
 ```
 
 ### Agent Commands
 ```bash
-# Start agent with single tool
-entangle-agent start --tool /usr/bin/claude --server http://localhost:8080
+# Start agent
+entangle-agent start [--server http://localhost:8080]
 
-# Start agent with multiple tools
-entangle-agent start --tool /usr/bin/claude --tool /usr/bin/git --tool /usr/bin/rg
+# Create capability (single-run mode)
+entangle-agent create-cap --namespace ns_ABC123 --single-run
 
-# Create capability for specific tool (single-run mode)
-entangle-agent create-cap --namespace ns_ABC123 --tool /usr/bin/claude --single-run
-
-# Create capability for specific tool (multi-run mode, default)
-entangle-agent create-cap --namespace ns_ABC123 --tool /usr/bin/claude
+# Create capability (multi-run mode, default)
+entangle-agent create-cap --namespace ns_ABC123
 
 # Example output:
 # namespace: ns_7R6B2P
@@ -178,15 +208,27 @@ entangle-agent create-cap --namespace ns_ABC123 --tool /usr/bin/claude
 
 ### Invoke Commands
 ```bash
-# Run command via CLI
+# Command execution mode
 entangle-invoke \
   --namespace ns_7R6B2P \
   --cap-id Q29e... \
   --secret-s yZJH... \
-  --tool claude \
-  --argv '["project","--explain","src/index.ts"]' \
+  --argv '["claude","project","--explain","src/index.ts"]' \
   --cwd /home/user/app \
-  --abort-after-ms 5000
+  --abort-after-ms 5000 \
+  --output-mode text
+
+# Terminal mode (no argv)
+entangle-invoke \
+  --namespace ns_7R6B2P \
+  --cap-id Q29e... \
+  --secret-s yZJH... \
+  --cwd /home/user/app \
+  --cols 120 \
+  --rows 40
+
+# URL format
+entangle-invoke https://suncoder.dev/cap/capId#S=secret claude --help
 ```
 
 ## Security Considerations
@@ -231,6 +273,28 @@ entangle/
 - `invoke/dist/invoke.js` → `entangle-invoke` binary
 - `web/dist/*` → Static assets served by server
 
+## PTY (Terminal) Features
+
+### Browser Terminal
+- Full xterm.js integration with resize support
+- Copy/paste functionality
+- Signal forwarding (Ctrl+C, Ctrl+D, etc.)
+- Automatic reconnection on disconnect
+- CWD selection dialog before session start
+
+### CLI Terminal
+- Raw terminal mode for proper input handling
+- Dynamic terminal resizing
+- Signal forwarding to remote process
+- Seamless interactive experience
+
+### PTY Security
+- Session isolation with unique IDs
+- Idle timeout (default 20 minutes)
+- Minimal environment variables
+- No shell interpolation
+- Signal validation
+
 ## Key Implementation Details
 
 ### Crypto Package (`packages/crypto/src/index.ts`)
@@ -240,16 +304,28 @@ entangle/
 - `generateCapId()` - Embedded salt + random for routing
 
 ### Agent Runner (`agent/src/runner.ts`) 
-- `spawn(tool, argv, {shell: false})` - No shell interpolation
+- `spawn(argv[0], argv.slice(1), {shell: false})` - No shell interpolation
 - Resource limits via process monitoring
 - Environment isolation with minimal safe vars
 - Output streaming with backpressure handling
+
+### PTY Manager (`agent/src/pty.ts`)
+- Session management with unique IDs
+- Terminal resizing support
+- Signal forwarding (SIGINT, SIGTERM, etc.)
+- Idle session cleanup (default 20 minutes)
+- Full bidirectional data streaming
 
 ### Server Routing (`server/src/state/routing.ts`)
 - Namespace generation with base32 encoding
 - Capability announcement and lookup
 - WebSocket connection management
 - Heartbeat tracking and cleanup
+
+### Rate Limiting (`server/src/utils/rate-limit.ts`)
+- Token bucket algorithm with configurable burst and rate
+- Exponential backoff for repeated violations
+- Per-IP rate limiting with X-Forwarded-For support
 
 ### Security Tests (`tests/security/`)
 - Replay attack prevention with counter validation
@@ -261,8 +337,8 @@ entangle/
 
 ### entangle-agent
 ```bash
-entangle-agent start [--tool <path>...] [--server <url>]
-entangle-agent create-cap --namespace <ns> --tool <path> [--single-run]
+entangle-agent start [--server <url>]
+entangle-agent create-cap --namespace <ns> [--single-run]
 ```
 
 ### entangle-server  
@@ -272,24 +348,37 @@ entangle-server  # Starts on PORT (default 8080)
 
 ### entangle-invoke
 ```bash
+# Command mode
 entangle-invoke \
   --namespace <ns> \
   --cap-id <id> \
   --secret-s <secret> \
-  --tool <tool> \
   --argv <json-array> \
   [--cwd <path>] \
-  [--abort-after-ms <ms>]
+  [--abort-after-ms <ms>] \
+  [--output-mode text|stream-json]
+
+# Terminal mode
+entangle-invoke \
+  --namespace <ns> \
+  --cap-id <id> \
+  --secret-s <secret> \
+  [--cwd <path>] \
+  [--cols <n>] \
+  [--rows <n>]
+
+# URL format
+entangle-invoke <url> [command args...]
 ```
 
 ## Troubleshooting
 
 ### Common Issues
-- **Tool not found**: Ensure `AGENT_TOOL` points to executable file
-- **Permission denied**: Check tool executable permissions and CWD access
+- **Command not found**: Ensure command exists and is executable
+- **Permission denied**: Check command executable permissions and CWD access
 - **Connection failed**: Verify server is running and network connectivity
 - **Auth failed**: Ensure capId, namespace, and secret S match exactly
-- **Tool mismatch**: Agent rejects tools not in the whitelist
+- **PTY session timeout**: Idle sessions are cleaned up after TTY_IDLE_TIMEOUT_MS
 
 ### Debug Commands
 ```bash

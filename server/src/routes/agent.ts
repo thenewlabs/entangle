@@ -1,5 +1,5 @@
 import type WebSocket from 'ws';
-import { createLogger } from '@sunpix/entangle-utils';
+import { createLogger, getConfig } from '@sunpix/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 
 const logger = createLogger('agent-route');
