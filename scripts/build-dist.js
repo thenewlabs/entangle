@@ -67,7 +67,7 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
       external: [
         // Only externalize native Node.js modules that cannot be bundled
         'fsevents', // Optional native dependency
-        'node-pty', // Native bindings for PTY support
+        '@homebridge/node-pty-prebuilt-multiarch', // Native bindings for PTY support
       ],
       sourcemap: true,
       keepNames: true,
@@ -85,7 +85,7 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
       outfile: minOutfile + '.cjs.temp',
       external: [
         'fsevents',
-        'node-pty',
+        '@homebridge/node-pty-prebuilt-multiarch',
       ],
       minify: true,
       keepNames: true,
