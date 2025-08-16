@@ -17,7 +17,6 @@ import {
   aeadEncrypt,
   aeadDecrypt,
   verifyHmac,
-  computeHmac,
   hashPolicy,
 } from '@sunpix/entangle-crypto';
 import { 
@@ -181,7 +180,6 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     
     // Verify the HMAC
     const auth1Data = new TextEncoder().encode('hello' + session.cap.capId + session.nonceB);
-    const expectedHmac = computeHmac(session.keys.K_auth, auth1Data);
     
     // Avoid logging HMAC details
     

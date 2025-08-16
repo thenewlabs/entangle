@@ -71,7 +71,7 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
     const url = new URL(request.url!, `http://${request.headers.host}`);
     // Determine client IP (trust x-forwarded-for if present)
     const xff = (request.headers['x-forwarded-for'] as string) || '';
-    const ip = (xff.split(',')[0].trim()) || (request.socket.remoteAddress || 'unknown');
+    const ip = (xff.split(',')[0]?.trim()) || (request.socket.remoteAddress || 'unknown');
 
     // Per-IP token bucket with backoff for all WS upgrades
     const decision = wsRateLimiter.check(ip);
