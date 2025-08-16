@@ -1,3 +1,4 @@
+// Build version: 1.0.1-20250816
 import { Terminal } from 'xterm';
 import { 
   FrameType, 
@@ -35,14 +36,23 @@ export class RelayClient {
   ) {}
   
   async connect(): Promise<void> {
+    console.log('[RelayClient] Starting connection');
     await initCrypto();
     
     const saltCap = extractSaltFromCapId(this.capId);
+    console.log('[RelayClient] Extracted salt from capId:', {
+      capId: this.capId,
+      saltHex: Array.from(saltCap).map(b => b.toString(16).padStart(2, '0')).join('')
+    });
+    
     this.keys = await deriveKeys(this.S, saltCap);
+    console.log('[RelayClient] Keys derived');
     
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     const url = `${protocol}//${host}/relay/${this.namespace}/${this.capId}`;
+    
+    console.log('[RelayClient] Connecting to:', url);
     
     this.ws = new WebSocket(url);
     this.ws.binaryType = 'arraybuffer';
@@ -50,7 +60,7 @@ export class RelayClient {
     this.ws.onopen = () => this.handleOpen();
     this.ws.onmessage = (e) => this.handleMessage(e);
     this.ws.onclose = () => this.handleClose();
-    this.ws.onerror = (e) => console.error('WebSocket error:', e);
+    this.ws.onerror = (e) => console.error('[RelayClient] WebSocket error:', e);
   }
   
   disconnect(): void {
@@ -96,13 +106,41 @@ export class RelayClient {
   private handleOpen(): void {
     if (!this.keys) return;
     
+    console.log('[RelayClient] WebSocket opened, starting AUTH1');
+    
     const nonceB = crypto.getRandomValues(new Uint8Array(16));
     const nonceBHex = Array.from(nonceB).map(b => b.toString(16).padStart(2, '0')).join('');
+    
+    console.log('[RelayClient] Generated nonceB:', nonceBHex);
     
     const auth1Data = new TextEncoder().encode('hello' + this.capId + nonceBHex);
     const auth1Hmac = computeHmac(this.keys.K_auth, auth1Data);
     
-    this.ws!.send(encodeFrame(FrameType.AUTH1, auth1Hmac));
+    console.log('[RelayClient] AUTH1 details:', {
+      capId: this.capId,
+      nonceB: nonceBHex,
+      auth1DataString: 'hello' + this.capId + nonceBHex,
+      auth1DataHex: Array.from(auth1Data).map(b => b.toString(16).padStart(2, '0')).join(''),
+      hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
+    });
+    
+    // Send HMAC + nonceB hex string as bytes
+    const nonceBBytes = new TextEncoder().encode(nonceBHex);
+    const auth1Payload = new Uint8Array(32 + nonceBBytes.length);
+    auth1Payload.set(auth1Hmac, 0);
+    auth1Payload.set(nonceBBytes, 32);
+    
+    console.log('[RelayClient] Sending AUTH1 payload:', {
+      totalLength: auth1Payload.length,
+      hmacLength: 32,
+      nonceBLength: nonceBBytes.length,
+      payloadHex: Array.from(auth1Payload).slice(0, 50).map(b => b.toString(16).padStart(2, '0')).join('')
+    });
+    
+    const frame = encodeFrame(FrameType.AUTH1, auth1Payload);
+    console.log('[RelayClient] Encoded frame length:', frame.byteLength);
+    
+    this.ws!.send(frame);
   }
   
   private handleMessage(event: MessageEvent): void {
@@ -117,8 +155,14 @@ export class RelayClient {
   private handleFrame(frame: { type: FrameType; payload: Uint8Array }): void {
     if (!this.keys) return;
     
+    console.log('[RelayClient] Received frame:', {
+      type: FrameType[frame.type],
+      payloadLength: frame.payload.length
+    });
+    
     try {
       if (frame.type === FrameType.AUTH2 && !this.authenticated) {
+        console.log('[RelayClient] Handling AUTH2 response');
         const encrypted = decode(frame.payload) as any;
         const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH2, encrypted.nonce, encrypted.cipher);
         
@@ -127,12 +171,24 @@ export class RelayClient {
           throw new Error('Authentication failed');
         }
         
+        console.log('[RelayClient] AUTH2 received:', {
+          ok: auth2.ok,
+          nonceB: auth2.nonceB,
+          nonceC: auth2.nonceC
+        });
+        
         const auth3Data = new TextEncoder().encode('ready' + auth2.nonceC);
         const auth3Hmac = computeHmac(this.keys.K_auth, auth3Data);
+        
+        console.log('[RelayClient] Sending AUTH3:', {
+          auth3DataString: 'ready' + auth2.nonceC,
+          auth3HmacHex: Array.from(auth3Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
+        });
         
         this.ws!.send(encodeFrame(FrameType.AUTH3, auth3Hmac));
         
         this.authenticated = true;
+        console.log('[RelayClient] Authentication successful!');
         this.onConnect?.();
         
         this.terminal.writeln('Connected to Entangle');
@@ -167,7 +223,7 @@ export class RelayClient {
         }
       }
     } catch (error) {
-      console.error('Failed to handle frame:', error);
+      console.error('[RelayClient] Failed to handle frame:', error);
       this.terminal.writeln(`\nError: ${error}`);
     }
   }

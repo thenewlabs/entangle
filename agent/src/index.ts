@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { startAgent } from './agent.js';
 import { createCapability } from './capability.js';
 
-const logger = createLogger('agent-cli');
 const program = new Command();
 
 program
   .name('entangle-agent')
   .description('Entangle secure agent for exposing CLI tools')
-  .version('1.0.0');
+  .version(getVersionInfo())
+  .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');
 
 program
   .command('start')
@@ -19,14 +19,23 @@ program
   .option('--server <url>', 'Server URL')
   .action(async (options) => {
     try {
+      const outputMode = parseOutputMode(program.opts().outputMode);
+      const output = new OutputHandler({ mode: outputMode });
+      
+      output.version('Entangle Agent', getVersionInfo());
+      
       const config = getConfig();
       const serverUrl = options.server || config.relayUrl || 'http://localhost:8080';
       
       await startAgent({
         serverUrl,
+        outputMode: program.opts().outputMode,
       });
     } catch (error) {
-      logger.error({ error }, 'Failed to start agent');
+      const outputMode = parseOutputMode(program.opts().outputMode);
+      const output = new OutputHandler({ mode: outputMode });
+      
+      output.error('Failed to start agent', error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   });
@@ -37,20 +46,27 @@ program
   .option('--single-run', 'Allow only one run per session (default: multiple runs allowed)')
   .action(async (options) => {
     try {
+      const outputMode = parseOutputMode(program.opts().outputMode);
+      const output = new OutputHandler({ mode: outputMode });
+      
       const cap = await createCapability({
         singleRun: options.singleRun,
+        outputMode: program.opts().outputMode,
       });
       
-      console.log('\nCapability created:');
-      console.log(`capId: ${cap.capId}`);
-      console.log(`S: ${cap.S}`);
+      output.info('\nCapability created:');
+      output.info(`capId: ${cap.capId}`);
+      output.info(`S: ${cap.S}`);
       
       const config = getConfig();
       const relayUrl = config.relayUrl || config.publicOrigin || 'https://suncoder.dev';
       const link = `${relayUrl}/cap/${cap.capId}#S=${cap.S}`;
-      console.log(`\nWeb URL: ${link}`);
+      output.info(`\nWeb URL: ${link}`);
     } catch (error) {
-      logger.error({ error }, 'Failed to create capability');
+      const outputMode = parseOutputMode(program.opts().outputMode);
+      const output = new OutputHandler({ mode: outputMode });
+      
+      output.error('Failed to create capability', error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   });

@@ -9,9 +9,7 @@ const __dirname = dirname(__filename);
 export function loadConfig(): void {
   const rootDir = resolve(__dirname, '../../..');
   const envPath = resolve(rootDir, '.env');
-  console.log(`Loading .env from: ${envPath}`);
-  const result = config({ path: envPath });
-  console.log('.env load result:', result.error ? `Error: ${result.error}` : `Parsed ${Object.keys(result.parsed || {}).length} variables`);
+  config({ path: envPath });
 }
 
 export interface Config {
@@ -38,9 +36,6 @@ export interface Config {
 
 export function getConfig(): Config {
   loadConfig();
-  
-  console.log('Environment PORT:', process.env.PORT);
-  console.log('Environment HOST:', process.env.HOST);
   
   return {
     port: parseInt(process.env.PORT || '8080', 10),

@@ -41,9 +41,17 @@ export async function runSingle(
       
       try {
         // Send AUTH1
-        const auth1Data = new TextEncoder().encode('hello' + capId + Math.random().toString(36));
+        const nonceB = Math.random().toString(36).substr(2);
+        const auth1Data = new TextEncoder().encode('hello' + capId + nonceB);
         const auth1Hmac = computeHmac(keys.K_auth, auth1Data);
-        const auth1Frame = encodeFrame(FrameType.AUTH1, auth1Hmac);
+        
+        // Send HMAC + nonceB
+        const nonceBBytes = new TextEncoder().encode(nonceB);
+        const auth1Payload = new Uint8Array(32 + nonceBBytes.length);
+        auth1Payload.set(auth1Hmac, 0);
+        auth1Payload.set(nonceBBytes, 32);
+        
+        const auth1Frame = encodeFrame(FrameType.AUTH1, auth1Payload);
         ws.send(auth1Frame);
       } catch (error) {
         logger.error({ error }, 'Failed to send AUTH1');

@@ -4,7 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { createLogger, getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { setupAgentRoute } from './routes/agent.js';
 import { setupRelayRoute } from './routes/relay.js';
 import { RoutingState } from './state/routing.js';
@@ -15,9 +15,11 @@ import { existsSync } from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const logger = createLogger('server');
-
-export async function startServer(): Promise<void> {
+export async function startServer(outputMode: string = 'text'): Promise<void> {
+  const logger = createLogger('server', outputMode);
+  const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
+  output.version('Entangle Server', getVersionInfo());
+  
   const config = getConfig();
   const app = express();
   const server = createServer(app);
@@ -97,8 +99,20 @@ export async function startServer(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  startServer().catch((error) => {
-    logger.error({ error }, 'Failed to start server');
+  // Parse command line arguments
+  const args = process.argv.slice(2);
+  let outputMode = 'text';
+  
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--output-mode' && i + 1 < args.length) {
+      outputMode = args[i + 1] || 'text';
+      i++;
+    }
+  }
+  
+  startServer(outputMode).catch((error) => {
+    const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
+    output.error('Failed to start server', error instanceof Error ? error.message : String(error));
     process.exit(1);
   });
 }

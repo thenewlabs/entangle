@@ -1,11 +1,8 @@
 import { generateCapId, generateSecret, initCrypto } from '@sunpix/entangle-crypto';
 import { type Policy } from '@sunpix/entangle-protocol';
-import { createLogger } from '@sunpix/entangle-utils';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-
-const logger = createLogger('capability');
 
 export interface CapabilityInfo {
   capId: string;
@@ -15,6 +12,7 @@ export interface CapabilityInfo {
 
 export async function createCapability(options: {
   singleRun?: boolean;
+  outputMode?: string;
 }): Promise<CapabilityInfo> {
   await initCrypto();
   
@@ -32,8 +30,6 @@ export async function createCapability(options: {
   };
   
   await storeCapability(cap);
-  
-  logger.info({ capId }, 'Capability created');
   
   return cap;
 }

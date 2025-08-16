@@ -65,9 +65,25 @@ export function SingleCommandView({ capability }: SingleCommandViewProps) {
       
       ws.onopen = async () => {
         // Send AUTH1
-        const auth1Data = new TextEncoder().encode('hello' + capability.capId + Math.random().toString(36));
+        const nonceB = Math.random().toString(36);
+        const nonceBHex = Array.from(new TextEncoder().encode(nonceB)).map(b => b.toString(16).padStart(2, '0')).join('');
+        const auth1Data = new TextEncoder().encode('hello' + capability.capId + nonceBHex);
         const auth1Hmac = computeHmac(keys.K_auth, auth1Data);
-        const auth1Frame = encodeFrame(FrameType.AUTH1, auth1Hmac);
+        
+        console.log('[SingleCommandView] AUTH1 details:', {
+          capId: capability.capId,
+          nonceB: nonceBHex,
+          auth1DataString: 'hello' + capability.capId + nonceBHex,
+          hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
+        });
+        
+        // Combine HMAC and nonceB for AUTH1 payload
+        const nonceBBytes = new TextEncoder().encode(nonceB);
+        const auth1Payload = new Uint8Array(32 + nonceBBytes.length);
+        auth1Payload.set(auth1Hmac, 0);
+        auth1Payload.set(nonceBBytes, 32);
+        
+        const auth1Frame = encodeFrame(FrameType.AUTH1, auth1Payload);
         ws.send(auth1Frame);
       };
       

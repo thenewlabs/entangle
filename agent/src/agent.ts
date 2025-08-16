@@ -3,10 +3,9 @@ import { createLogger, getConfig } from '@sunpix/entangle-utils';
 import { handleInvokerConnection } from './session.js';
 import { loadCapabilities, createCapability } from './capability.js';
 
-const logger = createLogger('agent');
-
 interface AgentOptions {
   serverUrl: string;
+  outputMode?: string;
 }
 
 interface AgentState {
@@ -14,13 +13,18 @@ interface AgentState {
   ws?: WebSocket;
   capabilities: Map<string, any>;
   serverUrl: string;
+  logger: ReturnType<typeof createLogger>;
+  outputMode?: string;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
+  const logger = createLogger('agent', options.outputMode);
   const config = getConfig();
   const state: AgentState = {
     capabilities: new Map(),
     serverUrl: options.serverUrl,
+    logger,
+    ...(options.outputMode && { outputMode: options.outputMode }),
   };
   
   logger.info('Starting agent');
@@ -37,7 +41,7 @@ export async function startAgent(options: AgentOptions): Promise<void> {
   }, config.agentHeartbeatMs || 15000);
   
   process.on('SIGINT', () => {
-    logger.info('Shutting down');
+    state.logger.info('Shutting down');
     state.ws?.close();
     process.exit(0);
   });
@@ -46,13 +50,13 @@ export async function startAgent(options: AgentOptions): Promise<void> {
 async function connectToServer(state: AgentState, serverUrl: string): Promise<void> {
   const wsUrl = serverUrl.replace(/^http/, 'ws') + '/agent/register';
   
-  logger.info({ url: wsUrl }, 'Connecting to server');
+  state.logger.info({ url: wsUrl }, 'Connecting to server');
   
   const ws = new WebSocket(wsUrl);
   state.ws = ws;
   
   ws.on('open', () => {
-    logger.info('Connected to server');
+    state.logger.info('Connected to server');
     
     const hello = {
       type: 'CLIENT_HELLO',
@@ -71,7 +75,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       
       if (msg.type === 'ASSIGN') {
         state.agentId = msg.agentId;
-        logger.info({ agentId: msg.agentId }, 'Agent registered');
+        state.logger.info({ agentId: msg.agentId }, 'Agent registered');
         
         // Create capability if none exist
         if (state.capabilities.size === 0) {
@@ -90,11 +94,11 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         const cap = state.capabilities.get(capId);
         
         if (!cap) {
-          logger.warn({ capId }, 'Unknown capability');
+          state.logger.warn({ capId }, 'Unknown capability');
           return;
         }
         
-        logger.info({ capId, socketId }, 'Invoker connected');
+        state.logger.info({ capId, socketId }, 'Invoker connected');
         
         const session = await handleInvokerConnection(state.ws!, socketId, cap);
         relaySessions.set(socketId, session);
@@ -118,16 +122,16 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       if (data instanceof Buffer) {
         return;
       }
-      logger.error({ error }, 'Failed to handle message');
+      state.logger.error({ error }, 'Failed to handle message');
     }
   });
   
   ws.on('error', (error) => {
-    logger.error({ error }, 'WebSocket error');
+    state.logger.error({ error }, 'WebSocket error');
   });
   
   ws.on('close', () => {
-    logger.info('Disconnected from server');
+    state.logger.info('Disconnected from server');
     setTimeout(() => connectToServer(state, serverUrl), 5000);
   });
 }
@@ -138,18 +142,22 @@ async function createAndDisplayCapability(state: AgentState): Promise<void> {
   
   const cap = await createCapability({
     singleRun: false,
+    ...(state.outputMode && { outputMode: state.outputMode }),
   });
   
   state.capabilities.set(cap.capId, cap);
   
   const link = `${relayUrl}/cap/${cap.capId}#S=${cap.S}`;
   
-  console.log('\n=====================================');
-  console.log('Capability created');
-  console.log(`capId: ${cap.capId}`);
-  console.log(`S: ${cap.S}`);
-  console.log(`\nWeb URL: ${link}`);
-  console.log('=====================================\n');
+  state.logger.info('');
+  state.logger.info('=====================================');
+  state.logger.info('Capability created');
+  state.logger.info(`capId: ${cap.capId}`);
+  state.logger.info(`S: ${cap.S}`);
+  state.logger.info('');
+  state.logger.info(`Web URL: ${link}`);
+  state.logger.info('=====================================');
+  state.logger.info('');
 }
 
 function announceCapability(state: AgentState, capId: string): void {
@@ -161,7 +169,7 @@ function announceCapability(state: AgentState, capId: string): void {
   };
   
   state.ws.send(JSON.stringify(announce));
-  logger.info({ capId }, 'Capability announced');
+  state.logger.info({ capId }, 'Capability announced');
 }
 
 function sendHeartbeat(state: AgentState): void {
@@ -185,15 +193,19 @@ function displayCapabilities(state: AgentState): void {
   const config = getConfig();
   const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'https://suncoder.dev';
   
-  console.log('\n=====================================');
-  console.log('Using existing capabilities:');
+  state.logger.info('');
+  state.logger.info('=====================================');
+  state.logger.info('Using existing capabilities:');
   
   for (const [capId, cap] of state.capabilities) {
-    console.log(`\ncapId: ${capId}`);
-    console.log(`S: ${cap.S}`);
+    state.logger.info('');
+    state.logger.info(`capId: ${capId}`);
+    state.logger.info(`S: ${cap.S}`);
     
     const link = `${relayUrl}/cap/${capId}#S=${cap.S}`;
-    console.log(`\nWeb URL: ${link}`);
+    state.logger.info('');
+    state.logger.info(`Web URL: ${link}`);
   }
-  console.log('=====================================\n');
+  state.logger.info('=====================================');
+  state.logger.info('');
 }

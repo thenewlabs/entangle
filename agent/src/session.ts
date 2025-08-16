@@ -17,6 +17,7 @@ import {
   aeadEncrypt,
   aeadDecrypt,
   verifyHmac,
+  computeHmac,
   hashPolicy,
 } from '@sunpix/entangle-crypto';
 import { 
@@ -155,18 +156,56 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
 
 async function handleAuth1(session: Session, payload: Uint8Array): Promise<void> {
   try {
+    logger.debug({ 
+      payloadLength: payload.length,
+      payloadHex: Buffer.from(payload).toString('hex').substring(0, 100),
+      capId: session.cap.capId 
+    }, 'AUTH1 received');
+    
     const saltCap = extractSaltFromCapId(session.cap.capId);
     const S = session.cap.S;
     
     session.keys = await deriveKeys(S, saltCap);
     
-    // AUTH1 payload is just the HMAC itself (32 bytes)
-    if (payload.length !== 32) {
-      throw new Error('Invalid AUTH1 HMAC length');
+    // AUTH1 payload should be HMAC (32 bytes) + nonceB (variable length)
+    if (payload.length < 32) {
+      logger.error({ payloadLength: payload.length }, 'AUTH1 payload too short');
+      throw new Error('Invalid AUTH1 payload: too short');
     }
     
-    // Generate our own nonceB for AUTH2
-    session.nonceB = require('crypto').randomBytes(16).toString('hex');
+    const receivedHmac = payload.slice(0, 32);
+    const nonceBBytes = payload.slice(32);
+    
+    logger.debug({
+      hmacHex: Buffer.from(receivedHmac).toString('hex'),
+      nonceBLength: nonceBBytes.length,
+      nonceBHex: Buffer.from(nonceBBytes).toString('hex')
+    }, 'AUTH1 parsed components');
+    
+    // Convert nonceB bytes to string (it's already UTF-8 encoded)
+    session.nonceB = new TextDecoder().decode(nonceBBytes);
+    
+    logger.debug({ nonceB: session.nonceB }, 'Decoded nonceB');
+    
+    // Verify the HMAC
+    const auth1Data = new TextEncoder().encode('hello' + session.cap.capId + session.nonceB);
+    const expectedHmac = computeHmac(session.keys.K_auth, auth1Data);
+    
+    logger.debug({
+      auth1DataString: 'hello' + session.cap.capId + session.nonceB,
+      auth1DataHex: Buffer.from(auth1Data).toString('hex'),
+      expectedHmacHex: Buffer.from(expectedHmac).toString('hex'),
+      receivedHmacHex: Buffer.from(receivedHmac).toString('hex')
+    }, 'HMAC verification details');
+    
+    if (!verifyHmac(session.keys.K_auth, auth1Data, receivedHmac)) {
+      logger.error('AUTH1 HMAC verification failed');
+      throw new Error('AUTH1 HMAC verification failed');
+    }
+    
+    logger.debug('AUTH1 HMAC verified successfully');
+    
+    // Generate nonceC for AUTH2
     session.nonceC = require('crypto').randomBytes(16).toString('hex');
     
     const auth2 = {
@@ -181,8 +220,14 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     const frame = encodeFrame(FrameType.AUTH2, encode(encrypted));
     
     sendRelayResponse(session, frame);
+    
+    logger.debug({ nonceB: session.nonceB, nonceC: session.nonceC }, 'AUTH2 sent successfully');
   } catch (error) {
-    logger.error({ error }, 'AUTH1 failed');
+    logger.error({ 
+      error: error instanceof Error ? error.message : String(error),
+      payloadLength: payload.length,
+      capId: session.cap.capId
+    }, 'AUTH1 failed');
     sendError(session, null, ErrorCode.AUTH_FAILED, 'Authentication failed');
   }
 }

@@ -49,7 +49,9 @@ bytes 9+:   payload (encrypted except AUTH1/AUTH3)
 ```
 
 ### Auth Handshake
-1. **AUTH1**: `HMAC(K_auth, "hello" || capId || nonceB)`
+1. **AUTH1**: Payload = `HMAC(K_auth, "hello" || capId || nonceB)` || `nonceB`
+   - First 32 bytes: HMAC
+   - Remaining bytes: nonceB (as UTF-8 string)
 2. **AUTH2**: AEAD-encrypted `{ok, nonceB, nonceC, expiryTs, policyHash}`
 3. **AUTH3**: `HMAC(K_auth, "ready" || nonceC)`
 

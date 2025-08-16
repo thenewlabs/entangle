@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
-import { createLogger } from '@sunpix/entangle-utils';
+import { createLogger, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { openTerminal } from './terminal.js';
 import { runSingle } from './single.js';
-
-const logger = createLogger('invoke');
 
 function parseCapUrl(u: string): { host: string; capId: string; S: string } {
   const url = new URL(u);
@@ -33,27 +31,40 @@ function parseCapUrl(u: string): { host: string; capId: string; S: string } {
 async function main() {
   const args = process.argv.slice(2);
   
+  // Parse output mode first
+  let outputMode = 'text';
+  const outputModeIndex = args.indexOf('--output-mode');
+  if (outputModeIndex !== -1 && outputModeIndex + 1 < args.length) {
+    outputMode = args[outputModeIndex + 1] || 'text';
+    args.splice(outputModeIndex, 2);
+  }
+  
+  const logger = createLogger('invoke', outputMode);
+  const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
+  output.version('Entangle Invoke', getVersionInfo());
+  
   if (args.length === 0) {
-    console.error('Usage: invoke <cap-url> [command [args...]] [--cwd PATH]');
-    console.error('');
-    console.error('Examples:');
-    console.error('  # Interactive terminal');
-    console.error('  invoke https://suncoder.dev/cap/capId#S=secret');
-    console.error('');
-    console.error('  # Single command');
-    console.error('  invoke https://suncoder.dev/cap/capId#S=secret ls -la');
-    console.error('');
-    console.error('Options:');
-    console.error('  --cwd <path>  Working directory');
-    console.error('  --cols <n>    Terminal columns (default: 80)');
-    console.error('  --rows <n>    Terminal rows (default: 24)');
-    console.error('  --abort-after-ms <n>  Abort command after N milliseconds');
+    output.error('Usage: invoke <cap-url> [command [args...]] [--cwd PATH]');
+    output.error('');
+    output.error('Examples:');
+    output.error('  # Interactive terminal');
+    output.error('  invoke https://suncoder.dev/cap/capId#S=secret');
+    output.error('');
+    output.error('  # Single command');
+    output.error('  invoke https://suncoder.dev/cap/capId#S=secret ls -la');
+    output.error('');
+    output.error('Options:');
+    output.error('  --cwd <path>  Working directory');
+    output.error('  --cols <n>    Terminal columns (default: 80)');
+    output.error('  --rows <n>    Terminal rows (default: 24)');
+    output.error('  --abort-after-ms <n>  Abort command after N milliseconds');
+    output.error('  --output-mode <mode>  Output mode: text or stream-json (default: text)');
     process.exit(2);
   }
   
   const capUrl = args[0];
   if (!capUrl) {
-    console.error('Error: capability URL required');
+    output.error('Error: capability URL required');
     process.exit(2);
   }
   
@@ -102,6 +113,7 @@ async function main() {
     }
     
   } catch (error) {
+    output.error('Failed', error instanceof Error ? error.message : String(error));
     logger.error({ error }, 'Failed');
     process.exit(1);
   }
