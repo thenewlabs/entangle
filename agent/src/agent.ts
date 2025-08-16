@@ -6,6 +6,7 @@ import { loadCapabilities, createCapability } from './capability.js';
 interface AgentOptions {
   serverUrl: string;
   outputMode?: string;
+  password?: string;
 }
 
 interface AgentState {
@@ -15,6 +16,8 @@ interface AgentState {
   serverUrl: string;
   output: OutputHandler;
   outputMode?: string;
+  password?: string;
+  passwordHash?: string;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
@@ -25,9 +28,18 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     serverUrl: options.serverUrl,
     output,
     ...(options.outputMode && { outputMode: options.outputMode }),
+    ...(options.password && { password: options.password }),
   };
   
   output.info('Starting agent');
+  
+  // Hash password if provided
+  if (state.password) {
+    const crypto = require('crypto');
+    // Simple hash for demo - in production, use Argon2id
+    state.passwordHash = crypto.createHash('sha256').update(state.password).digest('hex');
+    output.info('Password protection enabled');
+  }
   
   const caps = await loadCapabilities();
   for (const cap of caps) {
@@ -100,7 +112,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         
         state.output.info(`Invoker connected: socketId=${socketId}, capId=${capId}`);
         
-        const session = await handleInvokerConnection(state.ws!, socketId, cap);
+        const session = await handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker

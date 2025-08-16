@@ -4,6 +4,7 @@ export enum FrameType {
   AUTH1 = 0x01,
   AUTH2 = 0x02,
   AUTH3 = 0x03,
+  AUTH_PW = 0x04, // Optional password authentication
   RUN = 0x10,
   STDIN = 0x11,
   STDOUT = 0x12,

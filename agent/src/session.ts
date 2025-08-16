@@ -42,6 +42,9 @@ export interface Session {
   keys?: Awaited<ReturnType<typeof deriveKeys>>;
   counters: BidirectionalCounters;
   authenticated: boolean;
+  passwordVerified: boolean;
+  requiresPassword: boolean;
+  passwordHash?: string | undefined;
   nonceB?: string;
   nonceC?: string;
   hasRun: boolean;
@@ -62,7 +65,8 @@ export function sendRelayResponse(session: Session, frame: Uint8Array): void {
 export async function handleInvokerConnection(
   agentWs: WebSocket,
   socketId: string,
-  cap: CapabilityInfo
+  cap: CapabilityInfo,
+  passwordHash?: string
 ): Promise<any> {
   const session: Session = {
     socketId,
@@ -70,6 +74,9 @@ export async function handleInvokerConnection(
     cap,
     counters: new BidirectionalCounters(),
     authenticated: false,
+    passwordVerified: !passwordHash, // If no password, consider it verified
+    requiresPassword: !!passwordHash,
+    passwordHash: passwordHash || undefined,
     hasRun: false,
     ptyManager: new PtyManager(),
   };
@@ -172,6 +179,10 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
       await handleAuth3(session, frame.payload);
       break;
       
+    case FrameType.AUTH_PW:
+      await handleAuthPw(session, frame.payload);
+      break;
+      
     case FrameType.RUN:
       await handleRun(session, frame.payload);
       break;
@@ -251,6 +262,7 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
       nonceC: session.nonceC,
       expiryTs: Date.now() + 3600000,
       policyHash: hashPolicy(session.cap.policy),
+      requiresPassword: session.requiresPassword,
     };
     
     const encrypted = aeadEncrypt(session.keys.K_enc, FrameType.AUTH2, 0, auth2);
@@ -280,11 +292,72 @@ async function handleAuth3(session: Session, payload: Uint8Array): Promise<void>
   
   session.authenticated = true;
   output.info(`Session authenticated: ${session.socketId}`);
+  
+  // If password is required but not yet verified, don't allow other operations
+  if (session.requiresPassword && !session.passwordVerified) {
+    output.info(`Waiting for password authentication: ${session.socketId}`);
+  }
+}
+
+async function handleAuthPw(session: Session, payload: Uint8Array): Promise<void> {
+  if (!session.authenticated || !session.keys) {
+    sendError(session, null, ErrorCode.AUTH_FAILED, 'Not authenticated');
+    return;
+  }
+  
+  if (!session.requiresPassword) {
+    sendError(session, null, ErrorCode.AUTH_FAILED, 'Password not required');
+    return;
+  }
+  
+  if (session.passwordVerified) {
+    sendError(session, null, ErrorCode.AUTH_FAILED, 'Already verified');
+    return;
+  }
+  
+  try {
+    const encrypted = decode(payload) as any;
+    const decrypted = aeadDecrypt(session.keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+    session.counters.incoming.validate(decrypted.ctr);
+    
+    const authPwMsg = decrypted.msg as { password: string };
+    
+    // Hash the provided password and compare
+    const crypto = require('crypto');
+    const providedHash = crypto.createHash('sha256').update(authPwMsg.password).digest('hex');
+    
+    if (providedHash !== session.passwordHash) {
+      output.warn(`Invalid password attempt for session: ${session.socketId}`);
+      sendError(session, null, ErrorCode.AUTH_FAILED, 'Invalid password');
+      return;
+    }
+    
+    session.passwordVerified = true;
+    output.info(`Password verified for session: ${session.socketId}`);
+    
+    // Send success response
+    const successMsg = {
+      ctr: session.counters.outgoing.next(),
+      msg: { ok: true }
+    };
+    
+    const successEncrypted = aeadEncrypt(session.keys.K_enc, FrameType.AUTH_PW, successMsg.ctr, successMsg.msg);
+    const successFrame = encodeFrame(FrameType.AUTH_PW, encode(successEncrypted));
+    sendRelayResponse(session, successFrame);
+  } catch (error) {
+    output.error('AUTH_PW failed', error instanceof Error ? error.message : String(error));
+    sendError(session, null, ErrorCode.AUTH_FAILED, 'Password verification failed');
+  }
 }
 
 async function handleRun(session: Session, payload: Uint8Array): Promise<void> {
   if (!session.authenticated || !session.keys) {
     sendError(session, null, ErrorCode.AUTH_FAILED, 'Not authenticated');
+    return;
+  }
+  
+  if (!session.passwordVerified) {
+    sendError(session, null, ErrorCode.AUTH_FAILED, 'Password verification required');
     return;
   }
   
@@ -336,6 +409,11 @@ async function handleAbort(session: Session, payload: Uint8Array): Promise<void>
 async function handleTtyOpen(session: Session, payload: Uint8Array): Promise<void> {
   if (!session.authenticated || !session.keys || !session.ptyManager) {
     sendError(session, null, ErrorCode.AUTH_FAILED, 'Not authenticated');
+    return;
+  }
+  
+  if (!session.passwordVerified) {
+    sendError(session, null, ErrorCode.AUTH_FAILED, 'Password verification required');
     return;
   }
   
