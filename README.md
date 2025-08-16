@@ -1,97 +1,61 @@
 # Entangle
 
-Secure blind relay system with full POSIX terminal support. The relay never sees plaintext commands, arguments, outputs, or secrets.
+Secure, blind relay to run your local CLI tools from anywhere. The server only forwards encrypted frames; your agent executes commands or hosts a live terminal. Simple, private, and auditable.
 
-## Features
-
-- **Interactive Terminal**: Full POSIX terminal over encrypted WebSocket
-- **Single Command Mode**: Run individual commands with streaming output
-- **End-to-End Encryption**: Server acts as blind relay, never sees plaintext
-- **Browser & CLI**: Both web terminal and command-line interfaces
-- **No User Switching**: Commands run as the same OS user as the agent
+## TL;DR
+- Share a capability URL to grant access temporarily.
+- End‑to‑end encryption; server sees only opaque frames.
+- Works for single commands or an interactive terminal (PTY).
 
 ## Quick Start
+1) Build all binaries
+- `npm install` (first time)
+- `npm run build` (outputs `dist/agent.js`, `dist/server.js`, `dist/invoke.js`)
 
-```bash
-# Install dependencies
-npm install
+2) Start the server
+- `node dist/server.js` (env: `PORT=8080` by default)
 
-# Build all packages
-npm run build
+3) Start the agent and create a capability
+- `node dist/agent.js create-cap`
+- `node dist/agent.js start --server http://localhost:8080`
+  - Output will show a web URL like: `http://localhost:8080/cap/<capId>#S=<secret>`
 
-# Start server (in one terminal)
-npm run server
+4) Invoke (CLI)
+- Interactive terminal: `node dist/invoke.js <cap-url>`
+- Single command: `node dist/invoke.js <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N]`
 
-# Start agent (in another terminal)
-npm run agent
+Tip: All CLIs support `--output-mode text|stream-json`.
 
-# Agent will display:
-# capId: <base64url>
-# S: <base64url>
-# Web URL: https://suncoder.dev/cap/<capId>#S=<S>
+## Minimal Usage (Dev mode)
+- Server: `npm run dev --workspace=@sunpix/entangle-server`
+- Agent: `npm run dev --workspace=@sunpix/entangle-agent`
 
-# Use the web URL in browser for interactive terminal
-# Or use invoke CLI:
+## Security Highlights
+- AEAD (XChaCha20‑Poly1305) with counters prevents replay and reordering.
+- HMAC handshake (AUTH1/2/3) proves knowledge of secret `S`.
+- Relay enforces max frame sizes and rate limits; stays blind to plaintext.
 
-# Interactive terminal
-npm run invoke -- https://suncoder.dev/cap/<capId>#S=<S>
+## Key Env Vars
+- Server: `PORT`, `HOST`, `MAX_FRAME_BYTES`, `RELAY_RATE_RPS`, `RELAY_BURST`
+- Agent: `RELAY_URL`, `AGENT_ALLOWED_CWD`, `AGENT_DEFAULT_CWD`, `MAX_OUT_BYTES`
 
-# Single command
-npm run invoke -- https://suncoder.dev/cap/<capId>#S=<S> ls -la
-```
+## Repo Layout
+- `agent/` Agent CLI + runner + PTY
+- `server/` Relay server (Express + WS)
+- `invoke/` Invoker CLI (single command or PTY)
+- `packages/` Protocol, crypto, and utils libraries
+- `web/` Optional SPA terminal client
 
-## Architecture
+## Learn More
+- Architecture: `docs/architecture.md`
+- End‑to‑end & protocol: `docs/e2e.md`
+- Agent: `docs/agent.md`
+- Server: `docs/server.md`
+- Invoke CLI: `docs/invoke.md`
 
-- **Agent**: Runs on target machine, handles PTY/command execution
-- **Server**: Blind relay that routes encrypted frames by capId
-- **Invoke**: CLI supporting both terminal and single command modes
-- **Web**: Browser terminal (xterm.js) and single command UI
+## Testing
+- `npm test` (Vitest)
 
-## Security
+---
+Use `AGENT_ALLOWED_CWD` to constrain where remote commands can run, and consider OS‑level sandboxing for the agent in sensitive environments.
 
-- **Encryption**: XChaCha20-Poly1305 AEAD
-- **Key Derivation**: Argon2id + HKDF from secret S
-- **Anti-Replay**: Monotonic counters per direction
-- **Blind Server**: Only sees capId for routing, not content
-- **CWD Validation**: Optional allowed directory restrictions
-
-## Configuration
-
-Environment variables in `.env`:
-
-```bash
-# Server
-PORT=8080
-PUBLIC_ORIGIN=https://suncoder.dev
-
-# Timeouts
-TTY_IDLE_TIMEOUT_MS=1200000    # 20 minutes
-CMD_DEFAULT_WALL_MS=60000       # 1 minute
-
-# Agent
-AGENT_SHELL=/bin/bash
-AGENT_DEFAULT_CWD=$HOME
-AGENT_ALLOWED_CWD=/home:/Users:/srv
-```
-
-## Development
-
-```bash
-# Run server in dev mode
-npm run dev
-
-# Run tests
-npm test
-
-# Clean build artifacts
-npm run clean
-```
-
-## URL Format
-
-```
-https://suncoder.dev/cap/{capId}#S={secret}
-```
-
-- `capId`: Base64url encoded (32 bytes: 16 salt + 16 random)
-- `S`: Base64url encoded 32-byte secret in fragment (never sent to server)
