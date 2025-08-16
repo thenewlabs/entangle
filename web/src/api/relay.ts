@@ -116,13 +116,13 @@ export class RelayClient {
     const auth1Data = new TextEncoder().encode('hello' + this.capId + nonceBHex);
     const auth1Hmac = computeHmac(this.keys.K_auth, auth1Data);
     
-    console.log('[RelayClient] AUTH1 details:', {
-      capId: this.capId,
-      nonceB: nonceBHex,
-      auth1DataString: 'hello' + this.capId + nonceBHex,
-      auth1DataHex: Array.from(auth1Data).map(b => b.toString(16).padStart(2, '0')).join(''),
-      hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
-    });
+    // console.log('[RelayClient] AUTH1 details:', {
+    //   capId: this.capId,
+    //   nonceB: nonceBHex,
+    //   auth1DataString: 'hello' + this.capId + nonceBHex,
+    //   auth1DataHex: Array.from(auth1Data).map(b => b.toString(16).padStart(2, '0')).join(''),
+    //   hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
+    // });
     
     // Send HMAC + nonceB hex string as bytes
     const nonceBBytes = new TextEncoder().encode(nonceBHex);

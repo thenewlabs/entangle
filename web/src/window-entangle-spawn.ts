@@ -9,6 +9,8 @@ interface SpawnOptions {
   cwd?: string;
   env?: Record<string, string>;
   signal?: AbortSignal;
+  // If true, run via shell (sh -lc)
+  shell?: boolean;
 }
 
 type DataHandler = (chunk: Uint8Array) => void;
@@ -185,6 +187,11 @@ class EntangleConnection {
     const sid = child._sid;
     // Start counters for this stream
     const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    // Build argv based on shell option
+    const argv = child._options.shell
+      ? ['sh', '-lc', [child._command, ...child._args].join(' ')]
+      : [child._command, ...child._args];
+
     const msg = {
       ctr,
       msg: {
@@ -193,7 +200,7 @@ class EntangleConnection {
         sid,
         mode: 'cmd' as const,
         exec: {
-          argv: [child._command, ...child._args],
+          argv,
           cwd: child._options.cwd,
           env: child._options.env,
           stdin: true,
@@ -205,14 +212,9 @@ class EntangleConnection {
       const aad = encode({ type: FrameType.STREAM_OPEN });
       return await (await import('@sunpix/entangle-crypto')).streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
     })();
-    console.log('[DEBUG] Sending STREAM_OPEN:', {
-      plaintextLen: encode(msg).length,
-      ciphertextLen: ciphertext.length,
-      frameType: FrameType.STREAM_OPEN,
-      sid: sid
-    });
+    
     const frame = encodeFrame(FrameType.STREAM_OPEN, ciphertext);
-    console.log('[DEBUG] Encoded frame length:', frame.length);
+
     this.ws.send(frame);
     // Track pending open to bind when 'opened' arrives with actual sid
     this.pendingOpens.push(child);
@@ -338,10 +340,67 @@ declare global {
   if (!cap) {
     // Expose a lazy erroring spawn
     entangle.spawn = () => { throw new Error('Capability not found in URL'); };
+    entangle.exec = async () => { throw new Error('Capability not found in URL'); };
     return;
   }
   const conn = new EntangleConnection(cap.capId, cap.S);
   entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
+
+  // Helper: execute a command line via shell and await completion
+  entangle.execCommand = async (
+    commandLine: string,
+    options: Omit<SpawnOptions, 'shell'> & { encoding?: 'utf-8' | null } = {}
+  ) => {
+    return await entangle.exec('sh', ['-lc', commandLine], options);
+  };
+
+  // Helper: bind a default working directory
+  entangle.withCwd = (cwd: string) => {
+    return {
+      spawn: (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, { ...options, cwd }),
+      exec: async (command: string, args: string[] = [], options: SpawnOptions & { encoding?: 'utf-8' | null } = {}) =>
+        await entangle.exec(command, args, { ...options, cwd }),
+      execCommand: async (commandLine: string, options: Omit<SpawnOptions, 'shell'> & { encoding?: 'utf-8' | null } = {}) =>
+        await entangle.exec('sh', ['-lc', commandLine], { ...options, cwd }),
+    };
+  };
+
+  // Awaitable convenience: run a command and resolve with output and exit
+  // Note: stdout and stderr are merged in the current protocol.
+  entangle.exec = async (
+    command: string,
+    args: string[] = [],
+    options: SpawnOptions & { encoding?: 'utf-8' | null } = {}
+  ): Promise<{ code: number | null; signal: string | null; stdout: Uint8Array; text?: string }> => {
+    const child = conn.spawn(command, args, options);
+    const chunks: Uint8Array[] = [];
+    let done = false;
+
+    return await new Promise((resolve, reject) => {
+      child.on('data', (chunk: Uint8Array) => {
+        // Ensure chunk is Uint8Array
+        chunks.push(new Uint8Array(chunk));
+      });
+      child.on('error', (message: string) => {
+        if (done) return;
+        done = true;
+        reject(new Error(message));
+      });
+      child.on('exit', (code: number | null, signal: string | null) => {
+        if (done) return;
+        done = true;
+        const totalLen = chunks.reduce((n, c) => n + c.length, 0);
+        const buf = new Uint8Array(totalLen);
+        let off = 0;
+        for (const c of chunks) { buf.set(c, off); off += c.length; }
+        if (options.encoding === 'utf-8' || options.encoding === undefined) {
+          resolve({ code, signal, stdout: buf, text: new TextDecoder().decode(buf) });
+        } else {
+          resolve({ code, signal, stdout: buf });
+        }
+      });
+    });
+  };
 })();
 
 export {};
