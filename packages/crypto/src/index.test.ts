@@ -11,7 +11,6 @@ import {
   verifyHmac,
   base64UrlEncode,
   base64UrlDecode,
-  generateNamespace,
   hashPolicy,
 } from './index.js';
 
@@ -214,24 +213,9 @@ describe('Crypto Package', () => {
     });
   });
 
-  describe('Namespace generation', () => {
-    it('should generate valid namespace', () => {
-      const ns = generateNamespace();
-      
-      expect(ns).toMatch(/^ns_[A-Z2-7]{10}$/);
-    });
-
-    it('should generate unique namespaces', () => {
-      const ns1 = generateNamespace();
-      const ns2 = generateNamespace();
-      
-      expect(ns1).not.toEqual(ns2);
-    });
-  });
-
   describe('Policy hashing', () => {
     it('should hash policy consistently', () => {
-      const policy = { tool: '/usr/bin/test', singleRun: true };
+      const policy = { singleRun: true };
       
       const hash1 = hashPolicy(policy);
       const hash2 = hashPolicy(policy);
@@ -240,8 +224,8 @@ describe('Crypto Package', () => {
     });
 
     it('should produce different hashes for different policies', () => {
-      const policy1 = { tool: '/usr/bin/test1', singleRun: true };
-      const policy2 = { tool: '/usr/bin/test2', singleRun: true };
+      const policy1 = { singleRun: true };
+      const policy2 = { singleRun: false };
       
       const hash1 = hashPolicy(policy1);
       const hash2 = hashPolicy(policy2);

@@ -28,7 +28,7 @@ export async function startServer(): Promise<void> {
   app.use(express.json());
   
   app.get('/__health', (_req, res) => {
-    res.json({ status: 'ok', namespaces: routing.getNamespaceCount() });
+    res.json({ status: 'ok', agents: routing.getAgentCount() });
   });
   
   // Try multiple paths to find the web dist directory
@@ -52,7 +52,7 @@ export async function startServer(): Promise<void> {
     app.use(express.static(webDistPath));
     
     // Catch all routes to serve the SPA for client-side routing
-    // This includes capability URLs like /ns_ABC123/capId_xyz
+    // This includes capability URLs like /cap/capId_xyz
     app.get('*', (_req, res) => {
       res.sendFile(join(webDistPath, 'index.html'));
     });
@@ -71,12 +71,11 @@ export async function startServer(): Promise<void> {
       });
     } else if (url.pathname.startsWith('/relay/')) {
       const parts = url.pathname.split('/');
-      if (parts.length === 4 && parts[2] && parts[3]) {
-        const namespace = parts[2];
-        const capId = parts[3];
+      if (parts.length === 3 && parts[2]) {
+        const capId = parts[2];
         
         wss.handleUpgrade(request, socket, head, (ws) => {
-          setupRelayRoute(ws, routing, namespace, capId);
+          setupRelayRoute(ws, routing, capId);
         });
       } else {
         socket.destroy();

@@ -4,7 +4,6 @@ export const RunMessageSchema = z.object({
   ctr: z.number(),
   msg: z.object({
     commandId: z.string(),
-    tool: z.string(),
     argv: z.array(z.string()),
     cwd: z.string().optional(),
     limits: z.object({
@@ -82,6 +81,57 @@ export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 export type AbortMessage = z.infer<typeof AbortMessageSchema>;
 export type KeepaliveMessage = z.infer<typeof KeepaliveMessageSchema>;
 export type Auth2Message = z.infer<typeof Auth2MessageSchema>;
+
+// Terminal (PTY) messages
+export const TtyOpenMessageSchema = z.object({
+  ctr: z.number(),
+  msg: z.object({
+    sessionId: z.string(),
+    cwd: z.string().optional(),
+    cols: z.number(),
+    rows: z.number(),
+  }),
+});
+
+export const TtyDataMessageSchema = z.object({
+  ctr: z.number(),
+  msg: z.object({
+    sessionId: z.string(),
+    chunk: z.instanceof(Uint8Array),
+  }),
+});
+
+export const TtyResizeMessageSchema = z.object({
+  ctr: z.number(),
+  msg: z.object({
+    sessionId: z.string(),
+    cols: z.number(),
+    rows: z.number(),
+  }),
+});
+
+export const TtySignalMessageSchema = z.object({
+  ctr: z.number(),
+  msg: z.object({
+    sessionId: z.string(),
+    signal: z.enum(['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']),
+  }),
+});
+
+export const TtyExitMessageSchema = z.object({
+  ctr: z.number(),
+  msg: z.object({
+    sessionId: z.string(),
+    code: z.number().nullable(),
+    signal: z.string().nullable(),
+  }),
+});
+
+export type TtyOpenMessage = z.infer<typeof TtyOpenMessageSchema>;
+export type TtyDataMessage = z.infer<typeof TtyDataMessageSchema>;
+export type TtyResizeMessage = z.infer<typeof TtyResizeMessageSchema>;
+export type TtySignalMessage = z.infer<typeof TtySignalMessageSchema>;
+export type TtyExitMessage = z.infer<typeof TtyExitMessageSchema>;
 
 export enum ErrorCode {
   AUTH_FAILED = 'auth_failed',

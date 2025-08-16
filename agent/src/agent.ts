@@ -1,23 +1,17 @@
 import WebSocket from 'ws';
 import { createLogger, getConfig } from '@sunpix/entangle-utils';
-import { FrameType, encodeFrame } from '@sunpix/entangle-protocol';
-// import { generateNamespace } from '@sunpix/entangle-crypto';
-import { encode } from 'cborg';
-import { handleInvokerConnection } from './relay.js';
+import { handleInvokerConnection } from './session.js';
 import { loadCapabilities, createCapability } from './capability.js';
 
 const logger = createLogger('agent');
 
 interface AgentOptions {
-  tools: string[];
   serverUrl: string;
-  policyFile?: string;
 }
 
 interface AgentState {
-  namespace?: string;
+  agentId?: string;
   ws?: WebSocket;
-  tools: string[];
   capabilities: Map<string, any>;
   serverUrl: string;
 }
@@ -25,12 +19,11 @@ interface AgentState {
 export async function startAgent(options: AgentOptions): Promise<void> {
   const config = getConfig();
   const state: AgentState = {
-    tools: options.tools,
     capabilities: new Map(),
     serverUrl: options.serverUrl,
   };
   
-  logger.info({ tools: options.tools }, 'Starting agent with tools');
+  logger.info('Starting agent');
   
   const caps = await loadCapabilities();
   for (const cap of caps) {
@@ -41,7 +34,7 @@ export async function startAgent(options: AgentOptions): Promise<void> {
   
   setInterval(() => {
     sendHeartbeat(state);
-  }, config.agentHeartbeatMs);
+  }, config.agentHeartbeatMs || 15000);
   
   process.on('SIGINT', () => {
     logger.info('Shutting down');
@@ -64,7 +57,6 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
     const hello = {
       type: 'CLIENT_HELLO',
       machineId: getMachineId(),
-      tools: state.tools,
     };
     
     ws.send(JSON.stringify(hello));
@@ -78,17 +70,18 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       const msg = JSON.parse(data.toString());
       
       if (msg.type === 'ASSIGN') {
-        state.namespace = msg.namespace;
-        logger.info({ namespace: msg.namespace }, 'Namespace assigned');
+        state.agentId = msg.agentId;
+        logger.info({ agentId: msg.agentId }, 'Agent registered');
         
-        // Create capabilities for each tool if none exist
+        // Create capability if none exist
         if (state.capabilities.size === 0) {
-          await createCapabilitiesForTools(state);
+          await createAndDisplayCapability(state);
         } else {
           // Display existing capabilities
           displayCapabilities(state);
         }
         
+        // Announce all capabilities
         for (const capId of state.capabilities.keys()) {
           announceCapability(state, capId);
         }
@@ -103,9 +96,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         
         logger.info({ capId, socketId }, 'Invoker connected');
         
-        // Pass the whitelisted tools from the capability or agent state
-        const whitelistedTools = cap.tools || state.tools;
-        const session = await handleInvokerConnection(state.ws!, socketId, cap, whitelistedTools);
+        const session = await handleInvokerConnection(state.ws!, socketId, cap);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker
@@ -141,41 +132,28 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
   });
 }
 
-async function createCapabilitiesForTools(state: AgentState): Promise<void> {
+async function createAndDisplayCapability(state: AgentState): Promise<void> {
   const config = getConfig();
-  // Use the server URL provided when starting the agent
-  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'http://localhost:8080';
+  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'https://suncoder.dev';
   
-  // Create a single capability that works for all whitelisted tools
   const cap = await createCapability({
-    namespace: state.namespace!,
-    tool: '*', // Special marker for multi-tool capability
     singleRun: false,
   });
   
-  // Store the capability with reference to all tools
-  cap.tools = state.tools; // Add tools array to capability
   state.capabilities.set(cap.capId, cap);
   
-  const link = `${relayUrl}/${cap.namespace}/${cap.capId}#S=${cap.S}`;
+  const link = `${relayUrl}/cap/${cap.capId}#S=${cap.S}`;
   
   console.log('\n=====================================');
-  console.log(`Multi-tool capability created`);
-  console.log(`namespace: ${cap.namespace}`);
+  console.log('Capability created');
   console.log(`capId: ${cap.capId}`);
   console.log(`S: ${cap.S}`);
-  console.log(`\nWhitelisted tools:`);
-  for (const tool of state.tools) {
-    console.log(`  - ${tool}`);
-  }
-  console.log(`\nWeb link: ${link}`);
-  console.log(`\nInvoke command example:`);
-  console.log(`entangle-invoke --namespace ${cap.namespace} --cap-id ${cap.capId} --secret-s ${cap.S} --tool <toolname> --argv '["--help"]'`);
+  console.log(`\nWeb URL: ${link}`);
   console.log('=====================================\n');
 }
 
 function announceCapability(state: AgentState, capId: string): void {
-  if (!state.ws || !state.namespace) return;
+  if (!state.ws) return;
   
   const announce = {
     type: 'ANNOUNCE_CAP',
@@ -189,8 +167,12 @@ function announceCapability(state: AgentState, capId: string): void {
 function sendHeartbeat(state: AgentState): void {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
   
-  const frame = encodeFrame(FrameType.KEEPALIVE, encode({ t: Date.now() }));
-  state.ws.send(frame);
+  const heartbeat = {
+    type: 'HEARTBEAT',
+    timestamp: Date.now(),
+  };
+  
+  state.ws.send(JSON.stringify(heartbeat));
 }
 
 function getMachineId(): string {
@@ -201,29 +183,17 @@ function displayCapabilities(state: AgentState): void {
   if (state.capabilities.size === 0) return;
   
   const config = getConfig();
-  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'http://localhost:8080';
+  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'https://suncoder.dev';
   
   console.log('\n=====================================');
   console.log('Using existing capabilities:');
   
   for (const [capId, cap] of state.capabilities) {
-    console.log(`\nnamespace: ${state.namespace}`);
-    console.log(`capId: ${capId}`);
+    console.log(`\ncapId: ${capId}`);
     console.log(`S: ${cap.S}`);
     
-    if (cap.tools) {
-      console.log(`\nWhitelisted tools:`);
-      for (const tool of cap.tools) {
-        console.log(`  - ${tool}`);
-      }
-    } else if (cap.tool) {
-      console.log(`tool: ${cap.tool}`);
-    }
-    
-    const link = `${relayUrl}/${state.namespace}/${capId}#S=${cap.S}`;
-    console.log(`\nWeb link: ${link}`);
-    console.log(`\nInvoke command example:`);
-    console.log(`entangle-invoke --namespace ${state.namespace} --cap-id ${capId} --secret-s ${cap.S} --tool <toolname> --argv '["--help"]'`);
+    const link = `${relayUrl}/cap/${capId}#S=${cap.S}`;
+    console.log(`\nWeb URL: ${link}`);
   }
   console.log('=====================================\n');
 }

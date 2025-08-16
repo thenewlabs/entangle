@@ -9,25 +9,71 @@ import {
 } from '@sunpix/entangle-protocol';
 import { aeadEncrypt } from '@sunpix/entangle-crypto';
 import { encode } from 'cborg';
-import { type Session, sendRelayResponse } from './relay.js';
+import { type Session, sendRelayResponse } from './session.js';
+import { realpath } from 'fs/promises';
+import { resolve } from 'path';
 
 const logger = createLogger('runner');
+
+export function resolveCwd(requestedCwd?: string): string {
+  if (requestedCwd) {
+    return resolve(requestedCwd);
+  }
+  return process.env.AGENT_DEFAULT_CWD || process.cwd();
+}
+
+export async function validateCwd(cwd: string): Promise<void> {
+  const allowedPrefixes = process.env.AGENT_ALLOWED_CWD?.split(':') || [];
+  
+  if (allowedPrefixes.length === 0) {
+    // No restrictions
+    return;
+  }
+  
+  const realCwd = await realpath(cwd);
+  
+  for (const prefix of allowedPrefixes) {
+    const realPrefix = await realpath(prefix).catch(() => prefix);
+    if (realCwd.startsWith(realPrefix)) {
+      return;
+    }
+  }
+  
+  throw new Error(`CWD ${cwd} not in allowed prefixes`);
+}
 
 export async function runCommand(
   session: Session,
   runMsg: any
 ): Promise<void> {
-  // const config = getConfig();
-  const { commandId, tool, argv, cwd, limits } = runMsg;
+  const { commandId, argv, cwd: requestedCwd, limits } = runMsg;
   
-  logger.info({ commandId, tool, argv, cwd }, 'Running command');
+  if (!argv || argv.length === 0) {
+    throw new Error('No command provided');
+  }
+  
+  // Resolve and validate CWD
+  let cwd: string;
+  try {
+    cwd = resolveCwd(requestedCwd);
+    await validateCwd(cwd);
+  } catch (error: any) {
+    logger.error({ error, requestedCwd }, 'CWD validation failed');
+    throw error;
+  }
+  
+  const tool = argv[0];
+  const args = argv.slice(1);
+  
+  logger.info({ commandId, tool, args, cwd }, 'Running command');
   
   const startTime = Date.now();
   let bytesOut = 0;
-  const maxOutBytes = limits?.maxOutBytes || 10485760;
+  const maxOutBytes = limits?.maxOutBytes || parseInt(process.env.MAX_OUT_BYTES || '10485760', 10);
   
-  const child = spawn(tool, argv, {
-    cwd: cwd || process.cwd(),
+  // No user switching - run as same OS user as agent
+  const child = spawn(tool, args, {
+    cwd,
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: getMinimalEnv(),
@@ -145,7 +191,7 @@ function sendExit(
   sendRelayResponse(session, frame);
 }
 
-function getMinimalEnv(): NodeJS.ProcessEnv {
+export function getMinimalEnv(): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
     HOME: process.env.HOME || '/',

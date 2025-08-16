@@ -5,31 +5,31 @@ import type { RoutingState } from '../state/routing.js';
 const logger = createLogger('agent-route');
 
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
-  let namespace: string | undefined;
+  let agentId: string | undefined;
   
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
       
       if (msg.type === 'CLIENT_HELLO') {
-        namespace = routing.registerAgent(ws, msg.machineId);
+        agentId = routing.registerAgent(ws, msg.machineId);
         
         ws.send(JSON.stringify({
           type: 'ASSIGN',
-          namespace,
+          // No namespace needed anymore
         }));
         
-        logger.info({ namespace }, 'Namespace assigned to agent');
-      } else if (msg.type === 'ANNOUNCE_CAP' && namespace) {
-        const success = routing.announceCapability(namespace, msg.capId);
+        logger.info({ agentId }, 'Agent registered');
+      } else if (msg.type === 'ANNOUNCE_CAP' && agentId) {
+        const success = routing.announceCapability(agentId, msg.capId);
         
         if (success) {
-          logger.info({ namespace, capId: msg.capId }, 'Capability announced');
+          logger.info({ agentId, capId: msg.capId }, 'Capability announced');
         } else {
-          logger.warn({ namespace, capId: msg.capId }, 'Failed to announce capability');
+          logger.warn({ agentId, capId: msg.capId }, 'Failed to announce capability');
         }
-      } else if (msg.type === 'HEARTBEAT' && namespace) {
-        routing.updateHeartbeat(namespace);
+      } else if (msg.type === 'HEARTBEAT' && agentId) {
+        routing.updateHeartbeat(agentId);
       } else if (msg.type === 'RELAY_RESPONSE') {
         // Route the message to the appropriate invoker
         const invoker = routing.findInvoker(msg.socketId);
@@ -44,10 +44,10 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
   });
   
   ws.on('error', (error) => {
-    logger.error({ error, namespace }, 'Agent WebSocket error');
+    logger.error({ error, agentId }, 'Agent WebSocket error');
   });
   
   ws.on('close', () => {
-    logger.info({ namespace }, 'Agent disconnected');
+    logger.info({ agentId }, 'Agent disconnected');
   });
 }

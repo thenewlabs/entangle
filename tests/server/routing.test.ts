@@ -24,83 +24,110 @@ describe('Server Routing', () => {
   });
 
   describe('Agent registration', () => {
-    it('should register agent and assign namespace', () => {
+    it('should register agent and return agentId', () => {
       const ws = new MockWebSocket() as any;
       const machineId = 'test-machine-123';
       
-      const namespace = routing.registerAgent(ws, machineId);
+      const agentId = routing.registerAgent(ws, machineId);
       
-      expect(namespace).toMatch(/^ns_[A-Z2-7]{10}$/);
-      expect(routing.getNamespaceCount()).toBe(1);
+      expect(agentId).toBeTruthy();
+      expect(agentId).toMatch(/^[a-z0-9]{9}$/);
+      expect(routing.getAgentCount()).toBe(1);
     });
 
-    it('should generate unique namespaces', () => {
+    it('should generate unique agent IDs', () => {
       const ws1 = new MockWebSocket() as any;
       const ws2 = new MockWebSocket() as any;
       
-      const ns1 = routing.registerAgent(ws1, 'machine-1');
-      const ns2 = routing.registerAgent(ws2, 'machine-2');
+      const id1 = routing.registerAgent(ws1, 'machine-1');
+      const id2 = routing.registerAgent(ws2, 'machine-2');
       
-      expect(ns1).not.toBe(ns2);
-      expect(routing.getNamespaceCount()).toBe(2);
+      expect(id1).not.toBe(id2);
+      expect(routing.getAgentCount()).toBe(2);
     });
 
     it('should clean up on agent disconnect', () => {
       const ws = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(ws, 'test-machine');
+      const agentId = routing.registerAgent(ws, 'test-machine');
       
-      expect(routing.getNamespaceCount()).toBe(1);
+      expect(routing.getAgentCount()).toBe(1);
       
       ws.emit('close');
       
-      expect(routing.getNamespaceCount()).toBe(0);
+      expect(routing.getAgentCount()).toBe(0);
     });
   });
 
   describe('Capability announcement', () => {
-    it('should allow agent to announce capabilities', () => {
+    it('should announce capability for registered agent', () => {
       const ws = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(ws, 'test-machine');
-      const capId = 'test-cap-id-123';
+      const agentId = routing.registerAgent(ws, 'test-machine');
+      const capId = 'test-cap-id';
       
-      const success = routing.announceCapability(namespace, capId);
+      const success = routing.announceCapability(agentId, capId);
       
       expect(success).toBe(true);
     });
 
-    it('should reject announcement for unknown namespace', () => {
-      const success = routing.announceCapability('ns_UNKNOWN', 'cap-id');
+    it('should reject announcement for unknown agent', () => {
+      const success = routing.announceCapability('unknown-agent', 'cap-id');
       
       expect(success).toBe(false);
     });
 
-    it('should find agent by namespace and capId', () => {
+    it('should find agent by capId', () => {
       const ws = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(ws, 'test-machine');
+      const agentId = routing.registerAgent(ws, 'test-machine');
       const capId = 'test-cap-id';
       
-      routing.announceCapability(namespace, capId);
+      routing.announceCapability(agentId, capId);
       
-      const foundWs = routing.findAgent(namespace, capId);
+      const foundWs = routing.findAgent(capId);
       expect(foundWs).toBe(ws);
     });
 
     it('should not find agent for unannounced capability', () => {
       const ws = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(ws, 'test-machine');
+      const agentId = routing.registerAgent(ws, 'test-machine');
       
-      const foundWs = routing.findAgent(namespace, 'unknown-cap');
+      const foundWs = routing.findAgent('unknown-cap');
       expect(foundWs).toBeNull();
+    });
+
+    it('should reject duplicate capId from different agent', () => {
+      const ws1 = new MockWebSocket() as any;
+      const ws2 = new MockWebSocket() as any;
+      const agentId1 = routing.registerAgent(ws1, 'machine-1');
+      const agentId2 = routing.registerAgent(ws2, 'machine-2');
+      const capId = 'shared-cap-id';
+      
+      const success1 = routing.announceCapability(agentId1, capId);
+      expect(success1).toBe(true);
+      
+      const success2 = routing.announceCapability(agentId2, capId);
+      expect(success2).toBe(false);
+    });
+
+    it('should clean up capabilities when agent disconnects', () => {
+      const ws = new MockWebSocket() as any;
+      const agentId = routing.registerAgent(ws, 'test-machine');
+      const capId = 'test-cap-id';
+      
+      routing.announceCapability(agentId, capId);
+      expect(routing.findAgent(capId)).toBe(ws);
+      
+      ws.emit('close');
+      
+      expect(routing.findAgent(capId)).toBeNull();
     });
   });
 
   describe('Invoker registration', () => {
     it('should register invoker', () => {
       const ws = new MockWebSocket() as any;
-      const namespace = 'ns_TEST123456';
       const capId = 'test-cap-id';
       
-      const invokerId = routing.registerInvoker(ws, namespace, capId);
+      const invokerId = routing.registerInvoker(ws, capId);
       
       expect(invokerId).toBeTruthy();
       expect(invokerId).toMatch(/^[a-z0-9]{9}$/);
@@ -110,52 +137,71 @@ describe('Server Routing', () => {
       const ws1 = new MockWebSocket() as any;
       const ws2 = new MockWebSocket() as any;
       
-      const id1 = routing.registerInvoker(ws1, 'ns_TEST1', 'cap1');
-      const id2 = routing.registerInvoker(ws2, 'ns_TEST2', 'cap2');
+      const id1 = routing.registerInvoker(ws1, 'cap1');
+      const id2 = routing.registerInvoker(ws2, 'cap2');
       
       expect(id1).not.toBe(id2);
     });
 
     it('should clean up on invoker disconnect', () => {
       const ws = new MockWebSocket() as any;
+      const invokerId = routing.registerInvoker(ws, 'test-cap');
       
-      routing.registerInvoker(ws, 'ns_TEST', 'cap-id');
+      const invoker = routing.findInvoker(invokerId);
+      expect(invoker).toBeTruthy();
       
-      // Should not throw
       ws.emit('close');
+      
+      const invokerAfter = routing.findInvoker(invokerId);
+      expect(invokerAfter).toBeNull();
+    });
+
+    it('should find invoker by ID', () => {
+      const ws = new MockWebSocket() as any;
+      const capId = 'test-cap-id';
+      
+      const invokerId = routing.registerInvoker(ws, capId);
+      const found = routing.findInvoker(invokerId);
+      
+      expect(found).toBeTruthy();
+      expect(found?.ws).toBe(ws);
+      expect(found?.capId).toBe(capId);
     });
   });
 
   describe('Heartbeat tracking', () => {
-    it('should update heartbeat timestamp', () => {
+    it('should update heartbeat', () => {
       const ws = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(ws, 'test-machine');
+      const agentId = routing.registerAgent(ws, 'test-machine');
       
-      // Should not throw
-      routing.updateHeartbeat(namespace);
-    });
-
-    it('should ignore heartbeat for unknown namespace', () => {
-      // Should not throw
-      routing.updateHeartbeat('ns_UNKNOWN');
+      // Wait a bit to ensure the heartbeat timestamp changes
+      const before = Date.now();
+      setTimeout(() => {
+        routing.updateHeartbeat(agentId);
+      }, 10);
     });
 
     it('should clean up stale agents', async () => {
       const ws = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(ws, 'test-machine');
+      let closeCalled = false;
+      ws.close = () => {
+        closeCalled = true;
+        ws.readyState = 3;
+        ws.emit('close');
+      };
       
-      expect(routing.getNamespaceCount()).toBe(1);
+      const agentId = routing.registerAgent(ws, 'test-machine');
       
-      // Wait a bit to ensure the heartbeat timestamp is set
+      expect(routing.getAgentCount()).toBe(1);
+      
+      // Wait a bit to ensure heartbeat ages
       await new Promise(resolve => setTimeout(resolve, 10));
       
-      // Simulate stale agent (older than maxAge)
-      routing.cleanupStale(0); // maxAge = 0 means everything is stale
+      // Clean up with very short max age (1ms)
+      routing.cleanupStale(1);
       
-      // Allow event loop to process the close event
-      await new Promise(resolve => setTimeout(resolve, 10));
-      
-      expect(routing.getNamespaceCount()).toBe(0);
+      expect(closeCalled).toBe(true);
+      expect(routing.getAgentCount()).toBe(0);
     });
   });
 
@@ -164,86 +210,86 @@ describe('Server Routing', () => {
       const ws1 = new MockWebSocket() as any;
       const ws2 = new MockWebSocket() as any;
       
-      const ns1 = routing.registerAgent(ws1, 'machine-1');
-      const ns2 = routing.registerAgent(ws2, 'machine-2');
+      const agentId1 = routing.registerAgent(ws1, 'machine-1');
+      const agentId2 = routing.registerAgent(ws2, 'machine-2');
       
-      routing.announceCapability(ns1, 'cap-1');
-      routing.announceCapability(ns1, 'cap-2');
-      routing.announceCapability(ns2, 'cap-3');
+      routing.announceCapability(agentId1, 'cap-1');
+      routing.announceCapability(agentId1, 'cap-2');
+      routing.announceCapability(agentId2, 'cap-3');
       
-      expect(routing.findAgent(ns1, 'cap-1')).toBe(ws1);
-      expect(routing.findAgent(ns1, 'cap-2')).toBe(ws1);
-      expect(routing.findAgent(ns2, 'cap-3')).toBe(ws2);
-      
-      expect(routing.findAgent(ns1, 'cap-3')).toBeNull();
-      expect(routing.findAgent(ns2, 'cap-1')).toBeNull();
+      expect(routing.findAgent('cap-1')).toBe(ws1);
+      expect(routing.findAgent('cap-2')).toBe(ws1);
+      expect(routing.findAgent('cap-3')).toBe(ws2);
     });
 
     it('should handle agent reconnection with same capabilities', () => {
       const ws1 = new MockWebSocket() as any;
-      const ws2 = new MockWebSocket() as any;
+      const agentId1 = routing.registerAgent(ws1, 'machine-1');
+      const capId = 'cap-1';
       
-      // First connection
-      const ns1 = routing.registerAgent(ws1, 'machine-1');
-      routing.announceCapability(ns1, 'cap-1');
+      routing.announceCapability(agentId1, capId);
       
-      expect(routing.findAgent(ns1, 'cap-1')).toBe(ws1);
+      expect(routing.findAgent(capId)).toBe(ws1);
       
       // Disconnect
       ws1.emit('close');
-      expect(routing.getNamespaceCount()).toBe(0);
+      expect(routing.findAgent(capId)).toBeNull();
       
-      // Reconnect with new namespace (new agent instance)
-      const ns2 = routing.registerAgent(ws2, 'machine-1');
-      routing.announceCapability(ns2, 'cap-1');
+      // Reconnect
+      const ws2 = new MockWebSocket() as any;
+      const agentId2 = routing.registerAgent(ws2, 'machine-1');
+      routing.announceCapability(agentId2, capId);
       
-      expect(routing.findAgent(ns2, 'cap-1')).toBe(ws2);
-      expect(routing.findAgent(ns1, 'cap-1')).toBeNull(); // Old namespace invalid
+      expect(routing.findAgent(capId)).toBe(ws2);
     });
 
     it('should handle rapid connect/disconnect cycles', () => {
-      const agents: MockWebSocket[] = [];
-      const namespaces: string[] = [];
+      const sockets: MockWebSocket[] = [];
+      const agentIds: string[] = [];
       
-      // Create multiple agents
+      // Connect 10 agents
       for (let i = 0; i < 10; i++) {
         const ws = new MockWebSocket() as any;
-        const ns = routing.registerAgent(ws, `machine-${i}`);
-        agents.push(ws);
-        namespaces.push(ns);
-        routing.announceCapability(ns, `cap-${i}`);
+        sockets.push(ws);
+        const agentId = routing.registerAgent(ws, `machine-${i}`);
+        agentIds.push(agentId);
+        routing.announceCapability(agentId, `cap-${i}`);
       }
       
-      expect(routing.getNamespaceCount()).toBe(10);
+      expect(routing.getAgentCount()).toBe(10);
       
       // Disconnect half
       for (let i = 0; i < 5; i++) {
-        agents[i].emit('close');
+        sockets[i].emit('close');
       }
       
-      expect(routing.getNamespaceCount()).toBe(5);
+      expect(routing.getAgentCount()).toBe(5);
       
-      // Check remaining agents still work
+      // Verify remaining capabilities
+      for (let i = 0; i < 5; i++) {
+        expect(routing.findAgent(`cap-${i}`)).toBeNull();
+      }
       for (let i = 5; i < 10; i++) {
-        expect(routing.findAgent(namespaces[i], `cap-${i}`)).toBe(agents[i]);
+        expect(routing.findAgent(`cap-${i}`)).toBe(sockets[i]);
       }
     });
 
     it('should handle concurrent invokers for same capability', () => {
       const agentWs = new MockWebSocket() as any;
-      const namespace = routing.registerAgent(agentWs, 'machine');
+      const agentId = routing.registerAgent(agentWs, 'machine');
       const capId = 'shared-cap';
       
-      routing.announceCapability(namespace, capId);
+      routing.announceCapability(agentId, capId);
       
-      const invoker1 = new MockWebSocket() as any;
-      const invoker2 = new MockWebSocket() as any;
+      const invokerWs1 = new MockWebSocket() as any;
+      const invokerWs2 = new MockWebSocket() as any;
       
-      const id1 = routing.registerInvoker(invoker1, namespace, capId);
-      const id2 = routing.registerInvoker(invoker2, namespace, capId);
+      const invokerId1 = routing.registerInvoker(invokerWs1, capId);
+      const invokerId2 = routing.registerInvoker(invokerWs2, capId);
       
-      expect(id1).not.toBe(id2);
-      expect(routing.findAgent(namespace, capId)).toBe(agentWs);
+      expect(invokerId1).not.toBe(invokerId2);
+      expect(routing.findInvoker(invokerId1)?.ws).toBe(invokerWs1);
+      expect(routing.findInvoker(invokerId2)?.ws).toBe(invokerWs2);
     });
   });
 });

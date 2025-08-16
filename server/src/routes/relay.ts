@@ -8,21 +8,20 @@ const logger = createLogger('relay-route');
 export function setupRelayRoute(
   invokerWs: WebSocket,
   routing: RoutingState,
-  namespace: string,
   capId: string
 ): void {
   const config = getConfig();
-  const agentWs = routing.findAgent(namespace, capId);
+  const agentWs = routing.findAgent(capId);
   
   if (!agentWs) {
-    logger.warn({ namespace, capId }, 'Agent not found for capability');
+    logger.warn({ capId }, 'Agent not found for capability');
     invokerWs.close(1008, 'Capability not found');
     return;
   }
   
-  const invokerId = routing.registerInvoker(invokerWs, namespace, capId);
+  const invokerId = routing.registerInvoker(invokerWs, capId);
   
-  logger.info({ namespace, capId, invokerId }, 'Relay established');
+  logger.info({ capId, invokerId }, 'Relay established');
   
   agentWs.send(JSON.stringify({
     type: 'INVOKER_CONNECT',

@@ -8,17 +8,12 @@ import { homedir } from 'os';
 const logger = createLogger('capability');
 
 export interface CapabilityInfo {
-  namespace: string;
   capId: string;
   S: string;
-  tool: string;
   policy: Policy;
-  tools?: string[]; // Optional: for multi-tool capabilities
 }
 
 export async function createCapability(options: {
-  namespace: string;
-  tool: string;
   singleRun?: boolean;
 }): Promise<CapabilityInfo> {
   await initCrypto();
@@ -27,21 +22,18 @@ export async function createCapability(options: {
   const S = generateSecret();
   
   const policy: Policy = {
-    tool: options.tool,
     singleRun: options.singleRun ?? false,
   };
   
   const cap: CapabilityInfo = {
-    namespace: options.namespace,
     capId,
     S,
-    tool: options.tool,
     policy,
   };
   
   await storeCapability(cap);
   
-  logger.info({ capId, namespace: options.namespace }, 'Capability created');
+  logger.info({ capId }, 'Capability created');
   
   return cap;
 }

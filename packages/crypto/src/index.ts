@@ -154,15 +154,6 @@ export function base64UrlDecode(str: string): Uint8Array {
   return bytes;
 }
 
-export function generateNamespace(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  let result = 'ns_';
-  for (let i = 0; i < 10; i++) {
-    result += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return result;
-}
-
 export function hashPolicy(policy: any): string {
   const encoded = encode(policy);
   const hash = sha256(encoded);

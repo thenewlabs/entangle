@@ -1,6 +1,14 @@
 # Entangle
 
-Secure blind relay for exposing CLI tools. The relay never sees plaintext commands, arguments, outputs, or secrets.
+Secure blind relay system with full POSIX terminal support. The relay never sees plaintext commands, arguments, outputs, or secrets.
+
+## Features
+
+- **Interactive Terminal**: Full POSIX terminal over encrypted WebSocket
+- **Single Command Mode**: Run individual commands with streaming output
+- **End-to-End Encryption**: Server acts as blind relay, never sees plaintext
+- **Browser & CLI**: Both web terminal and command-line interfaces
+- **No User Switching**: Commands run as the same OS user as the agent
 
 ## Quick Start
 
@@ -14,39 +22,57 @@ npm run build
 # Start server (in one terminal)
 npm run server
 
-# Start agent with single tool (in another terminal)
-AGENT_TOOL=/usr/bin/claude npm run agent
+# Start agent (in another terminal)
+npm run agent
 
-# Or start agent with multiple tools (creates single multi-tool capability)
-npm run agent -- --tool /usr/bin/claude --tool /usr/bin/git
+# Agent will display:
+# capId: <base64url>
+# S: <base64url>
+# Web URL: https://suncoder.dev/cap/<capId>#S=<S>
 
-# Create capability for specific tool (with single-run option)
-npm run agent:create-cap -- --namespace ns_ABC123 --tool /usr/bin/claude --single-run
+# Use the web URL in browser for interactive terminal
+# Or use invoke CLI:
 
-# Invoke from CLI
-npm run invoke -- \
-  --namespace ns_ABC123 \
-  --cap-id <capId> \
-  --secret-s <S> \
-  --tool claude \
-  --argv '["--help"]'
+# Interactive terminal
+npm run invoke -- https://suncoder.dev/cap/<capId>#S=<S>
+
+# Single command
+npm run invoke -- https://suncoder.dev/cap/<capId>#S=<S> ls -la
 ```
 
 ## Architecture
 
-- **Agent**: Runs on the machine with the tool, creates capabilities, executes commands
-- **Server**: Blind relay that routes encrypted frames between agents and invokers
-- **Invoke**: CLI client for running commands remotely
-- **Web**: Browser-based terminal for interactive use
+- **Agent**: Runs on target machine, handles PTY/command execution
+- **Server**: Blind relay that routes encrypted frames by capId
+- **Invoke**: CLI supporting both terminal and single command modes
+- **Web**: Browser terminal (xterm.js) and single command UI
 
 ## Security
 
-- End-to-end AEAD encryption (XChaCha20-Poly1305)
-- Argon2id key derivation from secret S
-- Monotonic counters prevent replay attacks
-- Server never sees plaintext
-- Whitelisted tools enforcement (supports multiple tools per agent)
-- Resource limits and sandboxing
+- **Encryption**: XChaCha20-Poly1305 AEAD
+- **Key Derivation**: Argon2id + HKDF from secret S
+- **Anti-Replay**: Monotonic counters per direction
+- **Blind Server**: Only sees capId for routing, not content
+- **CWD Validation**: Optional allowed directory restrictions
+
+## Configuration
+
+Environment variables in `.env`:
+
+```bash
+# Server
+PORT=8080
+PUBLIC_ORIGIN=https://suncoder.dev
+
+# Timeouts
+TTY_IDLE_TIMEOUT_MS=1200000    # 20 minutes
+CMD_DEFAULT_WALL_MS=60000       # 1 minute
+
+# Agent
+AGENT_SHELL=/bin/bash
+AGENT_DEFAULT_CWD=$HOME
+AGENT_ALLOWED_CWD=/home:/Users:/srv
+```
 
 ## Development
 
@@ -61,13 +87,11 @@ npm test
 npm run clean
 ```
 
-## Configuration
+## URL Format
 
-Environment variables in `.env`:
+```
+https://suncoder.dev/cap/{capId}#S={secret}
+```
 
-- `PORT`: Server port (default: 8080)
-- `PUBLIC_ORIGIN`: Public URL for link generation
-- `AGENT_TOOL`: Path to tool to expose
-- `AGENT_ALLOWED_CWD`: Colon-separated allowed directories
-- `MAX_ARG_COUNT`: Maximum number of arguments
-- `MAX_ARG_LEN`: Maximum argument length
+- `capId`: Base64url encoded (32 bytes: 16 salt + 16 random)
+- `S`: Base64url encoded 32-byte secret in fragment (never sent to server)

@@ -1,23 +1,31 @@
 import { useState, useEffect } from 'react';
-import { InvokeView } from './views/Invoke';
+import { TerminalView } from './views/Terminal';
+import { SingleCommandView } from './views/SingleCommand';
 
 export function App() {
   const [capability, setCapability] = useState<{
-    namespace: string;
     capId: string;
     S: string;
   } | null>(null);
+  
+  const [terminalMode, setTerminalMode] = useState(true);
   
   useEffect(() => {
     const path = window.location.pathname.split('/').filter(Boolean);
     const hash = window.location.hash;
     
-    if (path.length === 2 && hash.startsWith('#S=')) {
+    // Check URL format: /cap/{capId}#S={secret}
+    if (path.length === 2 && path[0] === 'cap' && hash.startsWith('#S=')) {
       setCapability({
-        namespace: path[0]!,
         capId: path[1]!,
         S: hash.substring(3),
       });
+    }
+    
+    // Check for terminal=false query param
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('terminal') === 'false') {
+      setTerminalMode(false);
     }
   }, []);
   
@@ -32,5 +40,9 @@ export function App() {
     );
   }
   
-  return <InvokeView capability={capability} />;
+  return terminalMode ? (
+    <TerminalView capability={capability} />
+  ) : (
+    <SingleCommandView capability={capability} />
+  );
 }

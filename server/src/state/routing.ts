@@ -1,12 +1,10 @@
 import type WebSocket from 'ws';
 import { createLogger } from '@sunpix/entangle-utils';
-import { generateNamespace } from '@sunpix/entangle-crypto';
 
 const logger = createLogger('routing');
 
 interface AgentInfo {
   ws: WebSocket;
-  namespace: string;
   machineId: string;
   capabilities: Set<string>;
   lastHeartbeat: number;
@@ -14,7 +12,6 @@ interface AgentInfo {
 
 interface InvokerInfo {
   ws: WebSocket;
-  namespace: string;
   capId: string;
   connectedAt: number;
 }
@@ -22,47 +19,49 @@ interface InvokerInfo {
 export class RoutingState {
   private agents = new Map<string, AgentInfo>();
   private invokers = new Map<string, InvokerInfo>();
-  private namespaceToAgent = new Map<string, string>();
+  private capIdToAgent = new Map<string, string>(); // capId -> agentId
   
   registerAgent(ws: WebSocket, machineId: string): string {
-    const namespace = generateNamespace();
     const agentId = Math.random().toString(36).substr(2, 9);
     
     const agent: AgentInfo = {
       ws,
-      namespace,
       machineId,
       capabilities: new Set(),
       lastHeartbeat: Date.now(),
     };
     
     this.agents.set(agentId, agent);
-    this.namespaceToAgent.set(namespace, agentId);
     
-    logger.info({ namespace, agentId, machineId }, 'Agent registered');
+    logger.info({ agentId, machineId }, 'Agent registered');
     
     ws.on('close', () => {
       this.removeAgent(agentId);
     });
     
-    return namespace;
+    return agentId;
   }
   
-  announceCapability(namespace: string, capId: string): boolean {
-    const agentId = this.namespaceToAgent.get(namespace);
-    if (!agentId) return false;
-    
+  announceCapability(agentId: string, capId: string): boolean {
     const agent = this.agents.get(agentId);
     if (!agent) return false;
     
+    // Check if another agent already owns this capId
+    const existingAgentId = this.capIdToAgent.get(capId);
+    if (existingAgentId && existingAgentId !== agentId) {
+      logger.warn({ capId, agentId, existingAgentId }, 'Capability already owned by another agent');
+      return false;
+    }
+    
     agent.capabilities.add(capId);
-    logger.info({ namespace, capId }, 'Capability announced');
+    this.capIdToAgent.set(capId, agentId);
+    logger.info({ agentId, capId }, 'Capability announced');
     
     return true;
   }
   
-  findAgent(namespace: string, capId: string): WebSocket | null {
-    const agentId = this.namespaceToAgent.get(namespace);
+  findAgent(capId: string): WebSocket | null {
+    const agentId = this.capIdToAgent.get(capId);
     if (!agentId) return null;
     
     const agent = this.agents.get(agentId);
@@ -71,19 +70,18 @@ export class RoutingState {
     return agent.ws;
   }
   
-  registerInvoker(ws: WebSocket, namespace: string, capId: string): string {
+  registerInvoker(ws: WebSocket, capId: string): string {
     const invokerId = Math.random().toString(36).substr(2, 9);
     
     const invoker: InvokerInfo = {
       ws,
-      namespace,
       capId,
       connectedAt: Date.now(),
     };
     
     this.invokers.set(invokerId, invoker);
     
-    logger.info({ namespace, capId, invokerId }, 'Invoker registered');
+    logger.info({ capId, invokerId }, 'Invoker registered');
     
     ws.on('close', () => {
       this.removeInvoker(invokerId);
@@ -96,10 +94,14 @@ export class RoutingState {
     const agent = this.agents.get(agentId);
     if (!agent) return;
     
-    this.namespaceToAgent.delete(agent.namespace);
+    // Remove all capabilities owned by this agent
+    for (const capId of agent.capabilities) {
+      this.capIdToAgent.delete(capId);
+    }
+    
     this.agents.delete(agentId);
     
-    logger.info({ namespace: agent.namespace, agentId }, 'Agent removed');
+    logger.info({ agentId }, 'Agent removed');
   }
   
   private removeInvoker(invokerId: string): void {
@@ -111,28 +113,19 @@ export class RoutingState {
     logger.info({ invokerId }, 'Invoker removed');
   }
   
-  updateHeartbeat(namespace: string): void {
-    const agentId = this.namespaceToAgent.get(namespace);
-    if (!agentId) return;
-    
+  updateHeartbeat(agentId: string): void {
     const agent = this.agents.get(agentId);
     if (agent) {
       agent.lastHeartbeat = Date.now();
     }
   }
   
-  getNamespaceCount(): number {
-    return this.namespaceToAgent.size;
+  getAgentCount(): number {
+    return this.agents.size;
   }
   
   findInvoker(invokerId: string): InvokerInfo | null {
     return this.invokers.get(invokerId) || null;
-  }
-  
-  getAgentByNamespace(namespace: string): AgentInfo | null {
-    const agentId = this.namespaceToAgent.get(namespace);
-    if (!agentId) return null;
-    return this.agents.get(agentId) || null;
   }
   
   cleanupStale(maxAge: number = 300000): void {
@@ -141,7 +134,7 @@ export class RoutingState {
     
     for (const [agentId, agent] of this.agents) {
       if (now - agent.lastHeartbeat > maxAge) {
-        logger.warn({ agentId, namespace: agent.namespace }, 'Removing stale agent');
+        logger.warn({ agentId }, 'Removing stale agent');
         staleAgents.push(agentId);
       }
     }
