@@ -1,8 +1,12 @@
 import { generateCapId, generateSecret, initCrypto } from '@sunpix/entangle-crypto';
 import { type Policy } from '@sunpix/entangle-protocol';
 import { promises as fs } from 'fs';
+import { chmod, stat } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { createLogger } from '@sunpix/entangle-utils';
+
+const logger = createLogger('capability');
 
 export interface CapabilityInfo {
   capId: string;
@@ -36,7 +40,7 @@ export async function createCapability(options: {
 
 async function storeCapability(cap: CapabilityInfo): Promise<void> {
   const configDir = join(homedir(), '.entangle');
-  await fs.mkdir(configDir, { recursive: true });
+  await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
   
   const capsFile = join(configDir, 'capabilities.json');
   
@@ -50,7 +54,10 @@ async function storeCapability(cap: CapabilityInfo): Promise<void> {
   
   caps.push(cap);
   
-  await fs.writeFile(capsFile, JSON.stringify(caps, null, 2));
+  await fs.writeFile(capsFile, JSON.stringify(caps, null, 2), { mode: 0o600 });
+  try {
+    await chmod(capsFile, 0o600);
+  } catch {}
 }
 
 export async function loadCapabilities(): Promise<CapabilityInfo[]> {
@@ -59,6 +66,13 @@ export async function loadCapabilities(): Promise<CapabilityInfo[]> {
   
   try {
     const data = await fs.readFile(capsFile, 'utf-8');
+    try {
+      const s = await stat(capsFile);
+      const mode = s.mode & 0o777;
+      if (mode !== 0o600) {
+        logger.warn({ path: capsFile, mode: mode.toString(8) }, 'Insecure capability file permissions; expected 600');
+      }
+    } catch {}
     return JSON.parse(data);
   } catch {
     return [];

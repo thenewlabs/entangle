@@ -156,11 +156,7 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
 
 async function handleAuth1(session: Session, payload: Uint8Array): Promise<void> {
   try {
-    logger.debug({ 
-      payloadLength: payload.length,
-      payloadHex: Buffer.from(payload).toString('hex').substring(0, 100),
-      capId: session.cap.capId 
-    }, 'AUTH1 received');
+    logger.debug({ payloadLength: payload.length }, 'AUTH1 received');
     
     const saltCap = extractSaltFromCapId(session.cap.capId);
     const S = session.cap.S;
@@ -176,34 +172,25 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     const receivedHmac = payload.slice(0, 32);
     const nonceBBytes = payload.slice(32);
     
-    logger.debug({
-      hmacHex: Buffer.from(receivedHmac).toString('hex'),
-      nonceBLength: nonceBBytes.length,
-      nonceBHex: Buffer.from(nonceBBytes).toString('hex')
-    }, 'AUTH1 parsed components');
+    // Avoid logging sensitive auth material
     
     // Convert nonceB bytes to string (it's already UTF-8 encoded)
     session.nonceB = new TextDecoder().decode(nonceBBytes);
     
-    logger.debug({ nonceB: session.nonceB }, 'Decoded nonceB');
+    // Avoid logging nonce values
     
     // Verify the HMAC
     const auth1Data = new TextEncoder().encode('hello' + session.cap.capId + session.nonceB);
     const expectedHmac = computeHmac(session.keys.K_auth, auth1Data);
     
-    logger.debug({
-      auth1DataString: 'hello' + session.cap.capId + session.nonceB,
-      auth1DataHex: Buffer.from(auth1Data).toString('hex'),
-      expectedHmacHex: Buffer.from(expectedHmac).toString('hex'),
-      receivedHmacHex: Buffer.from(receivedHmac).toString('hex')
-    }, 'HMAC verification details');
+    // Avoid logging HMAC details
     
     if (!verifyHmac(session.keys.K_auth, auth1Data, receivedHmac)) {
       logger.error('AUTH1 HMAC verification failed');
       throw new Error('AUTH1 HMAC verification failed');
     }
     
-    logger.debug('AUTH1 HMAC verified successfully');
+    logger.debug('AUTH1 HMAC verified');
     
     // Generate nonceC for AUTH2
     session.nonceC = require('crypto').randomBytes(16).toString('hex');
@@ -221,7 +208,7 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     
     sendRelayResponse(session, frame);
     
-    logger.debug({ nonceB: session.nonceB, nonceC: session.nonceC }, 'AUTH2 sent successfully');
+    logger.debug('AUTH2 sent');
   } catch (error) {
     logger.error({ 
       error: error instanceof Error ? error.message : String(error),

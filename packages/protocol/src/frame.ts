@@ -1,4 +1,5 @@
 import { FrameType, type Frame } from './types.js';
+import { MAX_FRAME_BYTES } from './constants.js';
 
 export function encodeFrame(type: FrameType, payload: Uint8Array): Uint8Array {
   const frame = new Uint8Array(9 + payload.length);
@@ -26,6 +27,7 @@ export class FrameReader {
   private headerParsed = false;
   private currentType: FrameType | undefined;
   private currentLength: bigint | undefined;
+  private droppingOversize = false;
   
   push(chunk: Uint8Array): Frame[] {
     const frames: Frame[] = [];
@@ -46,12 +48,29 @@ export class FrameReader {
         this.currentLength = header.length;
         this.headerParsed = true;
         this.buffer = this.buffer.slice(9);
+
+        // Enforce maximum frame size; if exceeded, drop this frame
+        const lengthNum = Number(this.currentLength);
+        if (lengthNum > MAX_FRAME_BYTES) {
+          // Enter dropping mode: discard remaining buffered data for this frame
+          this.droppingOversize = true;
+        }
       }
       
       if (this.headerParsed && this.currentLength !== undefined) {
         const length = Number(this.currentLength);
         if (this.buffer.length < length) break;
-        
+
+        if (this.droppingOversize) {
+          // Discard the oversize payload without emitting a frame
+          this.buffer = this.buffer.slice(length);
+          this.headerParsed = false;
+          this.currentType = undefined;
+          this.currentLength = undefined;
+          this.droppingOversize = false;
+          continue;
+        }
+
         frames.push({
           type: this.currentType!,
           payload: this.buffer.slice(0, length),

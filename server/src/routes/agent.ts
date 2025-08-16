@@ -34,8 +34,14 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
         // Route the message to the appropriate invoker
         const invoker = routing.findInvoker(msg.socketId);
         if (invoker && invoker.ws.readyState === ws.OPEN) {
+          const buf = Buffer.from(msg.frame, 'base64');
+          const max = getConfig().maxFrameBytes;
+          if (buf.length > max) {
+            logger.warn({ size: buf.length, max, socketId: msg.socketId }, 'Dropping oversize frame from agent');
+            return;
+          }
           // Send the unwrapped frame to the invoker
-          invoker.ws.send(Buffer.from(msg.frame, 'base64'));
+          invoker.ws.send(buf);
         }
       }
     } catch (error) {

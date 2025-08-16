@@ -11,6 +11,7 @@ import { RoutingState } from './state/routing.js';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
+import { wsRateLimiter } from './utils/rate-limit.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -68,6 +69,25 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
   
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url!, `http://${request.headers.host}`);
+    // Determine client IP (trust x-forwarded-for if present)
+    const xff = (request.headers['x-forwarded-for'] as string) || '';
+    const ip = (xff.split(',')[0].trim()) || (request.socket.remoteAddress || 'unknown');
+
+    // Per-IP token bucket with backoff for all WS upgrades
+    const decision = wsRateLimiter.check(ip);
+    if (!decision.allowed) {
+      const retrySec = decision.retryAfterMs ? Math.ceil(decision.retryAfterMs / 1000) : 1;
+      try {
+        socket.write(
+          'HTTP/1.1 429 Too Many Requests\r\n' +
+          'Connection: close\r\n' +
+          `Retry-After: ${retrySec}\r\n` +
+          '\r\n'
+        );
+      } catch {}
+      socket.destroy();
+      return;
+    }
     
     if (url.pathname === '/agent/register') {
       wss.handleUpgrade(request, socket, head, (ws) => {

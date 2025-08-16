@@ -71,6 +71,15 @@ export class RoutingState {
   }
   
   registerInvoker(ws: WebSocket, capId: string): string {
+    // Basic per-capability concurrency limiting using relayBurst as a cap
+    const relayBurst = parseInt(process.env.RELAY_BURST || '50', 10);
+    const current = this.countInvokersForCap(capId);
+    if (current >= relayBurst) {
+      logger.warn({ capId, current, relayBurst }, 'Too many concurrent invokers for capability');
+      // Proactively close
+      try { ws.close(1013, 'Over capacity'); } catch {}
+      throw new Error('Over capacity');
+    }
     const invokerId = Math.random().toString(36).substr(2, 9);
     
     const invoker: InvokerInfo = {
@@ -88,6 +97,14 @@ export class RoutingState {
     });
     
     return invokerId;
+  }
+
+  countInvokersForCap(capId: string): number {
+    let count = 0;
+    for (const inv of this.invokers.values()) {
+      if (inv.capId === capId) count++;
+    }
+    return count;
   }
   
   private removeAgent(agentId: string): void {

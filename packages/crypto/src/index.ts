@@ -134,17 +134,24 @@ export function verifyHmac(K_auth: Uint8Array, data: Uint8Array, mac: Uint8Array
 }
 
 export function base64UrlEncode(data: Uint8Array): string {
-  const base64 = btoa(String.fromCharCode(...data));
-  return base64
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
+  // Use Node Buffer when available to avoid relying on btoa (not in Node)
+  let base64: string;
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+    base64 = Buffer.from(data).toString('base64');
+  } else {
+    // Browser fallback
+    base64 = btoa(String.fromCharCode(...data));
+  }
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 export function base64UrlDecode(str: string): Uint8Array {
   let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
   while (base64.length % 4) {
     base64 += '=';
+  }
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
+    return new Uint8Array(Buffer.from(base64, 'base64'));
   }
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);

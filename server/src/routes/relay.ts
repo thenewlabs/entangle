@@ -19,7 +19,13 @@ export function setupRelayRoute(
     return;
   }
   
-  const invokerId = routing.registerInvoker(invokerWs, capId);
+  let invokerId: string;
+  try {
+    invokerId = routing.registerInvoker(invokerWs, capId);
+  } catch (_err) {
+    try { invokerWs.close(1013, 'Over capacity'); } catch {}
+    return;
+  }
   
   logger.info({ capId, invokerId }, 'Relay established');
   
@@ -39,6 +45,13 @@ export function setupRelayRoute(
     
     lastActivity = Date.now();
     
+    // Enforce max frame size on incoming chunks to avoid amplification
+    if (data.length > config.maxFrameBytes) {
+      logger.warn({ size: data.length, max: config.maxFrameBytes, invokerId }, 'Dropping oversize message from invoker');
+      try { invokerWs.close(1009, 'Frame too large'); } catch {}
+      return;
+    }
+
     if (agentWs.readyState === invokerWs.OPEN) {
       // Wrap the frame with metadata so agent knows which invoker it's from
       agentWs.send(JSON.stringify({
