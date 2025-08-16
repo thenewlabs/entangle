@@ -31,13 +31,14 @@ Output Modes
 **Runtime Behavior**
 - Heartbeat: sends `HEARTBEAT` at `AGENT_HEARTBEAT_MS` to keep registration fresh.
 - Capability announcement: sends `ANNOUNCE_CAP` for each stored capability.
-- Session handling: allocates counters, derives keys on `AUTH1`, enforces `singleRun` if set.
+- Session handling: allocates counters, derives keys on `AUTH1`, enforces `singleRun` within each session if set.
 - Cleanup: aborts processes and closes PTYs on disconnect.
 
 PTY Details
 - Shell: uses `AGENT_SHELL` or `SHELL` or `/bin/bash`.
 - Idle timeout: closes after `TTY_IDLE_TIMEOUT_MS` of inactivity (default 20m).
 - Respects resize and sends exit frames when shell ends.
+- Multiple PTY sessions can run concurrently (distinct `sessionId`).
 
 —
 
@@ -47,6 +48,9 @@ PTY Details
 - Output ceiling: `MAX_OUT_BYTES` (default 10MB) — agent truncates and terminates the process when exceeded.
 - Wall clock: `limits.wallMs` on `RUN` triggers SIGTERM → SIGKILL.
 - Minimal env: child receives a reduced, safe environment.
+
+Concurrency
+- Multiple invokers can connect simultaneously for the same capability (bounded by `RELAY_BURST`). Each is isolated with independent counters and keys.
 
 —
 
@@ -65,4 +69,3 @@ PTY Details
 - Runner: `agent/src/runner.ts` runs processes and emits encrypted `STDOUT/STDERR/EXIT`.
 - PTY: `agent/src/pty.ts` manages interactive shells.
 - Capability storage: `agent/src/capability.ts` creates/loads capabilities and policies.
-

@@ -44,6 +44,7 @@ Output Modes
 - `--cwd` is validated by the agent; it may be rejected if outside `AGENT_ALLOWED_CWD`.
 - `--abort-after-ms` for single commands maps to `limits.wallMs` on the agent.
 - Ctrl+C in terminal mode sends `SIGINT` to the remote PTY session.
+ - You can open multiple PTY sessions by re‑invoking with the same capability URL; each is independent.
 
 —
 
@@ -52,4 +53,3 @@ Output Modes
 - Single command: `invoke/src/single.ts`.
 - Terminal: `invoke/src/terminal.ts`.
 - Uses `FrameReader`, crypto from `@sunpix/entangle-crypto`, and utilities from `@sunpix/entangle-utils`.
-

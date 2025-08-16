@@ -32,6 +32,7 @@ This guide explains the end‑to‑end model that keeps the relay server blind w
 Replay Resistance
 - AUTH nonces differ each session; reusing old AUTH frames fails.
 - All subsequent messages carry strictly increasing counters validated per direction.
+ - Counters and auth are scoped per session; multiple sessions can run concurrently for the same capability.
 
 —
 
@@ -55,6 +56,7 @@ Replay Resistance
   - `TTY_RESIZE` → `{ sessionId, cols, rows }`
   - `TTY_SIGNAL` → `{ sessionId, signal }`
   - `TTY_EXIT` → `{ sessionId, code|null, signal|null }`
+  - Multiple PTY sessions can be active concurrently per invoker connection (distinct `sessionId`).
 
 —
 
@@ -65,6 +67,12 @@ Replay Resistance
 - Wall clock: optional `limits.wallMs` triggers soft SIGTERM then SIGKILL.
 - Frames: `MAX_FRAME_BYTES` (default 1MB) enforced at relay and in `FrameReader`.
 - Rate limiting: per‑IP token bucket with exponential backoff for WS upgrades.
+
+Session Semantics
+- Multi‑session is supported at two levels:
+  - Multiple invoker connections per capability (bounded by `RELAY_BURST`).
+  - Multiple PTY sessions per invoker via unique `sessionId` values.
+- `singleRun` is enforced per session (applies to `RUN` frames only).
 
 —
 
@@ -82,4 +90,3 @@ Replay Resistance
 - Set `AGENT_ALLOWED_CWD` (colon‑separated) when exposing broad environments.
 - Tune `RELAY_RATE_RPS` and `RELAY_BURST` for hostile networks.
 - Monitor health: `GET /__health` returns basic status.
-

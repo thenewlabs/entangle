@@ -70,14 +70,20 @@ Security at the Relay
 - The relay enforces max frame size and closes abusive connections.
 - It never decrypts: it forwards raw frames in a small JSON envelope to the agent, which unwraps and processes.
 
+Concurrency
+- Multiple concurrent invoker sessions per `capId` are supported (bounded by `RELAY_BURST`). Each invoker connection is an independent session.
+
 —
 
 **Agent Architecture**
 - Startup: load capabilities from `~/.entangle/capabilities.json` (0600), connect to server, heartbeat, announce all caps.
-- On invoker connect: create a session object with counters and derived keys after auth; handle frames via `FrameReader`.
+- On invoker connect: create an independent session object with counters and derived keys after auth; handle frames via `FrameReader`.
 - Command runner: spawns process with minimized env; streams stdout/stderr; enforces `bytesOut` ceilings; supports abort and `wallMs` kill.
 - PTY manager: spawns a shell under a pseudo‑terminal; streams output; reacts to resize and signals; closes idle sessions.
 - Policy: currently supports `singleRun`; hashed into AUTH2 for the invoker to verify.
+
+Sessions
+- Multiple invokers may connect simultaneously for the same capability. Within a session, `singleRun` restricts multiple `RUN` invocations; opening PTY sessions is keyed by `sessionId` and can be concurrent.
 
 Validation & Limits
 - Arguments: max count/length, forbid NULs and unpaired surrogates.
@@ -105,4 +111,3 @@ Operational Notes
 - The server is intentionally blind; apply OS‑level sandboxing where appropriate for the agent.
 - Use `AGENT_ALLOWED_CWD` to constrain where commands/PTY can run.
 - Tune `RELAY_RATE_RPS` and `RELAY_BURST` to protect the relay in hostile environments.
-

@@ -8,21 +8,21 @@ Secure, blind relay to run your local CLI tools from anywhere. The server only f
 - Works for single commands or an interactive terminal (PTY).
 
 ## Quick Start
-1) Build all binaries
+1) Build
 - `npm install` (first time)
-- `npm run build` (outputs `dist/agent.js`, `dist/server.js`, `dist/invoke.js`)
+- `npm run build`
 
 2) Start the server
-- `node dist/server.js` (env: `PORT=8080` by default)
+- `entangle-server` (env: `PORT=8080` by default)
 
 3) Start the agent and create a capability
-- `node dist/agent.js create-cap`
-- `node dist/agent.js start --server http://localhost:8080`
-  - Output will show a web URL like: `http://localhost:8080/cap/<capId>#S=<secret>`
+- `entangle-agent create-cap`
+- `entangle-agent start --server http://localhost:8080`
+  - Output shows a web URL like: `http://localhost:8080/cap/<capId>#S=<secret>`
 
 4) Invoke (CLI)
-- Interactive terminal: `node dist/invoke.js <cap-url>`
-- Single command: `node dist/invoke.js <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N]`
+- Interactive terminal: `entangle-invoke <cap-url>`
+- Single command: `entangle-invoke <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N]`
 
 Tip: All CLIs support `--output-mode text|stream-json`.
 
@@ -34,6 +34,10 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 - AEAD (XChaCha20‑Poly1305) with counters prevents replay and reordering.
 - HMAC handshake (AUTH1/2/3) proves knowledge of secret `S`.
 - Relay enforces max frame sizes and rate limits; stays blind to plaintext.
+
+## Concurrency
+- Multiple concurrent invoker sessions per capability are supported (bounded by `RELAY_BURST`).
+- `singleRun` policy restricts multiple `RUN` commands within a single session only.
 
 ## Key Env Vars
 - Server: `PORT`, `HOST`, `MAX_FRAME_BYTES`, `RELAY_RATE_RPS`, `RELAY_BURST`
@@ -58,4 +62,3 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 
 ---
 Use `AGENT_ALLOWED_CWD` to constrain where remote commands can run, and consider OS‑level sandboxing for the agent in sensitive environments.
-

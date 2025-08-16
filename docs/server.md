@@ -14,7 +14,6 @@ The Entangle Server is a lightweight relay and static web host. It never sees pl
 **How To Use**
 - Run the server:
   - `entangle-server [--output-mode text|stream-json]`
-  - Or from dist: `node dist/server.js`
 
 Health Check
 - `curl http://localhost:8080/__health`
@@ -43,6 +42,7 @@ Hosting the Web UI
   - Server finds the owning agent for `capId`.
   - Assigns `invokerId`, forwards all incoming binary frames to the agent wrapped in JSON with `socketId`.
   - For idle connections exceeding `RELAY_IDLE_TIMEOUT_MS`, closes the invoker.
+  - Supports multiple concurrent invokers per `capId`, bounded by `RELAY_BURST`.
 - Cleanup
   - On WS close, routing state removes agents/invokers and clears capability ownerships.
 
@@ -62,4 +62,3 @@ Hosting the Web UI
 - Relay route: `server/src/routes/relay.ts`.
 - Routing state: `server/src/state/routing.ts`.
 - Rate limit: `server/src/utils/rate-limit.ts`.
-
