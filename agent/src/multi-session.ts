@@ -18,7 +18,8 @@ import {
   streamAeadDecrypt,
 } from '@sunpix/entangle-crypto';
 import { 
-  createLogger, 
+  OutputHandler,
+  parseOutputMode,
   BidirectionalCounters,
   StreamCounters,
 } from '@sunpix/entangle-utils';
@@ -26,7 +27,7 @@ import { encode, decode } from 'cborg';
 import { StreamManager } from './stream-manager.js';
 import type { CapabilityInfo } from './capability.js';
 
-const logger = createLogger('multi-session');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export interface MultiSession {
   socketId: string;
@@ -76,7 +77,7 @@ async function handleStreamOpen(
   if (!session.streamManager) {
     session.streamManager = new StreamManager({
       policy: session.cap.policy,
-      logger,
+      output,
       onStreamData: async (sid, data) => {
         await sendStreamData(session, sid, data);
       },
@@ -291,7 +292,7 @@ export async function handleMultiStreamFrame(
   frame: { type: FrameType; payload: Uint8Array }
 ): Promise<void> {
   if (!session.authenticated) {
-    logger.warn({ type: frame.type }, 'Received frame before authentication');
+    output.warn(`Received frame before authentication: type=${frame.type}`);
     session.ws.close(1002, 'Not authenticated');
     return;
   }
@@ -311,7 +312,7 @@ export async function handleMultiStreamFrame(
       const sid = message.msg.sid;
       const expectedCounter = session.streamCounters.getNext(sid, 'incoming');
       if (message.ctr !== expectedCounter) {
-        logger.error({ sid, expected: expectedCounter, received: message.ctr }, 'Stream counter mismatch');
+        output.error(`Stream counter mismatch for stream ${sid}: expected=${expectedCounter}, received=${message.ctr}`);
         session.ws.close(1002, 'Counter mismatch');
         return;
       }
@@ -321,7 +322,7 @@ export async function handleMultiStreamFrame(
       try {
         session.counters.incoming.validate(message.ctr);
       } catch (err: any) {
-        logger.error({ error: err.message }, 'Counter mismatch');
+        output.error('Counter mismatch', err.message);
         session.ws.close(1002, 'Counter mismatch');
         return;
       }
@@ -355,10 +356,10 @@ export async function handleMultiStreamFrame(
         break;
 
       default:
-        logger.warn({ frameType: frame.type }, 'Unknown frame type in multi-stream mode');
+        output.warn(`Unknown frame type in multi-stream mode: ${frame.type}`);
     }
   } catch (error: any) {
-    logger.error({ frameType: frame.type, error: error.message }, 'Error handling multi-stream frame');
+    output.error(`Error handling multi-stream frame type ${frame.type}`, error.message);
     session.ws.close(1002, 'Protocol error');
   }
 }

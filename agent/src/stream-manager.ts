@@ -1,5 +1,4 @@
-import { validateArguments, getConfig } from '@sunpix/entangle-utils';
-import type { Logger } from 'pino';
+import { validateArguments, getConfig, OutputHandler } from '@sunpix/entangle-utils';
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
@@ -31,7 +30,7 @@ export interface Stream {
 
 interface StreamManagerOptions {
   policy: Policy;
-  logger: Logger;
+  output: OutputHandler;
   onStreamData?: (sid: string, data: Uint8Array) => void;
   onStreamExit?: (sid: string, code: number | null, signal: string | null, usage?: StreamUsage) => void;
   onStreamError?: (sid: string, error: string) => void;
@@ -40,7 +39,7 @@ interface StreamManagerOptions {
 export class StreamManager extends EventEmitter {
   private streams = new Map<string, Stream>();
   private policy: Policy;
-  private logger: Logger;
+  private output: OutputHandler;
   private aggregateUsage: StreamUsage = {
     cpuMs: 0,
     rssMaxBytes: 0,
@@ -51,7 +50,7 @@ export class StreamManager extends EventEmitter {
   constructor(private options: StreamManagerOptions) {
     super();
     this.policy = options.policy;
-    this.logger = options.logger;
+    this.output = options.output;
   }
 
   /**
@@ -159,7 +158,7 @@ export class StreamManager extends EventEmitter {
 
       // Check output limit
       if (limits.maxOutBytes && stream.usage.outBytes > limits.maxOutBytes) {
-        this.logger.warn({ sid, limit: limits.maxOutBytes }, 'Stream output limit exceeded');
+        this.output.warn(`Stream output limit exceeded for ${sid}: limit=${limits.maxOutBytes}`);
         this.closeStream(sid, 'Output limit exceeded');
         return;
       }
@@ -172,13 +171,13 @@ export class StreamManager extends EventEmitter {
       stream.endedAt = Date.now();
       stream.usage.wallMs = stream.endedAt - stream.startedAt;
       
-      this.logger.info({ sid, code: exitCode.exitCode, signal: exitCode.signal }, 'PTY stream exited');
+      this.output.info(`PTY stream exited for ${sid}: code=${exitCode.exitCode}, signal=${exitCode.signal}`);
       this.options.onStreamExit?.(sid, exitCode.exitCode ?? null, exitCode.signal ? String(exitCode.signal) : null, stream.usage);
       this.streams.delete(sid);
     });
 
     this.streams.set(sid, stream);
-    this.logger.info({ sid, cols: options.cols, rows: options.rows }, 'Opened PTY stream');
+    this.output.info(`Opened PTY stream ${sid}: cols=${options.cols}, rows=${options.rows}`);
 
     return sid;
   }
@@ -244,7 +243,7 @@ export class StreamManager extends EventEmitter {
 
       // Check output limit
       if (limits.maxOutBytes && stream.usage.outBytes > limits.maxOutBytes) {
-        this.logger.warn({ sid, limit: limits.maxOutBytes }, 'Stream output limit exceeded');
+        this.output.warn(`Stream output limit exceeded for ${sid}: limit=${limits.maxOutBytes}`);
         this.closeStream(sid, 'Output limit exceeded');
         return;
       }
@@ -266,20 +265,20 @@ export class StreamManager extends EventEmitter {
       stream.endedAt = Date.now();
       stream.usage.wallMs = stream.endedAt - stream.startedAt;
       
-      this.logger.info({ sid, code, signal }, 'Command stream exited');
+      this.output.info(`Command stream exited for ${sid}: code=${code}, signal=${signal}`);
       this.options.onStreamExit?.(sid, code, signal, stream.usage);
       this.streams.delete(sid);
     });
 
     // Handle process errors
     childProcess.on('error', (err: Error) => {
-      this.logger.error({ sid, error: err.message }, 'Command stream error');
+      this.output.error(`Command stream error for ${sid}`, err.message);
       this.options.onStreamError?.(sid, err.message);
       this.streams.delete(sid);
     });
 
     this.streams.set(sid, stream);
-    this.logger.info({ sid, argv: options.argv }, 'Opened command stream');
+    this.output.info(`Opened command stream ${sid}: ${options.argv.join(' ')}`);
 
     return sid;
   }
@@ -323,7 +322,7 @@ export class StreamManager extends EventEmitter {
 
     const ptyProcess = stream.process as pty.IPty;
     ptyProcess.resize(cols, rows);
-    this.logger.debug({ sid, cols, rows }, 'Resized PTY stream');
+    this.output.debug(`Resized PTY stream ${sid}: cols=${cols}, rows=${rows}`);
   }
 
   /**
@@ -343,7 +342,7 @@ export class StreamManager extends EventEmitter {
       childProcess.kill(signal);
     }
 
-    this.logger.info({ sid, signal }, 'Sent signal to stream');
+    this.output.info(`Sent signal ${signal} to stream ${sid}`);
   }
 
   /**
@@ -362,7 +361,7 @@ export class StreamManager extends EventEmitter {
       try {
         ptyProcess.kill();
       } catch (err) {
-        this.logger.error({ sid, error: err }, 'Failed to kill PTY');
+        this.output.error(`Failed to kill PTY for stream ${sid}`, err instanceof Error ? err.message : String(err));
       }
     } else {
       const childProcess = stream.process as ChildProcess;
@@ -375,11 +374,11 @@ export class StreamManager extends EventEmitter {
           }
         }, 5000);
       } catch (err) {
-        this.logger.error({ sid, error: err }, 'Failed to kill process');
+        this.output.error(`Failed to kill process for stream ${sid}`, err instanceof Error ? err.message : String(err));
       }
     }
 
-    this.logger.info({ sid, reason }, 'Closed stream');
+    this.output.info(`Closed stream ${sid}: reason=${reason}`);
   }
 
   /**

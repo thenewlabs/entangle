@@ -1,8 +1,8 @@
 import type WebSocket from 'ws';
-import { createLogger, getConfig } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 
-const logger = createLogger('agent-route');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
   let agentId: string | undefined;
@@ -19,14 +19,14 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
           // No namespace needed anymore
         }));
         
-        logger.info({ agentId }, 'Agent registered');
+        output.info(`Agent registered: ${agentId}`);
       } else if (msg.type === 'ANNOUNCE_CAP' && agentId) {
         const success = routing.announceCapability(agentId, msg.capId);
         
         if (success) {
-          logger.info({ agentId, capId: msg.capId }, 'Capability announced');
+          output.info(`Capability announced: ${msg.capId} by agent ${agentId}`);
         } else {
-          logger.warn({ agentId, capId: msg.capId }, 'Failed to announce capability');
+          output.warn(`Failed to announce capability ${msg.capId} for agent ${agentId}`);
         }
       } else if (msg.type === 'HEARTBEAT' && agentId) {
         routing.updateHeartbeat(agentId);
@@ -37,7 +37,7 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
           const buf = Buffer.from(msg.frame, 'base64');
           const max = getConfig().maxFrameBytes;
           if (buf.length > max) {
-            logger.warn({ size: buf.length, max, socketId: msg.socketId }, 'Dropping oversize frame from agent');
+            output.warn(`Dropping oversize frame from agent: size=${buf.length}, max=${max}, socketId=${msg.socketId}`);
             return;
           }
           // Send the unwrapped frame to the invoker
@@ -45,15 +45,15 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
         }
       }
     } catch (error) {
-      logger.error({ error }, 'Failed to handle agent message');
+      output.error('Failed to handle agent message', error instanceof Error ? error.message : String(error));
     }
   });
   
   ws.on('error', (error) => {
-    logger.error({ error, agentId }, 'Agent WebSocket error');
+    output.error(`Agent WebSocket error (agentId: ${agentId})`, error instanceof Error ? error.message : String(error));
   });
   
   ws.on('close', () => {
-    logger.info({ agentId }, 'Agent disconnected');
+    output.info(`Agent disconnected: ${agentId}`);
   });
 }

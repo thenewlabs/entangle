@@ -20,7 +20,8 @@ import {
   hashPolicy,
 } from '@sunpix/entangle-crypto';
 import { 
-  createLogger, 
+  OutputHandler,
+  parseOutputMode,
   BidirectionalCounters,
   validateArguments,
   getConfig,
@@ -30,7 +31,7 @@ import { runCommand } from './runner.js';
 import { PtyManager } from './pty.js';
 import type { CapabilityInfo } from './capability.js';
 
-const logger = createLogger('session');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export interface Session {
   socketId: string;
@@ -94,7 +95,7 @@ export async function handleInvokerConnection(
         try {
           await handleFrame(session, frame);
         } catch (error) {
-          logger.error({ error, socketId }, 'Failed to handle frame');
+          output.error(`Failed to handle frame for socket ${socketId}`, error instanceof Error ? error.message : String(error));
           sendError(session, null, ErrorCode.INTERNAL_ERROR, String(error));
         }
       }
@@ -149,13 +150,13 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
       break;
       
     default:
-      logger.warn({ type: frame.type }, 'Unexpected frame type');
+      output.warn(`Unexpected frame type: ${frame.type}`);
   }
 }
 
 async function handleAuth1(session: Session, payload: Uint8Array): Promise<void> {
   try {
-    logger.debug({ payloadLength: payload.length }, 'AUTH1 received');
+    output.debug(`AUTH1 received: payload length ${payload.length}`);
     
     const saltCap = extractSaltFromCapId(session.cap.capId);
     const S = session.cap.S;
@@ -164,7 +165,7 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     
     // AUTH1 payload should be HMAC (32 bytes) + nonceB (variable length)
     if (payload.length < 32) {
-      logger.error({ payloadLength: payload.length }, 'AUTH1 payload too short');
+      output.error(`AUTH1 payload too short: ${payload.length} bytes`);
       throw new Error('Invalid AUTH1 payload: too short');
     }
     
@@ -184,11 +185,11 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     // Avoid logging HMAC details
     
     if (!verifyHmac(session.keys.K_auth, auth1Data, receivedHmac)) {
-      logger.error('AUTH1 HMAC verification failed');
+      output.error('AUTH1 HMAC verification failed');
       throw new Error('AUTH1 HMAC verification failed');
     }
     
-    logger.debug('AUTH1 HMAC verified');
+    output.debug('AUTH1 HMAC verified');
     
     // Generate nonceC for AUTH2
     session.nonceC = require('crypto').randomBytes(16).toString('hex');
@@ -206,13 +207,9 @@ async function handleAuth1(session: Session, payload: Uint8Array): Promise<void>
     
     sendRelayResponse(session, frame);
     
-    logger.debug('AUTH2 sent');
+    output.debug('AUTH2 sent');
   } catch (error) {
-    logger.error({ 
-      error: error instanceof Error ? error.message : String(error),
-      payloadLength: payload.length,
-      capId: session.cap.capId
-    }, 'AUTH1 failed');
+    output.error('AUTH1 failed', error instanceof Error ? error.message : String(error));
     sendError(session, null, ErrorCode.AUTH_FAILED, 'Authentication failed');
   }
 }
@@ -231,7 +228,7 @@ async function handleAuth3(session: Session, payload: Uint8Array): Promise<void>
   }
   
   session.authenticated = true;
-  logger.info({ socketId: session.socketId }, 'Session authenticated');
+  output.info(`Session authenticated: ${session.socketId}`);
 }
 
 async function handleRun(session: Session, payload: Uint8Array): Promise<void> {
@@ -261,7 +258,7 @@ async function handleRun(session: Session, payload: Uint8Array): Promise<void> {
     
     await runCommand(session, runMsg);
   } catch (error) {
-    logger.error({ error }, 'RUN failed');
+    output.error('RUN failed', error instanceof Error ? error.message : String(error));
     sendError(session, session.currentCommand || null, ErrorCode.INTERNAL_ERROR, String(error));
   }
 }
@@ -278,10 +275,10 @@ async function handleAbort(session: Session, payload: Uint8Array): Promise<void>
     
     if (abortMsg.commandId === session.currentCommand && session.abortController) {
       session.abortController.abort();
-      logger.info({ commandId: abortMsg.commandId }, 'Command aborted');
+      output.info(`Command aborted: ${abortMsg.commandId}`);
     }
   } catch (error) {
-    logger.error({ error }, 'ABORT failed');
+    output.error('ABORT failed', error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -299,7 +296,7 @@ async function handleTtyOpen(session: Session, payload: Uint8Array): Promise<voi
     const ttyOpenMsg = decrypted as TtyOpenMessage;
     await session.ptyManager.handleTtyOpen(session as any, ttyOpenMsg);
   } catch (error) {
-    logger.error({ error }, 'TTY_OPEN failed');
+    output.error('TTY_OPEN failed', error instanceof Error ? error.message : String(error));
     sendError(session, null, ErrorCode.INTERNAL_ERROR, String(error));
   }
 }
@@ -315,7 +312,7 @@ async function handleTtyData(session: Session, payload: Uint8Array): Promise<voi
     const ttyDataMsg = decrypted as TtyDataMessage;
     await session.ptyManager.handleTtyData(session as any, ttyDataMsg);
   } catch (error) {
-    logger.error({ error }, 'TTY_DATA failed');
+    output.error('TTY_DATA failed', error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -330,7 +327,7 @@ async function handleTtyResize(session: Session, payload: Uint8Array): Promise<v
     const ttyResizeMsg = decrypted as TtyResizeMessage;
     await session.ptyManager.handleTtyResize(session as any, ttyResizeMsg);
   } catch (error) {
-    logger.error({ error }, 'TTY_RESIZE failed');
+    output.error('TTY_RESIZE failed', error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -345,7 +342,7 @@ async function handleTtySignal(session: Session, payload: Uint8Array): Promise<v
     const ttySignalMsg = decrypted as TtySignalMessage;
     await session.ptyManager.handleTtySignal(session as any, ttySignalMsg);
   } catch (error) {
-    logger.error({ error }, 'TTY_SIGNAL failed');
+    output.error('TTY_SIGNAL failed', error instanceof Error ? error.message : String(error));
   }
 }
 

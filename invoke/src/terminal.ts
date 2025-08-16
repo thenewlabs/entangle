@@ -1,11 +1,11 @@
 import WebSocket from 'ws';
 import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac } from '@sunpix/entangle-crypto';
 import { FrameType, FrameReader, encodeFrame, TtyDataMessage, TtyExitMessage } from '@sunpix/entangle-protocol';
-import { createLogger, BidirectionalCounters } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode, BidirectionalCounters } from '@sunpix/entangle-utils';
 import { encode, decode } from 'cborg';
 // import * as readline from 'readline';
 
-const logger = createLogger('terminal');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export async function openTerminal(
   wsUrl: string, 
@@ -32,7 +32,7 @@ export async function openTerminal(
   
   return new Promise((resolve, reject) => {
     ws.on('open', async () => {
-      logger.info('Connected to relay');
+      output.info('Connected to relay');
       
       try {
         // Send AUTH1
@@ -49,7 +49,7 @@ export async function openTerminal(
         const auth1Frame = encodeFrame(FrameType.AUTH1, auth1Payload);
         ws.send(auth1Frame);
       } catch (error) {
-        logger.error({ error }, 'Failed to send AUTH1');
+        output.error('Failed to send AUTH1', error instanceof Error ? error.message : String(error));
         ws.close();
         reject(error);
       }
@@ -79,7 +79,7 @@ export async function openTerminal(
             ws.send(auth3Frame);
             
             authenticated = true;
-            logger.info('Authenticated');
+            output.info('Authenticated');
             
             // Send TTY_OPEN
             const ttyOpen = {
@@ -131,7 +131,7 @@ export async function openTerminal(
             
             const msg = decrypted.msg as TtyExitMessage['msg'];
             if (msg.sessionId === sessionId) {
-              logger.info({ code: msg.code, signal: msg.signal }, 'Terminal exited');
+              output.info(`Terminal exited: code=${msg.code}, signal=${msg.signal}`);
               ws.close();
               resolve();
             }
@@ -141,23 +141,23 @@ export async function openTerminal(
             const encrypted = decode(frame.payload) as any;
             const decrypted = aeadDecrypt(keys.K_enc, FrameType.ERROR, encrypted.nonce, encrypted.cipher);
             const error = decrypted.msg;
-            logger.error({ error }, 'Server error');
+            output.error('Server error', error instanceof Error ? error.message : String(error));
             ws.close();
             reject(new Error(`Server error: ${error.code} - ${error.detail}`));
           }
         } catch (error) {
-          logger.error({ error, frameType: frame.type }, 'Failed to handle frame');
+          output.error(`Failed to handle frame type ${frame.type}`, error instanceof Error ? error.message : String(error));
         }
       }
     });
     
     ws.on('error', (error) => {
-      logger.error({ error }, 'WebSocket error');
+      output.error('WebSocket error', error instanceof Error ? error.message : String(error));
       reject(error);
     });
     
     ws.on('close', () => {
-      logger.info('Disconnected');
+      output.info('Disconnected');
       resolve();
     });
   });

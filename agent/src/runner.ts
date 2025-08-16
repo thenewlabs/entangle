@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { createLogger } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
 import { 
   FrameType, 
   encodeFrame,
@@ -13,7 +13,7 @@ import { type Session, sendRelayResponse } from './session.js';
 import { realpath } from 'fs/promises';
 import { resolve } from 'path';
 
-const logger = createLogger('runner');
+const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export function resolveCwd(requestedCwd?: string): string {
   if (requestedCwd) {
@@ -58,14 +58,14 @@ export async function runCommand(
     cwd = resolveCwd(requestedCwd);
     await validateCwd(cwd);
   } catch (error: any) {
-    logger.error({ error, requestedCwd }, 'CWD validation failed');
+    output.error(`CWD validation failed for ${requestedCwd}`, error instanceof Error ? error.message : String(error));
     throw error;
   }
   
   const tool = argv[0];
   const args = argv.slice(1);
   
-  logger.info({ commandId, tool, args, cwd }, 'Running command');
+  output.info(`Running command ${commandId}: ${tool} ${args.join(' ')} in ${cwd}`);
   
   const startTime = Date.now();
   let bytesOut = 0;
@@ -119,7 +119,7 @@ export async function runCommand(
   
   child.on('exit', (code, signal) => {
     const duration = Date.now() - startTime;
-    logger.info({ commandId, code, signal, duration, bytesOut }, 'Command exited');
+    output.info(`Command ${commandId} exited: code=${code}, signal=${signal}, duration=${duration}ms, bytesOut=${bytesOut}`);
     
     sendExit(session, commandId, code, signal, bytesOut);
     delete session.currentCommand;
@@ -127,7 +127,7 @@ export async function runCommand(
   });
   
   child.on('error', (error) => {
-    logger.error({ commandId, error }, 'Command error');
+    output.error(`Command ${commandId} error`, error instanceof Error ? error.message : String(error));
     sendExit(session, commandId, null, null, bytesOut);
   });
 }
