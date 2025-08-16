@@ -43,24 +43,24 @@ async function main() {
   
   const logger = createLogger('invoke', outputMode);
   const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
-  output.version('Entangle Invoke', getVersionInfo());
   
   if (args.length === 0) {
-    output.error('Usage: invoke <cap-url> [command [args...]] [--cwd PATH]');
-    output.error('');
-    output.error('Examples:');
-    output.error('  # Interactive terminal');
-    output.error('  invoke https://suncoder.dev/cap/capId#S=secret');
-    output.error('');
-    output.error('  # Single command');
-    output.error('  invoke https://suncoder.dev/cap/capId#S=secret ls -la');
-    output.error('');
-    output.error('Options:');
-    output.error('  --cwd <path>  Working directory');
-    output.error('  --cols <n>    Terminal columns (default: 80)');
-    output.error('  --rows <n>    Terminal rows (default: 24)');
-    output.error('  --abort-after-ms <n>  Abort command after N milliseconds');
-    output.error('  --output-mode <mode>  Output mode: text or stream-json (default: text)');
+    output.version('Entangle Invoke', getVersionInfo());
+    output.text('Usage: invoke <cap-url> [command [args...]] [--cwd PATH]');
+    output.text('');
+    output.text('Examples:');
+    output.text('  # Interactive terminal');
+    output.text('  invoke https://suncoder.dev/cap/capId#S=secret');
+    output.text('');
+    output.text('  # Single command');
+    output.text('  invoke https://suncoder.dev/cap/capId#S=secret ls -la');
+    output.text('');
+    output.text('Options:');
+    output.text('  --cwd <path>  Working directory');
+    output.text('  --cols <n>    Terminal columns (default: 80)');
+    output.text('  --rows <n>    Terminal rows (default: 24)');
+    output.text('  --abort-after-ms <n>  Abort command after N milliseconds');
+    output.text('  --output-mode <mode>  Output mode: text or stream-json (default: text)');
     process.exit(2);
   }
   

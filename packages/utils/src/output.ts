@@ -46,6 +46,10 @@ export class OutputHandler {
   warn(message: string, data?: any): void {
     this.log('warn', message, data);
   }
+  
+  text(message: string, data?: any): void {
+    this.log('text', message, data);
+  }
 
   // Direct output for things like command output
   write(data: string | Buffer): void {
@@ -79,11 +83,13 @@ export class OutputHandler {
   private textOutput(level: string, message: string, data?: any): void {
     // Format level with consistent width and color codes (if terminal supports)
     const levelFormatted = this.formatLevel(level);
+
+    const levelAndMessage = [levelFormatted, message].filter(x => x).join(' ');
     
     if (data && Object.keys(data).length > 0) {
-      console.log(`${levelFormatted} ${message}`, data);
+      console.log(`${levelAndMessage}`, data);
     } else {
-      console.log(`${levelFormatted} ${message}`);
+      console.log(`${levelAndMessage}`);
     }
   }
 
@@ -102,6 +108,10 @@ export class OutputHandler {
     
     if (isTTY && colors[level as keyof typeof colors]) {
       return `${colors[level as keyof typeof colors]}[${levelUpper}]${colors.reset}`;
+    }
+
+    if (level === 'text') {
+      return '';
     }
     
     return `[${levelUpper}]`;
