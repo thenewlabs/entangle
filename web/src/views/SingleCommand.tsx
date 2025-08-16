@@ -70,12 +70,12 @@ export function SingleCommandView({ capability }: SingleCommandViewProps) {
         const auth1Data = new TextEncoder().encode('hello' + capability.capId + nonceBHex);
         const auth1Hmac = computeHmac(keys.K_auth, auth1Data);
         
-        console.log('[SingleCommandView] AUTH1 details:', {
-          capId: capability.capId,
-          nonceB: nonceBHex,
-          auth1DataString: 'hello' + capability.capId + nonceBHex,
-          hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
-        });
+        // console.log('[SingleCommandView] AUTH1 details:', {
+        //   capId: capability.capId,
+        //   nonceB: nonceBHex,
+        //   auth1DataString: 'hello' + capability.capId + nonceBHex,
+        //   hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
+        // });
         
         // Combine HMAC and nonceB for AUTH1 payload
         // Important: send the same representation used in HMAC (hex)

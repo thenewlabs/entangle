@@ -16,7 +16,7 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
         
         ws.send(JSON.stringify({
           type: 'ASSIGN',
-          // No namespace needed anymore
+          agentId, // Provide agentId for logging/diagnostics on the agent
         }));
         
         output.info(`Agent registered: ${agentId}`);

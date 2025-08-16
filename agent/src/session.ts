@@ -30,6 +30,8 @@ import { encode, decode } from 'cborg';
 import { runCommand } from './runner.js';
 import { PtyManager } from './pty.js';
 import type { CapabilityInfo } from './capability.js';
+import { handleMultiStreamFrame } from './multi-session.js';
+import { StreamCounters } from '@sunpix/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -114,11 +116,60 @@ export async function handleInvokerConnection(
       if (session.ptyManager) {
         session.ptyManager.cleanup();
       }
+      // Cleanup multi-stream state if present
+      try {
+        const store = (session as any).__multiSessionStore;
+        if (store && store.multiSession) {
+          const { cleanupMultiSession } = require('./multi-session.js');
+          cleanupMultiSession(store.multiSession);
+        }
+      } catch {}
     }
   };
 }
 
 async function handleFrame(session: Session, frame: { type: FrameType; payload: Uint8Array }): Promise<void> {
+  // Route multi-stream frames to the multi-stream handler
+  if (
+    frame.type === FrameType.STREAM_OPEN ||
+    frame.type === FrameType.STREAM_DATA ||
+    frame.type === FrameType.STREAM_RESIZE ||
+    frame.type === FrameType.STREAM_SIGNAL ||
+    frame.type === FrameType.STREAM_CLOSE ||
+    frame.type === FrameType.STREAM_ERROR ||
+    frame.type === FrameType.STREAM_EXIT
+  ) {
+    // Only handle multi-stream frames if authenticated
+    if (!session.authenticated || !session.keys) {
+      output.error(`Received stream frame before authentication: type=${frame.type}`);
+      return;
+    }
+
+    // Persist a MultiSession-like object across frames to preserve counters/state
+    const store = (session as any).__multiSessionStore || ((session as any).__multiSessionStore = {});
+    if (!store.multiSession) {
+      store.multiSession = {
+        socketId: session.socketId,
+        ws: session.ws,
+        cap: session.cap,
+        keys: session.keys,
+        counters: session.counters,
+        streamCounters: new StreamCounters(),
+        authenticated: session.authenticated,
+        legacyMode: false,
+        hasRun: session.hasRun,
+      };
+    }
+    // Keep dynamic fields updated
+    store.multiSession.ws = session.ws;
+    store.multiSession.keys = session.keys;
+    store.multiSession.authenticated = session.authenticated;
+    store.multiSession.hasRun = session.hasRun;
+
+    await handleMultiStreamFrame(store.multiSession as any, frame);
+    return;
+  }
+
   switch (frame.type) {
     case FrameType.AUTH1:
       await handleAuth1(session, frame.payload);

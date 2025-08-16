@@ -47,13 +47,20 @@ export async function streamAeadDecrypt(
   const nonce = payload.slice(0, CRYPTO_PARAMS.NONCE_BYTES);
   const cipher = payload.slice(CRYPTO_PARAMS.NONCE_BYTES);
   
-  const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-    cipher,
-    aad,
-    null,
-    nonce,
-    K_enc
-  );
-  
-  return plaintext;
+  try {
+    // NOTE: libsodium-wrappers signature is (nsec, cipher, aad, nonce, key)
+    // Keep it consistent with aeadDecrypt in index.ts
+    const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+      null,
+      cipher,
+      aad,
+      nonce,
+      K_enc
+    );
+    
+    return plaintext;
+  } catch (e: any) {
+    // Add more context to the error
+    throw new Error(`streamAeadDecrypt failed: ${e.message || e}. Payload length: ${payload.length}, Nonce length: ${nonce.length}, Cipher length: ${cipher.length}, Key length: ${K_enc.length}, AAD length: ${aad.length}`);
+  }
 }
