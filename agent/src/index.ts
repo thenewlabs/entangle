@@ -17,6 +17,7 @@ program
   .command('start')
   .description('Start the agent and register with server')
   .option('--server <url>', 'Server URL')
+  .option('--password <password>', 'Optional password for agent authentication')
   .action(async (options) => {
     try {
       // Propagate output mode to all loggers in this process
@@ -32,6 +33,7 @@ program
       await startAgent({
         serverUrl,
         outputMode: program.opts().outputMode,
+        password: options.password || process.env.AGENT_PASSWORD,
       });
     } catch (error) {
       const outputMode = parseOutputMode(program.opts().outputMode);

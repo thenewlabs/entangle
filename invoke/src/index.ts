@@ -5,7 +5,7 @@ import { getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle
 import { openTerminal } from './terminal.js';
 import { runSingle } from './single.js';
 
-function parseCapUrl(u: string): { host: string; capId: string; S: string } {
+function parseCapUrl(u: string): { host: string; capId: string; S: string; password?: string } {
   const url = new URL(u);
   const parts = url.pathname.split('/');
   const capId = parts[parts.length - 1];
@@ -14,9 +14,10 @@ function parseCapUrl(u: string): { host: string; capId: string; S: string } {
     throw new Error('Invalid capability URL: missing capId');
   }
   
-  // Extract S from fragment
+  // Extract S and optional PW from fragment
   const hashParams = new URLSearchParams(url.hash.slice(1));
   const s = hashParams.get('S');
+  const password = hashParams.get('PW') || undefined;
   
   if (!s) {
     throw new Error('Invalid capability URL: missing S in fragment');
@@ -25,7 +26,8 @@ function parseCapUrl(u: string): { host: string; capId: string; S: string } {
   return { 
     host: url.host, 
     capId, 
-    S: s 
+    S: s,
+    ...(password && { password })
   };
 }
 
@@ -42,6 +44,7 @@ program
   .option('--rows <n>', 'Terminal rows', '24')
   .option('--abort-after-ms <n>', 'Abort command after N milliseconds')
   .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text')
+  .option('--password <password>', 'Agent password (if required)')
   .action(async (capUrl: string, commandArgs: string[], options) => {
     try {
       // Propagate output mode to all modules in this process
@@ -49,7 +52,8 @@ program
       const outputMode = parseOutputMode(options.outputMode);
       const output = new OutputHandler({ mode: outputMode });
       
-      const { host, capId, S } = parseCapUrl(capUrl);
+      const { host, capId, S, password: urlPassword } = parseCapUrl(capUrl);
+      const password = options.password || urlPassword;
       const protocol = capUrl.startsWith('https://') ? 'wss' : 'ws';
       const wsUrl = `${protocol}://${host}/relay/${capId}`;
       
@@ -63,7 +67,7 @@ program
         const terminalOptions: { cwd?: string; cols?: number; rows?: number } = { cols, rows };
         if (options.cwd !== undefined) terminalOptions.cwd = options.cwd;
         
-        await openTerminal(wsUrl, S, terminalOptions);
+        await openTerminal(wsUrl, S, terminalOptions, password);
       } else {
         // Single command mode
         output.version('Entangle Invoke - Command Mode', getVersionInfo());
@@ -72,7 +76,7 @@ program
         if (options.cwd !== undefined) singleOptions.cwd = options.cwd;
         if (options.abortAfterMs !== undefined) singleOptions.abortAfterMs = parseInt(options.abortAfterMs, 10);
         
-        await runSingle(wsUrl, S, singleOptions);
+        await runSingle(wsUrl, S, singleOptions, password);
       }
       
     } catch (error) {

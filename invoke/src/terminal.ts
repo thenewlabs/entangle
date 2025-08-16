@@ -10,7 +10,8 @@ const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE
 export async function openTerminal(
   wsUrl: string, 
   S: string, 
-  options: { cwd?: string | undefined; cols?: number | undefined; rows?: number | undefined }
+  options: { cwd?: string | undefined; cols?: number | undefined; rows?: number | undefined },
+  password?: string
 ): Promise<void> {
   const { cwd, cols = 80, rows = 24 } = options;
   
@@ -56,6 +57,8 @@ export async function openTerminal(
     });
     
     let authenticated = false;
+    let passwordVerified = false;
+    let requiresPassword = false;
     let nonceC: string | undefined;
     
     ws.on('message', async (data) => {
@@ -71,6 +74,7 @@ export async function openTerminal(
             const auth2 = decrypted.msg;
             
             nonceC = auth2.nonceC;
+            requiresPassword = auth2.requiresPassword || false;
             
             // Send AUTH3
             const auth3Data = new TextEncoder().encode('ready' + nonceC);
@@ -81,7 +85,39 @@ export async function openTerminal(
             authenticated = true;
             output.info('Authenticated');
             
-            // Send TTY_OPEN
+            // If password is required, send it
+            if (requiresPassword) {
+              if (!password) {
+                // Interactive prompt for password
+                const readline = await import('readline');
+                const rl = readline.createInterface({
+                  input: process.stdin,
+                  output: process.stdout
+                });
+                
+                const passwordPromise = new Promise<string>((resolve) => {
+                  rl.question('Agent password: ', (answer) => {
+                    rl.close();
+                    resolve(answer);
+                  });
+                });
+                
+                password = await passwordPromise;
+              }
+              
+              output.info('Sending password...');
+              const pwMsg = {
+                ctr: counters.outgoing.next(),
+                msg: { password }
+              };
+              
+              const pwEncrypted = aeadEncrypt(keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+              const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
+              ws.send(pwFrame);
+            } else {
+              passwordVerified = true;
+              
+              // Send TTY_OPEN immediately if no password required
             const ttyOpen = {
               sessionId,
               cwd,
@@ -111,6 +147,54 @@ export async function openTerminal(
               const resizeFrame = encodeFrame(FrameType.TTY_RESIZE, encode(resizeEncrypted));
               ws.send(resizeFrame);
             });
+            }
+            
+          } else if (frame.type === FrameType.AUTH_PW && authenticated && !passwordVerified) {
+            // Handle password response
+            const encrypted = decode(frame.payload) as any;
+            const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+            counters.incoming.validate(decrypted.ctr);
+            
+            const pwResponse = decrypted.msg as { ok: boolean };
+            if (pwResponse.ok) {
+              output.info('Password verified');
+              passwordVerified = true;
+              
+              // Now send TTY_OPEN
+              const ttyOpen = {
+                sessionId,
+                cwd,
+                cols,
+                rows,
+              };
+              
+              const ttyOpenEncrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_OPEN, counters.outgoing.next(), ttyOpen);
+              const ttyOpenFrame = encodeFrame(FrameType.TTY_OPEN, encode(ttyOpenEncrypted));
+              ws.send(ttyOpenFrame);
+              
+              // Set up terminal input
+              setupTerminalInput(ws, keys, counters, sessionId);
+              
+              // Handle terminal resize
+              process.stdout.on('resize', () => {
+                const newCols = process.stdout.columns || 80;
+                const newRows = process.stdout.rows || 24;
+                
+                const resize = {
+                  sessionId,
+                  cols: newCols,
+                  rows: newRows,
+                };
+                
+                const resizeEncrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_RESIZE, counters.outgoing.next(), resize);
+                const resizeFrame = encodeFrame(FrameType.TTY_RESIZE, encode(resizeEncrypted));
+                ws.send(resizeFrame);
+              });
+            } else {
+              output.error('Password verification failed');
+              ws.close();
+              reject(new Error('Password verification failed'));
+            }
             
           } else if (frame.type === FrameType.TTY_DATA && authenticated) {
             // Handle TTY data from server

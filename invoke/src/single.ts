@@ -9,7 +9,8 @@ const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE
 export async function runSingle(
   wsUrl: string, 
   S: string, 
-  options: { argv: string[]; cwd?: string | undefined; abortAfterMs?: number | undefined }
+  options: { argv: string[]; cwd?: string | undefined; abortAfterMs?: number | undefined },
+  password?: string
 ): Promise<void> {
   const { argv, cwd, abortAfterMs } = options;
   
@@ -61,6 +62,8 @@ export async function runSingle(
     });
     
     let authenticated = false;
+    let passwordVerified = false;
+    let requiresPassword = false;
     let nonceC: string | undefined;
     let exitCode = 0;
     
@@ -77,6 +80,7 @@ export async function runSingle(
             const auth2 = decrypted.msg;
             
             nonceC = auth2.nonceC;
+            requiresPassword = auth2.requiresPassword || false;
             
             // Send AUTH3
             const auth3Data = new TextEncoder().encode('ready' + nonceC);
@@ -87,7 +91,40 @@ export async function runSingle(
             authenticated = true;
             output.info('Authenticated');
             
-            // Send RUN command
+            // If password is required, send it
+            if (requiresPassword) {
+              if (!password) {
+                // For non-interactive mode, we can't prompt for password
+                output.error('Password required but not provided. Use --password flag or include PW in URL fragment.');
+                ws.close();
+                process.exit(1);
+              }
+              
+              output.info('Sending password...');
+              const pwMsg = {
+                ctr: counters.outgoing.next(),
+                msg: { password }
+              };
+              
+              const pwEncrypted = aeadEncrypt(keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+              const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
+              ws.send(pwFrame);
+            } else {
+              passwordVerified = true;
+            }
+            
+          } else if (frame.type === FrameType.AUTH_PW && authenticated && !passwordVerified) {
+            // Handle password response
+            const encrypted = decode(frame.payload) as any;
+            const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+            counters.incoming.validate(decrypted.ctr);
+            
+            const pwResponse = decrypted.msg as { ok: boolean };
+            if (pwResponse.ok) {
+              output.info('Password verified');
+              passwordVerified = true;
+              
+              // Now send RUN command
             const runMsg = {
               commandId,
               argv,
@@ -112,6 +149,11 @@ export async function runSingle(
                 const abortFrame = encodeFrame(FrameType.ABORT, encode(abortEncrypted));
                 ws.send(abortFrame);
               }, abortAfterMs);
+            }
+            } else {
+              output.error('Password verification failed');
+              ws.close();
+              process.exit(1);
             }
             
           } else if (frame.type === FrameType.STDOUT && authenticated) {

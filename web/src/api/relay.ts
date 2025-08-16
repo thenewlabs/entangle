@@ -20,6 +20,8 @@ export class RelayClient {
   private keys?: Awaited<ReturnType<typeof deriveKeys>>;
   private reader = new FrameReader();
   private authenticated = false;
+  private passwordVerified = false;
+  private requiresPassword = false;
   private commandId?: string;
   private outgoingCtr = 0;
   private incomingCtr = -1;
@@ -27,6 +29,7 @@ export class RelayClient {
   onConnect?: () => void;
   onDisconnect?: () => void;
   onExit?: (code: number) => void;
+  onPasswordRequired?: () => Promise<string>;
   
   constructor(
     private namespace: string,
@@ -174,8 +177,11 @@ export class RelayClient {
         console.log('[RelayClient] AUTH2 received:', {
           ok: auth2.ok,
           nonceB: auth2.nonceB,
-          nonceC: auth2.nonceC
+          nonceC: auth2.nonceC,
+          requiresPassword: auth2.requiresPassword
         });
+        
+        this.requiresPassword = auth2.requiresPassword || false;
         
         const auth3Data = new TextEncoder().encode('ready' + auth2.nonceC);
         const auth3Hmac = computeHmac(this.keys.K_auth, auth3Data);
@@ -189,10 +195,38 @@ export class RelayClient {
         
         this.authenticated = true;
         console.log('[RelayClient] Authentication successful!');
-        this.onConnect?.();
         
-        this.terminal.writeln('Connected to Entangle');
-      } else if (this.authenticated) {
+        // Check if password is required
+        if (this.requiresPassword) {
+          console.log('[RelayClient] Password required');
+          this.sendPassword();
+        } else {
+          this.passwordVerified = true;
+          this.onConnect?.();
+          this.terminal.writeln('Connected to Entangle');
+        }
+      } else if (frame.type === FrameType.AUTH_PW && this.authenticated && !this.passwordVerified) {
+        // Handle password response
+        console.log('[RelayClient] Handling AUTH_PW response');
+        const encrypted = decode(frame.payload) as any;
+        const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+        
+        if (decrypted.ctr <= this.incomingCtr) {
+          throw new Error('Counter not increasing');
+        }
+        this.incomingCtr = decrypted.ctr;
+        
+        const pwResponse = decrypted.msg as { ok: boolean };
+        if (pwResponse.ok) {
+          console.log('[RelayClient] Password verified');
+          this.passwordVerified = true;
+          this.onConnect?.();
+          this.terminal.writeln('Connected to Entangle');
+        } else {
+          this.terminal.writeln('Invalid password');
+          this.ws?.close();
+        }
+      } else if (this.authenticated && this.passwordVerified) {
         const encrypted = decode(frame.payload) as any;
         const decrypted = aeadDecrypt(this.keys.K_enc, frame.type, encrypted.nonce, encrypted.cipher);
         
@@ -236,5 +270,31 @@ export class RelayClient {
   
   private nextOutgoingCtr(): number {
     return ++this.outgoingCtr;
+  }
+  
+  private async sendPassword(): Promise<void> {
+    if (!this.keys || !this.ws) return;
+    
+    // Get password from URL fragment or prompt user
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    let password = hashParams.get('PW');
+    
+    if (!password && this.onPasswordRequired) {
+      password = await this.onPasswordRequired();
+    }
+    
+    if (!password) {
+      this.terminal.writeln('Password required but not provided');
+      this.ws.close();
+      return;
+    }
+    
+    const pwMsg = {
+      ctr: this.nextOutgoingCtr(),
+      msg: { password }
+    };
+    
+    const encrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+    this.ws.send(encodeFrame(FrameType.AUTH_PW, encode(encrypted)));
   }
 }

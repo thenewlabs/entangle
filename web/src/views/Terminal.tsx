@@ -16,15 +16,19 @@ interface TerminalViewProps {
 
 export function TerminalView({ capability }: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<'connecting' | 'authenticating' | 'ready' | 'error'>('connecting');
+  const [status, setStatus] = useState<'connecting' | 'authenticating' | 'password' | 'ready' | 'error'>('connecting');
   const [error, setError] = useState<string | null>(null);
   const [cwd, setCwd] = useState<string>('');
   const [showCwdDialog, setShowCwdDialog] = useState(true);
+  const [showPasswordDialog, setShowPasswordDialog] = useState(false);
+  const [password, setPassword] = useState<string>('');
   
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const sessionIdRef = useRef<string>(Math.random().toString(36).substr(2, 9));
+  const keysRef = useRef<any>(null);
+  const countersRef = useRef<any>(null);
   
   const connect = async (workingDir?: string) => {
     setShowCwdDialog(false);
@@ -34,6 +38,7 @@ export function TerminalView({ capability }: TerminalViewProps) {
       // Derive keys
       const saltCap = extractSaltFromCapId(capability.capId);
       const keys = await deriveKeys(capability.S, saltCap);
+      keysRef.current = keys;
       
       // Connect to WebSocket
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -44,7 +49,9 @@ export function TerminalView({ capability }: TerminalViewProps) {
       
       const reader = new FrameReader();
       const counters = new BidirectionalCounters();
+      countersRef.current = counters;
       let authenticated = false;
+      let passwordVerified = false;
       let nonceC: string | undefined;
       
       ws.onopen = async () => {
@@ -87,6 +94,7 @@ export function TerminalView({ capability }: TerminalViewProps) {
               const auth2 = decrypted.msg;
               
               nonceC = auth2.nonceC;
+              const requiresPassword = auth2.requiresPassword || false;
               
               // Send AUTH3
               const auth3Data = new TextEncoder().encode('ready' + nonceC);
@@ -95,7 +103,34 @@ export function TerminalView({ capability }: TerminalViewProps) {
               ws.send(auth3Frame);
               
               authenticated = true;
-              setStatus('ready');
+              
+              // Check if password is required
+              if (requiresPassword) {
+                setStatus('password');
+                
+                // Check if password is in URL fragment
+                const hashParams = new URLSearchParams(window.location.hash.slice(1));
+                const urlPassword = hashParams.get('PW');
+                
+                if (urlPassword) {
+                  // Send password automatically
+                  const pwMsg = {
+                    ctr: counters.outgoing.next(),
+                    msg: { password: urlPassword }
+                  };
+                  
+                  const pwEncrypted = aeadEncrypt(keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+                  const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
+                  ws.send(pwFrame);
+                } else {
+                  // Show password dialog
+                  setShowPasswordDialog(true);
+                  return;
+                }
+              } else {
+                passwordVerified = true;
+                setStatus('ready');
+              }
               
               // Initialize terminal
               if (terminalRef.current && !termRef.current) {
@@ -173,7 +208,99 @@ export function TerminalView({ capability }: TerminalViewProps) {
                 };
               }
               
-            } else if (frame.type === FrameType.TTY_DATA && authenticated) {
+            } else if (frame.type === FrameType.AUTH_PW && authenticated && !passwordVerified) {
+              // Handle password response
+              const encrypted = decode(frame.payload) as any;
+              const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+              counters.incoming.validate(decrypted.ctr);
+              
+              const pwResponse = decrypted.msg as { ok: boolean };
+              if (pwResponse.ok) {
+                passwordVerified = true;
+                setStatus('ready');
+                setShowPasswordDialog(false);
+                
+                // Now initialize terminal
+                if (terminalRef.current && !termRef.current) {
+                  const term = new Terminal({
+                    cursorBlink: true,
+                    fontSize: 14,
+                    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                    theme: {
+                      background: '#1e1e1e',
+                      foreground: '#d4d4d4',
+                    },
+                  });
+                  
+                  const fitAddon = new FitAddon();
+                  term.loadAddon(fitAddon);
+                  
+                  term.open(terminalRef.current);
+                  fitAddon.fit();
+                  
+                  termRef.current = term;
+                  fitAddonRef.current = fitAddon;
+                  
+                  // Send TTY_OPEN
+                  const ttyOpen = {
+                    sessionId: sessionIdRef.current,
+                    cwd: workingDir,
+                    cols: term.cols,
+                    rows: term.rows,
+                  };
+                  
+                  const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_OPEN, counters.outgoing.next(), ttyOpen);
+                  const frame = encodeFrame(FrameType.TTY_OPEN, encode(encrypted));
+                  ws.send(frame);
+                  
+                  // Handle terminal input
+                  term.onData((data) => {
+                    const ttyData = {
+                      sessionId: sessionIdRef.current,
+                      chunk: new TextEncoder().encode(data),
+                    };
+                    
+                    const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_DATA, counters.outgoing.next(), ttyData);
+                    const frame = encodeFrame(FrameType.TTY_DATA, encode(encrypted));
+                    ws.send(frame);
+                  });
+                  
+                  // Handle resize
+                  const handleResize = () => {
+                    if (fitAddonRef.current && termRef.current) {
+                      fitAddonRef.current.fit();
+                      
+                      const resize = {
+                        sessionId: sessionIdRef.current,
+                        cols: termRef.current.cols,
+                        rows: termRef.current.rows,
+                      };
+                      
+                      const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_RESIZE, counters.outgoing.next(), resize);
+                      const frame = encodeFrame(FrameType.TTY_RESIZE, encode(encrypted));
+                      ws.send(frame);
+                    }
+                  };
+                  
+                  window.addEventListener('resize', handleResize);
+                  
+                  // Store cleanup function
+                  const cleanup = () => {
+                    window.removeEventListener('resize', handleResize);
+                  };
+                  ws.onclose = () => {
+                    cleanup();
+                    if (termRef.current) {
+                      termRef.current.write('\r\n[Disconnected]\r\n');
+                    }
+                  };
+                }
+              } else {
+                setError('Invalid password');
+                setStatus('error');
+                ws.close();
+              }
+            } else if (frame.type === FrameType.TTY_DATA && authenticated && passwordVerified) {
               // Handle TTY data
               const encrypted = decode(frame.payload) as any;
               const decrypted = aeadDecrypt(keys.K_enc, FrameType.TTY_DATA, encrypted.nonce, encrypted.cipher);
@@ -184,7 +311,7 @@ export function TerminalView({ capability }: TerminalViewProps) {
                 termRef.current.write(new Uint8Array(msg.chunk));
               }
               
-            } else if (frame.type === FrameType.TTY_EXIT && authenticated) {
+            } else if (frame.type === FrameType.TTY_EXIT && authenticated && passwordVerified) {
               // Handle TTY exit
               const encrypted = decode(frame.payload) as any;
               const decrypted = aeadDecrypt(keys.K_enc, FrameType.TTY_EXIT, encrypted.nonce, encrypted.cipher);
@@ -241,6 +368,19 @@ export function TerminalView({ capability }: TerminalViewProps) {
     };
   }, []);
   
+  const sendPassword = () => {
+    if (!wsRef.current || !password || !keysRef.current || !countersRef.current) return;
+    
+    const pwMsg = {
+      ctr: countersRef.current.outgoing.next(),
+      msg: { password }
+    };
+    
+    const pwEncrypted = aeadEncrypt(keysRef.current.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+    const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
+    wsRef.current.send(pwFrame);
+  };
+  
   if (showCwdDialog) {
     return (
       <div className="terminal-view">
@@ -260,6 +400,32 @@ export function TerminalView({ capability }: TerminalViewProps) {
           />
           <div className="buttons">
             <button onClick={() => connect(cwd || undefined)}>Connect</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  
+  if (showPasswordDialog) {
+    return (
+      <div className="terminal-view">
+        <div className="cwd-dialog">
+          <h2>Password Required</h2>
+          <p>This agent requires a password:</p>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Enter password"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                sendPassword();
+              }
+            }}
+          />
+          <div className="buttons">
+            <button onClick={sendPassword}>Submit</button>
           </div>
         </div>
       </div>
