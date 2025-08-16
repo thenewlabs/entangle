@@ -1,6 +1,6 @@
 import { FrameType, FrameReader, encodeFrame } from '@sunpix/entangle-protocol';
-import { deriveKeys, extractSaltFromCapId, aeadDecrypt, computeHmac } from '@sunpix/entangle-crypto';
-import { StreamCounters } from '@sunpix/entangle-utils/browser';
+import { deriveKeys, extractSaltFromCapId, aeadDecrypt, aeadEncrypt, computeHmac } from '@sunpix/entangle-crypto';
+import { StreamCounters, BidirectionalCounters } from '@sunpix/entangle-utils/browser';
 import { encode, decode } from 'cborg';
 
 type SignalName = 'SIGINT' | 'SIGTERM' | 'SIGHUP' | 'SIGQUIT' | 'SIGKILL';
@@ -36,6 +36,9 @@ class EntangleConnection {
   private reader = new FrameReader();
   private keys: any | null = null;
   private authenticated = false;
+  private requiresPassword = false;
+  private passwordVerified = false;
+  private counters = new BidirectionalCounters();
   private streamCounters = new StreamCounters();
   private children = new Map<string, BrowserChildProcess>();
   private pendingOpens: BrowserChildProcess[] = [];
@@ -80,11 +83,35 @@ class EntangleConnection {
             const encrypted = decode(frame.payload) as any;
             const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH2, encrypted.nonce, encrypted.cipher);
             const nonceC = decrypted.msg.nonceC as string;
+            this.requiresPassword = !!decrypted.msg.requiresPassword;
             const auth3Data = new TextEncoder().encode('ready' + nonceC);
             const auth3Hmac = computeHmac(this.keys.K_auth, auth3Data);
             this.ws!.send(encodeFrame(FrameType.AUTH3, auth3Hmac));
             this.authenticated = true;
+            // If password is required and present in URL, send it now
+            if (this.requiresPassword) {
+              const hash = new URLSearchParams(window.location.hash.slice(1));
+              const urlPw = hash.get('PW');
+              if (urlPw) {
+                const pwMsg = { ctr: this.counters.outgoing.next(), msg: { password: urlPw } };
+                const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+                this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
+              }
+            }
             resolve();
+            continue;
+          }
+          if (frame.type === FrameType.AUTH_PW && this.requiresPassword && !this.passwordVerified) {
+            // Handle password verification response
+            const encrypted = decode(frame.payload) as any;
+            const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+            this.counters.incoming.validate(decrypted.ctr);
+            if (decrypted.msg && decrypted.msg.ok) {
+              this.passwordVerified = true;
+            } else {
+              // Surface an error to all pending children
+              for (const child of this.pendingOpens.splice(0)) child._onError('Invalid password');
+            }
             continue;
           }
           // After auth, dispatch frames to children

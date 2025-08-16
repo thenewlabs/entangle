@@ -29,10 +29,64 @@ export function TerminalView({ capability }: TerminalViewProps) {
   const sessionIdRef = useRef<string>(Math.random().toString(36).substr(2, 9));
   const keysRef = useRef<any>(null);
   const countersRef = useRef<any>(null);
+  const cwdRef = useRef<string | undefined>(undefined);
+
+  // Initialize xterm and send TTY_OPEN once status is ready and DOM is mounted
+  const initializeTerminal = (workingDir?: string) => {
+    if (!terminalRef.current || termRef.current || !wsRef.current || !keysRef.current || !countersRef.current) return;
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 14,
+      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      theme: { background: '#1e1e1e', foreground: '#d4d4d4' },
+    });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(terminalRef.current);
+    fitAddon.fit();
+    termRef.current = term;
+    fitAddonRef.current = fitAddon;
+
+    // Send TTY_OPEN
+    const ttyOpen = {
+      sessionId: sessionIdRef.current,
+      cwd: workingDir,
+      cols: term.cols,
+      rows: term.rows,
+    };
+    const encrypted = aeadEncrypt(keysRef.current.K_enc, FrameType.TTY_OPEN, countersRef.current.outgoing.next(), ttyOpen);
+    const frame = encodeFrame(FrameType.TTY_OPEN, encode(encrypted));
+    wsRef.current.send(frame);
+
+    // Handle terminal input
+    term.onData((data) => {
+      const ttyData = { sessionId: sessionIdRef.current, chunk: new TextEncoder().encode(data) };
+      const enc = aeadEncrypt(keysRef.current.K_enc, FrameType.TTY_DATA, countersRef.current.outgoing.next(), ttyData);
+      wsRef.current!.send(encodeFrame(FrameType.TTY_DATA, encode(enc)));
+    });
+
+    // Handle resize
+    const handleResize = () => {
+      if (!fitAddonRef.current || !termRef.current) return;
+      fitAddonRef.current.fit();
+      const resize = { sessionId: sessionIdRef.current, cols: termRef.current.cols, rows: termRef.current.rows };
+      const enc = aeadEncrypt(keysRef.current.K_enc, FrameType.TTY_RESIZE, countersRef.current.outgoing.next(), resize);
+      wsRef.current!.send(encodeFrame(FrameType.TTY_RESIZE, encode(enc)));
+    };
+    window.addEventListener('resize', handleResize);
+
+    // Cleanup on close
+    const cleanup = () => window.removeEventListener('resize', handleResize);
+    wsRef.current.onclose = () => {
+      cleanup();
+      if (termRef.current) termRef.current.write('\r\n[Disconnected]\r\n');
+    };
+  };
   
   const connect = async (workingDir?: string) => {
     setShowCwdDialog(false);
     setStatus('connecting');
+    cwdRef.current = workingDir;
     
     try {
       // Derive keys
@@ -123,7 +177,7 @@ export function TerminalView({ capability }: TerminalViewProps) {
                   const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
                   ws.send(pwFrame);
                 } else {
-                  // Show password dialog
+                  // Show password dialog; init after verification via effect
                   setShowPasswordDialog(true);
                   return;
                 }
@@ -131,82 +185,9 @@ export function TerminalView({ capability }: TerminalViewProps) {
                 passwordVerified = true;
                 setStatus('ready');
               }
-              
+
               // Initialize terminal
-              if (terminalRef.current && !termRef.current) {
-                const term = new Terminal({
-                  cursorBlink: true,
-                  fontSize: 14,
-                  fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-                  theme: {
-                    background: '#1e1e1e',
-                    foreground: '#d4d4d4',
-                  },
-                });
-                
-                const fitAddon = new FitAddon();
-                term.loadAddon(fitAddon);
-                
-                term.open(terminalRef.current);
-                fitAddon.fit();
-                
-                termRef.current = term;
-                fitAddonRef.current = fitAddon;
-                
-                // Send TTY_OPEN
-                const ttyOpen = {
-                  sessionId: sessionIdRef.current,
-                  cwd: workingDir,
-                  cols: term.cols,
-                  rows: term.rows,
-                };
-                
-                const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_OPEN, counters.outgoing.next(), ttyOpen);
-                const frame = encodeFrame(FrameType.TTY_OPEN, encode(encrypted));
-                ws.send(frame);
-                
-                // Handle terminal input
-                term.onData((data) => {
-                  const ttyData = {
-                    sessionId: sessionIdRef.current,
-                    chunk: new TextEncoder().encode(data),
-                  };
-                  
-                  const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_DATA, counters.outgoing.next(), ttyData);
-                  const frame = encodeFrame(FrameType.TTY_DATA, encode(encrypted));
-                  ws.send(frame);
-                });
-                
-                // Handle resize
-                const handleResize = () => {
-                  if (fitAddonRef.current && termRef.current) {
-                    fitAddonRef.current.fit();
-                    
-                    const resize = {
-                      sessionId: sessionIdRef.current,
-                      cols: termRef.current.cols,
-                      rows: termRef.current.rows,
-                    };
-                    
-                    const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_RESIZE, counters.outgoing.next(), resize);
-                    const frame = encodeFrame(FrameType.TTY_RESIZE, encode(encrypted));
-                    ws.send(frame);
-                  }
-                };
-                
-                window.addEventListener('resize', handleResize);
-                
-                // Store cleanup function
-                const cleanup = () => {
-                  window.removeEventListener('resize', handleResize);
-                };
-                ws.onclose = () => {
-                  cleanup();
-                  if (termRef.current) {
-                    termRef.current.write('\r\n[Disconnected]\r\n');
-                  }
-                };
-              }
+              initializeTerminal(workingDir);
               
             } else if (frame.type === FrameType.AUTH_PW && authenticated && !passwordVerified) {
               // Handle password response
@@ -219,82 +200,7 @@ export function TerminalView({ capability }: TerminalViewProps) {
                 passwordVerified = true;
                 setStatus('ready');
                 setShowPasswordDialog(false);
-                
-                // Now initialize terminal
-                if (terminalRef.current && !termRef.current) {
-                  const term = new Terminal({
-                    cursorBlink: true,
-                    fontSize: 14,
-                    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-                    theme: {
-                      background: '#1e1e1e',
-                      foreground: '#d4d4d4',
-                    },
-                  });
-                  
-                  const fitAddon = new FitAddon();
-                  term.loadAddon(fitAddon);
-                  
-                  term.open(terminalRef.current);
-                  fitAddon.fit();
-                  
-                  termRef.current = term;
-                  fitAddonRef.current = fitAddon;
-                  
-                  // Send TTY_OPEN
-                  const ttyOpen = {
-                    sessionId: sessionIdRef.current,
-                    cwd: workingDir,
-                    cols: term.cols,
-                    rows: term.rows,
-                  };
-                  
-                  const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_OPEN, counters.outgoing.next(), ttyOpen);
-                  const frame = encodeFrame(FrameType.TTY_OPEN, encode(encrypted));
-                  ws.send(frame);
-                  
-                  // Handle terminal input
-                  term.onData((data) => {
-                    const ttyData = {
-                      sessionId: sessionIdRef.current,
-                      chunk: new TextEncoder().encode(data),
-                    };
-                    
-                    const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_DATA, counters.outgoing.next(), ttyData);
-                    const frame = encodeFrame(FrameType.TTY_DATA, encode(encrypted));
-                    ws.send(frame);
-                  });
-                  
-                  // Handle resize
-                  const handleResize = () => {
-                    if (fitAddonRef.current && termRef.current) {
-                      fitAddonRef.current.fit();
-                      
-                      const resize = {
-                        sessionId: sessionIdRef.current,
-                        cols: termRef.current.cols,
-                        rows: termRef.current.rows,
-                      };
-                      
-                      const encrypted = aeadEncrypt(keys.K_enc, FrameType.TTY_RESIZE, counters.outgoing.next(), resize);
-                      const frame = encodeFrame(FrameType.TTY_RESIZE, encode(encrypted));
-                      ws.send(frame);
-                    }
-                  };
-                  
-                  window.addEventListener('resize', handleResize);
-                  
-                  // Store cleanup function
-                  const cleanup = () => {
-                    window.removeEventListener('resize', handleResize);
-                  };
-                  ws.onclose = () => {
-                    cleanup();
-                    if (termRef.current) {
-                      termRef.current.write('\r\n[Disconnected]\r\n');
-                    }
-                  };
-                }
+                // Initialize terminal after React updates DOM via effect
               } else {
                 setError('Invalid password');
                 setStatus('error');
@@ -367,6 +273,13 @@ export function TerminalView({ capability }: TerminalViewProps) {
       }
     };
   }, []);
+
+  // Initialize terminal after becoming ready (ensures DOM is mounted)
+  useEffect(() => {
+    if (status === 'ready') {
+      initializeTerminal(cwdRef.current);
+    }
+  }, [status]);
 
   // Auto-connect on mount if the CWD dialog is hidden
   useEffect(() => {

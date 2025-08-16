@@ -156,6 +156,8 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
         counters: session.counters,
         streamCounters: new StreamCounters(),
         authenticated: session.authenticated,
+        requiresPassword: session.requiresPassword,
+        passwordVerified: session.passwordVerified,
         legacyMode: false,
         hasRun: session.hasRun,
       };
@@ -164,6 +166,8 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
     store.multiSession.ws = session.ws;
     store.multiSession.keys = session.keys;
     store.multiSession.authenticated = session.authenticated;
+    store.multiSession.requiresPassword = session.requiresPassword;
+    store.multiSession.passwordVerified = session.passwordVerified;
     store.multiSession.hasRun = session.hasRun;
 
     await handleMultiStreamFrame(store.multiSession as any, frame);

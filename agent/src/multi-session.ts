@@ -38,6 +38,9 @@ export interface MultiSession {
   counters: BidirectionalCounters; // For auth and legacy mode
   streamCounters: StreamCounters; // Per-stream counters
   authenticated: boolean;
+  // Password-gating state propagated from legacy session/auth handler
+  requiresPassword?: boolean;
+  passwordVerified?: boolean;
   nonceB?: string;
   nonceC?: string;
   streamManager?: StreamManager;
@@ -383,25 +386,64 @@ export async function handleMultiStreamFrame(
       }
     }
 
+    // Enforce password verification for all stream operations when required
+    const pwRequiredButMissing = !!session.requiresPassword && !session.passwordVerified;
+
     // Handle frame based on type
     switch (frame.type) {
       case FrameType.STREAM_OPEN:
+        if (pwRequiredButMissing) {
+          // Block stream open and notify client
+          try {
+            const sid = (message as StreamOpenMessage).msg?.sid;
+            if (sid) await sendStreamError(session, sid, 'Password verification required');
+          } catch {}
+          return;
+        }
         await handleStreamOpen(session, message as StreamOpenMessage);
         break;
 
       case FrameType.STREAM_DATA:
+        if (pwRequiredButMissing) {
+          try {
+            const sid = (message as StreamDataMessage).msg?.sid;
+            if (sid) await sendStreamError(session, sid, 'Password verification required');
+          } catch {}
+          return;
+        }
         await handleStreamData(session, message as StreamDataMessage);
         break;
 
       case FrameType.STREAM_RESIZE:
+        if (pwRequiredButMissing) {
+          try {
+            const sid = (message as StreamResizeMessage).msg?.sid;
+            if (sid) await sendStreamError(session, sid, 'Password verification required');
+          } catch {}
+          return;
+        }
         await handleStreamResize(session, message as StreamResizeMessage);
         break;
 
       case FrameType.STREAM_SIGNAL:
+        if (pwRequiredButMissing) {
+          try {
+            const sid = (message as StreamSignalMessage).msg?.sid;
+            if (sid) await sendStreamError(session, sid, 'Password verification required');
+          } catch {}
+          return;
+        }
         await handleStreamSignal(session, message as StreamSignalMessage);
         break;
 
       case FrameType.STREAM_CLOSE:
+        if (pwRequiredButMissing) {
+          try {
+            const sid = (message as StreamCloseMessage).msg?.sid;
+            if (sid) await sendStreamError(session, sid, 'Password verification required');
+          } catch {}
+          return;
+        }
         await handleStreamClose(session, message as StreamCloseMessage);
         break;
 
