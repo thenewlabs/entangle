@@ -109,6 +109,14 @@ export async function handleInvokerConnection(
       if (session.ptyManager) {
         session.ptyManager.cleanup();
       }
+      // Cleanup multi-stream state if present
+      try {
+        const store = (session as any).__multiSessionStore;
+        if (store && store.multiSession) {
+          const { cleanupMultiSession } = require('./multi-session.js');
+          cleanupMultiSession(store.multiSession);
+        }
+      } catch {}
     }
   };
 }
@@ -124,20 +132,34 @@ async function handleFrame(session: Session, frame: { type: FrameType; payload: 
     frame.type === FrameType.STREAM_ERROR ||
     frame.type === FrameType.STREAM_EXIT
   ) {
-    // Adapt legacy Session to MultiSession shape on the fly
-    const multiSession: any = {
-      socketId: session.socketId,
-      ws: session.ws,
-      cap: session.cap,
-      keys: session.keys,
-      counters: session.counters,
-      // Create a per-stream counter manager lazily within multi-session
-      streamCounters: new StreamCounters(),
-      authenticated: session.authenticated,
-      legacyMode: false,
-      hasRun: session.hasRun,
-    };
-    await handleMultiStreamFrame(multiSession as any, frame);
+    // Only handle multi-stream frames if authenticated
+    if (!session.authenticated || !session.keys) {
+      output.error(`Received stream frame before authentication: type=${frame.type}`);
+      return;
+    }
+
+    // Persist a MultiSession-like object across frames to preserve counters/state
+    const store = (session as any).__multiSessionStore || ((session as any).__multiSessionStore = {});
+    if (!store.multiSession) {
+      store.multiSession = {
+        socketId: session.socketId,
+        ws: session.ws,
+        cap: session.cap,
+        keys: session.keys,
+        counters: session.counters,
+        streamCounters: new StreamCounters(),
+        authenticated: session.authenticated,
+        legacyMode: false,
+        hasRun: session.hasRun,
+      };
+    }
+    // Keep dynamic fields updated
+    store.multiSession.ws = session.ws;
+    store.multiSession.keys = session.keys;
+    store.multiSession.authenticated = session.authenticated;
+    store.multiSession.hasRun = session.hasRun;
+
+    await handleMultiStreamFrame(store.multiSession as any, frame);
     return;
   }
 

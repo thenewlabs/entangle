@@ -86,7 +86,7 @@ class EntangleConnection {
             continue;
           }
           // After auth, dispatch frames to children
-          this.dispatchFrame(frame);
+          await this.dispatchFrame(frame);
         }
       };
 
@@ -100,11 +100,22 @@ class EntangleConnection {
     });
   }
 
-  private dispatchFrame(frame: { type: FrameType; payload: Uint8Array }) {
+  private async dispatchFrame(frame: { type: FrameType; payload: Uint8Array }) {
     if (!this.keys) return;
     try {
-      const encrypted = decode(frame.payload) as any;
-      const decrypted = aeadDecrypt(this.keys.K_enc, frame.type, encrypted.nonce, encrypted.cipher);
+      // AUTH2 uses classic AEAD + CBOR, all other frames use stream AEAD
+      let decrypted: any;
+      if (frame.type === FrameType.AUTH2) {
+        // This shouldn't happen in normal flow as AUTH2 is handled during connection
+        return;
+      } else {
+        // Stream frames are sent with stream AEAD (raw bytes: nonce|cipher)
+        const { streamAeadDecrypt } = await import('@sunpix/entangle-crypto');
+        const aad = encode({ type: frame.type });
+        const plaintext = await streamAeadDecrypt(this.keys.K_enc, frame.payload, aad);
+        decrypted = decode(plaintext) as any;
+      }
+      
       const { ctr, msg } = decrypted as any;
       const sid = msg?.sid as string | undefined;
       if (sid) {
@@ -194,7 +205,15 @@ class EntangleConnection {
       const aad = encode({ type: FrameType.STREAM_OPEN });
       return await (await import('@sunpix/entangle-crypto')).streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
     })();
-    this.ws.send(encodeFrame(FrameType.STREAM_OPEN, ciphertext));
+    console.log('[DEBUG] Sending STREAM_OPEN:', {
+      plaintextLen: encode(msg).length,
+      ciphertextLen: ciphertext.length,
+      frameType: FrameType.STREAM_OPEN,
+      sid: sid
+    });
+    const frame = encodeFrame(FrameType.STREAM_OPEN, ciphertext);
+    console.log('[DEBUG] Encoded frame length:', frame.length);
+    this.ws.send(frame);
     // Track pending open to bind when 'opened' arrives with actual sid
     this.pendingOpens.push(child);
     this.streamCounters.increment(sid, 'outgoing');
@@ -319,13 +338,10 @@ declare global {
   if (!cap) {
     // Expose a lazy erroring spawn
     entangle.spawn = () => { throw new Error('Capability not found in URL'); };
-    entangle.spawm = entangle.spawn;
     return;
   }
   const conn = new EntangleConnection(cap.capId, cap.S);
   entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
-  // Alias to match requested name
-  entangle.spawm = entangle.spawn;
 })();
 
 export {};

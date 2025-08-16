@@ -16,6 +16,7 @@ import {
   deriveKeys,
   streamAeadEncrypt,
   streamAeadDecrypt,
+  aeadDecrypt,
 } from '@sunpix/entangle-crypto';
 import { 
   OutputHandler,
@@ -302,10 +303,45 @@ export async function handleMultiStreamFrame(
   }
 
   try {
-    // Decrypt the payload
+    // Log diagnostics for STREAM frames
+    if (
+      frame.type === FrameType.STREAM_OPEN ||
+      frame.type === FrameType.STREAM_DATA ||
+      frame.type === FrameType.STREAM_CLOSE ||
+      frame.type === FrameType.STREAM_SIGNAL ||
+      frame.type === FrameType.STREAM_RESIZE ||
+      frame.type === FrameType.STREAM_ERROR ||
+      frame.type === FrameType.STREAM_EXIT
+    ) {
+      output.info(`MultiStream frame received: type=${frame.type} payloadLen=${frame.payload.length}`);
+      // Debug: log first few bytes of payload
+      const preview = Array.from(frame.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      output.debug(`Payload preview (first 32 bytes): ${preview}`);
+    }
+    // Decrypt the payload (prefer stream AEAD). If that fails, attempt
+    // backward-compatible CBOR-wrapped AEAD decryption.
     const aad = encode({ type: frame.type });
-    const plaintext = await streamAeadDecrypt(session.keys.K_enc, frame.payload, aad);
-    const message = decode(plaintext) as any;
+    output.debug(`AAD for decryption: ${Array.from(aad).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+    let message: any;
+    try {
+      const plaintext = await streamAeadDecrypt(session.keys.K_enc, frame.payload, aad);
+      message = decode(plaintext) as any;
+    } catch (primaryErr: any) {
+      output.warn(`Stream decrypt failed for type=${frame.type}, payloadLen=${frame.payload.length}: ${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}`);
+      try {
+        // Fallback: treat payload as CBOR { nonce, cipher }
+        const enc = decode(frame.payload) as any;
+        if (enc && enc.nonce && enc.cipher) {
+          const decoded = aeadDecrypt(session.keys.K_enc, frame.type, enc.nonce, enc.cipher);
+          message = decoded as any;
+        } else {
+          throw primaryErr;
+        }
+      } catch (_fallbackErr) {
+        output.warn(`Fallback decrypt also failed for type=${frame.type}`);
+        throw primaryErr;
+      }
+    }
 
     // For stream messages, verify per-stream counter
     if (message.msg && message.msg.sid) {
