@@ -25,6 +25,7 @@ export async function createCapability(options: {
   
   const policy: Policy = {
     singleRun: options.singleRun ?? false,
+    maxStreams: 1, // Default to single stream for backward compatibility
   };
   
   const cap: CapabilityInfo = {

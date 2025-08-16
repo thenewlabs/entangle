@@ -166,3 +166,5 @@ export function hashPolicy(policy: any): string {
   const hash = sha256(encoded);
   return base64UrlEncode(hash);
 }
+
+export * from './stream-crypto.js';

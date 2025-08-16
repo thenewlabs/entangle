@@ -18,6 +18,14 @@ export enum FrameType {
   TTY_RESIZE = 0x22,
   TTY_SIGNAL = 0x23,
   TTY_EXIT = 0x24,
+  // Multi-stream control
+  STREAM_OPEN = 0x30,
+  STREAM_CLOSE = 0x31,
+  STREAM_DATA = 0x32,
+  STREAM_ERROR = 0x33,
+  STREAM_EXIT = 0x34,
+  STREAM_SIGNAL = 0x35,
+  STREAM_RESIZE = 0x36,
 }
 
 export const CapabilitySchema = z.object({
@@ -34,6 +42,14 @@ export const PolicySchema = z.object({
   maxOutBytes: z.number().optional(),
   singleRun: z.boolean().default(false), // Default to multi-run
   allowedCwdPrefixes: z.array(z.string()).optional(),
+  // Multi-stream limits
+  maxStreams: z.number().default(1), // Default to single stream for backward compatibility
+  perStream: z.object({
+    maxCpuMs: z.number().optional(),
+    maxMemMB: z.number().optional(),
+    maxWallMs: z.number().optional(),
+    maxOutBytes: z.number().optional(),
+  }).optional(),
 });
 
 export type Policy = z.infer<typeof PolicySchema>;
@@ -41,4 +57,33 @@ export type Policy = z.infer<typeof PolicySchema>;
 export interface Frame {
   type: FrameType;
   payload: Uint8Array;
+}
+
+export type StreamMode = 'pty' | 'cmd';
+
+export interface StreamMetadata {
+  sid: string; // Stream ID
+  mode: StreamMode;
+  startedAt: number;
+  endedAt?: number;
+}
+
+export interface StreamPtyOptions {
+  cols: number;
+  rows: number;
+  env?: Record<string, string>;
+}
+
+export interface StreamExecOptions {
+  argv: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  stdin?: boolean;
+}
+
+export interface StreamUsage {
+  cpuMs: number;
+  rssMaxBytes: number;
+  wallMs: number;
+  outBytes: number;
 }

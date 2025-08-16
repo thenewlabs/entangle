@@ -110,7 +110,7 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
   });
   
   server.listen(config.port, config.host, () => {
-    logger.info({ port: config.port, host: config.host }, 'Server started');
+    logger.info('Server started', { port: config.port, host: config.host });
   });
   
   process.on('SIGINT', () => {
