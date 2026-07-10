@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-connect",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -12,9 +12,9 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@thenewlabs/entangle-crypto": "^2.0.1",
-    "@thenewlabs/entangle-protocol": "^2.0.1",
-    "@thenewlabs/entangle-utils": "^2.0.1",
+    "@thenewlabs/entangle-crypto": "^2.0.2",
+    "@thenewlabs/entangle-protocol": "^2.0.2",
+    "@thenewlabs/entangle-utils": "^2.0.2",
     "cborg": "^4.5.8",
     "commander": "^15.0.0",
     "ws": "^8.21.0"
