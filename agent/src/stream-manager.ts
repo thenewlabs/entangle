@@ -105,12 +105,21 @@ export class StreamManager extends EventEmitter {
   }
 
   /**
-   * Get stream-specific limits
+   * Get stream-specific limits.
+   *
+   * Interactive PTYs are deliberately exempt from ALL command-oriented caps —
+   * wall-clock, cumulative output ceiling, and CPU/memory guards. A legitimate
+   * terminal session can stay open for hours, stream far more than
+   * MAX_OUT_BYTES, and burn CPU interactively, so any of these would force-close
+   * it mid-use. A PTY is bounded solely by the idle timeout (see
+   * armIdleTimeout). Command ('cmd') streams keep every limit.
    */
-  private getStreamLimits(): Stream['limits'] {
+  private getStreamLimits(mode: StreamMode): Stream['limits'] {
+    const limits: Stream['limits'] = {};
+    if (mode === 'pty') return limits;
+
     const maxStreams = this.policy.maxStreams || 1;
     const config = getConfig();
-    const limits: Stream['limits'] = {};
     const perStream = this.policy.perStream;
 
     // Apply defaults even when a partial per-stream policy is present.
@@ -210,7 +219,7 @@ export class StreamManager extends EventEmitter {
     }
 
     const sid = this.generateStreamId();
-    const limits = this.getStreamLimits();
+    const limits = this.getStreamLimits('pty');
     const config = getConfig();
     const cwd = this.resolveCwd(options.cwd);
     const env = buildChildEnv(config.agentEnvPassthrough, options.env);
@@ -242,14 +251,9 @@ export class StreamManager extends EventEmitter {
       if (stream.aborted) return;
 
       const chunk = Buffer.from(data);
+      // Track bytes for usage reporting only; PTYs have no cumulative output
+      // ceiling (limits.maxOutBytes is unset for pty streams).
       stream.usage.outBytes += chunk.length;
-
-      // Check output limit
-      if (limits.maxOutBytes && stream.usage.outBytes > limits.maxOutBytes) {
-        this.output.warn(`Stream output limit exceeded for ${sid}: limit=${limits.maxOutBytes}`);
-        this.closeStream(sid, 'Output limit exceeded');
-        return;
-      }
 
       this.armIdleTimeout(stream, idleMs);
       this.options.onStreamData?.(sid, chunk, 'stdout');
@@ -267,9 +271,9 @@ export class StreamManager extends EventEmitter {
     });
 
     this.streams.set(sid, stream);
-    this.armWallClock(stream);
+    // No wall-clock or resource monitor for PTYs — only the idle timeout bounds
+    // an interactive session (see getStreamLimits).
     this.armIdleTimeout(stream, idleMs);
-    this.armResourceMonitor(stream);
     this.output.info(`Opened PTY stream ${sid}: cols=${options.cols}, rows=${options.rows}`);
 
     return sid;
@@ -293,7 +297,7 @@ export class StreamManager extends EventEmitter {
     }
 
     const sid = this.generateStreamId();
-    const limits = this.getStreamLimits();
+    const limits = this.getStreamLimits('cmd');
     const config = getConfig();
 
     // Spawn process with a validated cwd and a minimal, curated environment.

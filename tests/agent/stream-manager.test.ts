@@ -112,6 +112,64 @@ describe('StreamManager exec', () => {
     expect(Date.now() - start).toBeLessThan(5000); // killed long before 30s
   });
 
+  it('does NOT force-close an interactive PTY on the command wall-clock', async () => {
+    // Interactive terminals are bounded only by the idle timeout, never the
+    // per-command wall-clock. A short CMD_DEFAULT_WALL_MS must leave the PTY
+    // alive. Regression: PTYs used to inherit and arm this deadline and got
+    // reaped mid-session at 60s.
+    process.env.CMD_DEFAULT_WALL_MS = '200';
+    const c: Collected = { data: [], exit: [], error: [] };
+    const sm = makeManager(c);
+
+    const sid = await sm.openPtyStream({ cols: 80, rows: 24 } as any);
+    // Wait well past the wall-clock deadline with the session idle.
+    await new Promise((r) => setTimeout(r, 600));
+
+    expect(c.exit).toHaveLength(0); // still alive
+    expect(sm.getStream(sid)?.endedAt).toBeUndefined();
+    sm.closeStream(sid);
+  });
+
+  it('does NOT apply the cumulative output ceiling to a PTY', async () => {
+    // A tiny MAX_OUT_BYTES must not truncate or close a terminal session that
+    // legitimately streams far more than the ceiling over its lifetime.
+    process.env.MAX_OUT_BYTES = '1000';
+    const c: Collected = { data: [], exit: [], error: [] };
+    const sm = makeManager(c);
+
+    const sid = await sm.openPtyStream({ cols: 80, rows: 24 } as any);
+    // Emit ~20KB through the terminal — 20x the ceiling.
+    sm.writeToStream(sid, Buffer.from('head -c 20000 /dev/zero | tr "\\0" a; echo DONE\n'));
+    await waitFor(() => c.data.some((d) => d.text.includes('DONE')), 6000);
+
+    const delivered = c.data.reduce((n, d) => n + d.text.length, 0);
+    expect(delivered).toBeGreaterThan(1000); // not cut off at the cap
+    expect(c.exit).toHaveLength(0); // not closed with "Output limit exceeded"
+    sm.closeStream(sid);
+  });
+
+  it.skipIf(process.platform !== 'linux')('does NOT reap a CPU-bound interactive PTY', async () => {
+    // PTYs are exempt from the CPU/memory guard; a busy interactive command
+    // must not be killed the way an over-budget command stream would be.
+    const c: Collected = { data: [], exit: [], error: [] };
+    const sm = new StreamManager({
+      policy: { singleRun: false, maxStreams: 1, perStream: { maxCpuMs: 300 } } as any,
+      output: new OutputHandler({ mode: parseOutputMode('text') }),
+      onStreamData: (_sid, data, channel) => c.data.push({ channel, text: Buffer.from(data).toString() }),
+      onStreamExit: (_sid, code) => c.exit.push(code),
+      onStreamError: (_sid, err) => c.error.push(err),
+    });
+
+    const sid = await sm.openPtyStream({ cols: 80, rows: 24 } as any);
+    sm.writeToStream(sid, Buffer.from('while :; do :; done\n'));
+    // Peg the CPU for well past the 300ms budget a cmd stream would die at.
+    await new Promise((r) => setTimeout(r, 1500));
+
+    expect(c.exit).toHaveLength(0); // still alive despite burning CPU
+    expect(sm.getStream(sid)?.endedAt).toBeUndefined();
+    sm.closeStream(sid);
+  });
+
   it.skipIf(process.platform !== 'linux')('kills a CPU-bound process that exceeds the CPU limit', async () => {
     const c: Collected = { data: [], exit: [], error: [] };
     const sm = new StreamManager({
