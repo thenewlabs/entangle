@@ -9,14 +9,14 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "@sunpix/entangle-protocol": "^1.0.0",
-    "libsodium-wrappers-sumo": "^0.7.13",
-    "@noble/hashes": "^1.5.0",
-    "cborg": "^4.2.6"
+    "cborg": "^4.5.8",
+    "libsodium-wrappers-sumo": "^0.8.4"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/libsodium-wrappers-sumo": "^0.7.8",
-    "typescript": "^5.3.3"
+    "@types/libsodium-wrappers-sumo": "^0.8.2",
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
   }
 }

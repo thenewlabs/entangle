@@ -133,6 +133,16 @@ export function verifyHmac(K_auth: Uint8Array, data: Uint8Array, mac: Uint8Array
   return sodium.compare(computed, mac) === 0;
 }
 
+// Convenience: SHA-256 of UTF-8 string, returned as lowercase hex
+export function sha256Hex(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  const hash = sha256(bytes);
+  let hex = '';
+  // Iterate without indexed access to satisfy noUncheckedIndexedAccess
+  for (const b of hash) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
 export function base64UrlEncode(data: Uint8Array): string {
   // Use Node Buffer when available to avoid relying on btoa (not in Node)
   let base64: string;

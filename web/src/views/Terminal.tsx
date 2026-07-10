@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac } from '@sunpix/entangle-crypto';
+import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
 import { FrameType, FrameReader, encodeFrame } from '@sunpix/entangle-protocol';
 import { BidirectionalCounters } from '@sunpix/entangle-utils/browser';
 import { encode, decode } from 'cborg';
@@ -170,12 +170,15 @@ export function TerminalView({ capability }: TerminalViewProps) {
                   // Send password automatically
                   const pwMsg = {
                     ctr: counters.outgoing.next(),
-                    msg: { password: urlPassword }
+                    msg: { passwordHash: sha256Hex(urlPassword) }
                   };
                   
                   const pwEncrypted = aeadEncrypt(keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
                   const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
                   ws.send(pwFrame);
+                  // Share hashed password with window helper
+                  (window as any).entangle = (window as any).entangle || {};
+                  (window as any).entangle.passwordHash = pwMsg.msg.passwordHash;
                 } else {
                   // Show password dialog; init after verification via effect
                   setShowPasswordDialog(true);
@@ -298,12 +301,15 @@ export function TerminalView({ capability }: TerminalViewProps) {
     
     const pwMsg = {
       ctr: countersRef.current.outgoing.next(),
-      msg: { password }
+      msg: { passwordHash: sha256Hex(password) }
     };
     
     const pwEncrypted = aeadEncrypt(keysRef.current.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
     const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
     wsRef.current.send(pwFrame);
+    // Share hashed password with window helper so entangle.spawn/exec can reuse
+    (window as any).entangle = (window as any).entangle || {};
+    (window as any).entangle.passwordHash = sha256Hex(password);
   };
   
   if (showCwdDialog) {

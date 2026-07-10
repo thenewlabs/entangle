@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac } from '@sunpix/entangle-crypto';
+import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
 import { FrameType, FrameReader, encodeFrame, StdoutMessage, StderrMessage, ExitMessage } from '@sunpix/entangle-protocol';
 import { OutputHandler, parseOutputMode, BidirectionalCounters } from '@sunpix/entangle-utils';
 import { encode, decode } from 'cborg';
@@ -103,7 +103,7 @@ export async function runSingle(
               output.info('Sending password...');
               const pwMsg = {
                 ctr: counters.outgoing.next(),
-                msg: { password }
+                msg: { passwordHash: sha256Hex(password) }
               };
               
               const pwEncrypted = aeadEncrypt(keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);

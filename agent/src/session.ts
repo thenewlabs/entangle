@@ -324,13 +324,15 @@ async function handleAuthPw(session: Session, payload: Uint8Array): Promise<void
     const decrypted = aeadDecrypt(session.keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
     session.counters.incoming.validate(decrypted.ctr);
     
-    const authPwMsg = decrypted.msg as { password: string };
+    const authPwMsg = decrypted.msg as { password?: string; passwordHash?: string };
     
-    // Hash the provided password and compare
+    // Accept either a plaintext password or a precomputed hash (hex)
     const crypto = require('crypto');
-    const providedHash = crypto.createHash('sha256').update(authPwMsg.password).digest('hex');
+    const providedHash = authPwMsg.passwordHash
+      ? String(authPwMsg.passwordHash)
+      : crypto.createHash('sha256').update(String(authPwMsg.password || '')).digest('hex');
     
-    if (providedHash !== session.passwordHash) {
+    if (!providedHash || providedHash !== session.passwordHash) {
       output.warn(`Invalid password attempt for session: ${session.socketId}`);
       sendError(session, null, ErrorCode.AUTH_FAILED, 'Invalid password');
       return;

@@ -1,5 +1,5 @@
 import { FrameType, FrameReader, encodeFrame } from '@sunpix/entangle-protocol';
-import { deriveKeys, extractSaltFromCapId, aeadDecrypt, aeadEncrypt, computeHmac } from '@sunpix/entangle-crypto';
+import { deriveKeys, extractSaltFromCapId, aeadDecrypt, aeadEncrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
 import { StreamCounters, BidirectionalCounters } from '@sunpix/entangle-utils/browser';
 import { encode, decode } from 'cborg';
 
@@ -92,8 +92,9 @@ class EntangleConnection {
             if (this.requiresPassword) {
               const hash = new URLSearchParams(window.location.hash.slice(1));
               const urlPw = hash.get('PW');
-              if (urlPw) {
-                const pwMsg = { ctr: this.counters.outgoing.next(), msg: { password: urlPw } };
+              const pwHash = (window as any).entangle?.passwordHash || (urlPw ? sha256Hex(urlPw) : undefined);
+              if (pwHash) {
+                const pwMsg = { ctr: this.counters.outgoing.next(), msg: { passwordHash: pwHash } };
                 const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
                 this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
               }
@@ -187,7 +188,14 @@ class EntangleConnection {
           break;
         }
         case FrameType.STREAM_ERROR: {
-          const child = this.children.get(msg.sid);
+          let child = this.children.get(msg.sid);
+          if (!child) {
+            const idx = this.pendingOpens.findIndex(c => c._sid === msg.sid);
+            if (idx >= 0) {
+              child = this.pendingOpens.splice(idx, 1)[0];
+              if (this.children.has(msg.sid)) this.children.delete(msg.sid);
+            }
+          }
           child?._onError(msg.message || 'error');
           break;
         }
@@ -211,6 +219,19 @@ class EntangleConnection {
   async _openChild(child: BrowserChildProcess): Promise<void> {
     await this.ensureConnected();
     if (!this.ws || !this.keys) throw new Error('Not connected');
+    if (this.requiresPassword && !this.passwordVerified) {
+      const hash = new URLSearchParams(window.location.hash.slice(1));
+      const urlPw = hash.get('PW');
+      const pwHash = (window as any).entangle?.passwordHash || (urlPw ? sha256Hex(urlPw) : undefined);
+      if (pwHash) {
+        const pwMsg = { ctr: this.counters.outgoing.next(), msg: { passwordHash: pwHash } };
+        const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+        this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
+      } else {
+        child._onError('Password verification required');
+        return;
+      }
+    }
     const sid = child._sid;
     // Start counters for this stream
     const ctr = this.streamCounters.getNext(sid, 'outgoing');
