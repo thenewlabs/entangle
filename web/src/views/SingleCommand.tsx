@@ -17,6 +17,8 @@ export function SingleCommandView(_props: SingleCommandViewProps) {
   const [running, setRunning] = useState(false);
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [needPassword, setNeedPassword] = useState(false);
+  const [password, setPassword] = useState('');
 
   const childRef = useRef<any>(null);
 
@@ -27,6 +29,7 @@ export function SingleCommandView(_props: SingleCommandViewProps) {
     setStderr('');
     setExitCode(null);
     setError(null);
+    setNeedPassword(false);
 
     const argv = parseCommandLine(commandLine);
     if (argv.length === 0) {
@@ -56,7 +59,13 @@ export function SingleCommandView(_props: SingleCommandViewProps) {
         setRunning(false);
       });
       child.on('error', (message: string) => {
-        setError(message);
+        // A password-related error means the agent is password-gated and we
+        // haven't verified yet — prompt instead of surfacing a raw error.
+        if (/password/i.test(message)) {
+          setNeedPassword(true);
+        } else {
+          setError(message);
+        }
         setRunning(false);
       });
     } catch (err: any) {
@@ -65,9 +74,42 @@ export function SingleCommandView(_props: SingleCommandViewProps) {
     }
   };
 
+  const submitPassword = () => {
+    if (!password) return;
+    // The client reads window.entangle.password during (re)auth.
+    (window as any).entangle = (window as any).entangle || {};
+    (window as any).entangle.password = password;
+    setNeedPassword(false);
+    runCommand();
+  };
+
   const abortCommand = () => {
     childRef.current?.kill('SIGTERM');
   };
+
+  if (needPassword) {
+    return (
+      <div className="single-command-view">
+        <div className="cwd-dialog">
+          <h2>Password Required</h2>
+          <p>This agent requires a password:</p>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Enter password"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submitPassword();
+            }}
+          />
+          <div className="buttons">
+            <button onClick={submitPassword}>Submit</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="single-command-view">
