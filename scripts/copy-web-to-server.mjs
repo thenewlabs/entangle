@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const webDist = join(root, 'web', 'dist');
-const dest = join(root, 'server', 'dist', 'web');
+const dest = join(root, 'relay', 'dist', 'web');
 
 if (!existsSync(join(webDist, 'index.html'))) {
   console.warn(`[copy-web-to-server] web/dist not built (${webDist}); skipping. ` +
@@ -18,4 +18,4 @@ if (!existsSync(join(webDist, 'index.html'))) {
 
 rmSync(dest, { recursive: true, force: true });
 cpSync(webDist, dest, { recursive: true });
-console.log(`[copy-web-to-server] bundled web UI -> server/dist/web`);
+console.log(`[copy-web-to-server] bundled web UI -> relay/dist/web`);

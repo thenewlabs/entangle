@@ -22,21 +22,21 @@ console.log('Note: Development versions (.js) work correctly. Minified versions 
 
 // Build fully bundled executables
 await buildFullyBundledExecutable({
-  name: 'agent',
-  entryPoint: join(rootDir, 'agent/src/index.ts'),
-  outfile: join(distDir, 'agent.js'),
+  name: 'serve',
+  entryPoint: join(rootDir, 'serve/src/index.ts'),
+  outfile: join(distDir, 'serve.js'),
 });
 
 await buildFullyBundledExecutable({
-  name: 'invoke',
-  entryPoint: join(rootDir, 'invoke/src/index.ts'),
-  outfile: join(distDir, 'invoke.js'),
+  name: 'connect',
+  entryPoint: join(rootDir, 'connect/src/index.ts'),
+  outfile: join(distDir, 'connect.js'),
 });
 
 await buildFullyBundledExecutable({
-  name: 'server',
-  entryPoint: join(rootDir, 'server/src/index.ts'),
-  outfile: join(distDir, 'server.js'),
+  name: 'relay',
+  entryPoint: join(rootDir, 'relay/src/index.ts'),
+  outfile: join(distDir, 'relay.js'),
 });
 
 // Copy web assets to dist for server
@@ -49,9 +49,9 @@ if (existsSync(webDistPath)) {
 
 console.log('✓ All standalone executables built successfully!');
 console.log(`\nFiles created in ${distDir}:`);
-console.log('- agent.js (+ agent.min.js) - Fully bundled agent executable');
-console.log('- invoke.js (+ invoke.min.js) - Fully bundled invoke CLI');
-console.log('- server.js (+ server.min.js) - Fully bundled server with web assets');
+console.log('- serve.js (+ serve.min.js) - Fully bundled serve executable');
+console.log('- connect.js (+ connect.min.js) - Fully bundled connect CLI');
+console.log('- relay.js (+ relay.min.js) - Fully bundled relay server with web assets');
 console.log('- web/ (static assets for server)');
 
 async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {

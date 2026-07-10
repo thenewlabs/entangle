@@ -17,7 +17,7 @@
 - `npm run dev --workspace=@thenewlabs/entangle-agent`: Start agent in watch mode.
 - `npm test`: Run Vitest.
 - `npm run test:coverage`: Generate V8 coverage (text, JSON, HTML).
-- Example binaries after build: `entangle-relay`, `entangle-agent`, `entangle-connect`.
+- Example binaries after build: `entangle-relay`, `entangle-serve`, `entangle-connect`.
 
 ## Coding Style & Naming
 - Language: TypeScript (Node 18+, `module`/`resolution: NodeNext`, strict on).

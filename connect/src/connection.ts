@@ -74,7 +74,10 @@ export class InvokeConnection {
   constructor(
     private capId: string,
     private S: string,
-    private password?: string
+    private password?: string,
+    // Called when the agent requires a password and none was supplied up front
+    // (e.g. to prompt interactively). Its result is used for this session.
+    private promptPassword?: () => Promise<string>
   ) {}
 
   /** Connect and complete the handshake (including password if required). */
@@ -146,6 +149,11 @@ export class InvokeConnection {
       this.authenticated = true;
 
       if (this.requiresPassword) {
+        // Prefer an up-front password; otherwise prompt (never read from the
+        // URL). The password rides an AEAD frame, so the relay never sees it.
+        if (!this.password && this.promptPassword) {
+          this.password = await this.promptPassword();
+        }
         if (!this.password) return fail(new Error('Password required but not provided'));
         const ctr = this.counters.outgoing.next();
         const enc = aeadEncrypt(this.sessionKeys.K_enc, FrameType.AUTH_PW, ctr, { password: this.password }, AeadDir.ClientToServer);

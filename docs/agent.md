@@ -1,7 +1,7 @@
 Entangle Agent runs on your machine and executes commands or hosts an interactive terminal on your behalf. It connects out to the relay server and only ever exchanges encrypted data with invokers.
 
 **What It Does**
-- Loads capabilities from `~/.entangle/capabilities.json` (0600) or creates a new one on first run.
+- Mints an ephemeral capability on each start, unless a capability URL is pinned via `--capability <url>` or `ENTANGLE_CAPABILITY` (in which case its host is used as the relay server).
 - Connects to the server (`/agent/register`), receives an `agentId`, and announces capabilities.
 - For each invoker connection, authenticates the session and:
   - Single command: spawns the requested process, streams stdout/stderr, sends exit status.
@@ -12,14 +12,14 @@ Entangle Agent runs on your machine and executes commands or hosts an interactiv
 
 **How To Use**
 - Install/build, then run:
-  - `entangle-agent start [--server <url>] [--output-mode text|stream-json]`
-  - `entangle-agent create-cap [--single-run] [--output-mode ...]`
+  - `entangle-serve start [--server <url>] [--capability <url>] [--output-mode text|stream-json]`
+  - `entangle-serve create-cap [--single-run] [--output-mode ...]`
 
 Examples
 - Start agent targeting a public relay:
-  - `entangle-agent start --server https://relay.example.com`
+  - `entangle-serve start --server https://relay.example.com`
 - Create a capability (multi‑run by default) and print a shareable URL:
-  - `entangle-agent create-cap`
+  - `entangle-serve create-cap`
   - Output includes `capId`, `S`, and `Web URL: https://.../cap/<capId>#S=<S>`
 
 Output Modes
@@ -30,7 +30,7 @@ Output Modes
 
 **Runtime Behavior**
 - Heartbeat: sends `HEARTBEAT` at `AGENT_HEARTBEAT_MS` to keep registration fresh.
-- Capability announcement: sends `ANNOUNCE_CAP` for each stored capability.
+- Capability announcement: sends `ANNOUNCE_CAP` for each active capability (the ephemeral one it minted at start, or the pinned `--capability` URL).
 - Session handling: allocates counters, derives keys on `AUTH1`, enforces `singleRun` within each session if set.
 - Cleanup: aborts processes and closes PTYs on disconnect.
 
@@ -56,6 +56,7 @@ Concurrency
 
 **Configuration (env)**
 - `RELAY_URL`: default server URL (overridden by `--server`).
+- `ENTANGLE_CAPABILITY`: pin a capability URL (overridden by `--capability`); its host is used as the relay server.
 - `AGENT_SHELL`, `AGENT_DEFAULT_CWD`
 - `MAX_OUT_BYTES`, `CMD_DEFAULT_WALL_MS`, `TTY_IDLE_TIMEOUT_MS`
 - `MAX_ARG_COUNT`, `MAX_ARG_LEN`

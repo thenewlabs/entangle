@@ -49,7 +49,7 @@ Output Modes
 —
 
 **Internals**
-- Entry: `invoke/src/index.ts` (argument parsing and mode selection).
-- Single command: `invoke/src/single.ts`.
-- Terminal: `invoke/src/terminal.ts`.
+- Entry: `connect/src/index.ts` (argument parsing and mode selection).
+- Single command: `connect/src/single.ts`.
+- Terminal: `connect/src/terminal.ts`.
 - Uses `FrameReader`, crypto from `@thenewlabs/entangle-crypto`, and utilities from `@thenewlabs/entangle-utils`.

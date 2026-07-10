@@ -76,7 +76,7 @@ Concurrency
 —
 
 **Agent Architecture**
-- Startup: load capabilities from `~/.entangle/capabilities.json` (0600), connect to server, heartbeat, announce all caps.
+- Startup: mint an ephemeral capability (or use the one pinned via `--capability`/`ENTANGLE_CAPABILITY`), connect to server, heartbeat, announce all caps.
 - On invoker connect: create an independent session object with counters and derived keys after auth; handle frames via `FrameReader`.
 - Command runner: spawns process with minimized env; streams stdout/stderr; enforces `bytesOut` ceilings; supports abort and `wallMs` kill.
 - PTY manager: spawns a shell under a pseudo‑terminal; streams output; reacts to resize and signals; closes idle sessions.
@@ -94,16 +94,16 @@ Validation & Limits
 —
 
 **CLI & Binaries**
-- Agent: `entangle-agent`
+- Agent: `entangle-serve`
 - Server: `entangle-relay`
-- Invoke: `entangle-connect`
+- Connect: `entangle-connect`
 
 Run From Source
 - Dev: `npm run dev --workspace=@thenewlabs/entangle-relay` (server), `npm run dev --workspace=@thenewlabs/entangle-agent` (agent).
 - Build: `npm run build` creates bundled binaries in `dist/` (`agent.js`, `server.js`, `invoke.js`).
 
 Key Environment Variables (see `packages/utils/src/config.ts`)
-- `PORT`, `HOST`, `PUBLIC_ORIGIN`, `RELAY_URL` (agent/invoke default target), `MAX_FRAME_BYTES`, `RELAY_IDLE_TIMEOUT_MS`,
+- `PORT`, `HOST`, `PUBLIC_ORIGIN`, `RELAY_URL` (agent/connect default target), `MAX_FRAME_BYTES`, `RELAY_IDLE_TIMEOUT_MS`,
   `AGENT_HEARTBEAT_MS`, `CMD_DEFAULT_WALL_MS`, `TTY_IDLE_TIMEOUT_MS`, `MAX_OUT_BYTES`, `LOG_LEVEL`, `RELAY_RATE_RPS`, `RELAY_BURST`,
   `AGENT_SHELL`, `AGENT_DEFAULT_CWD`, `SPAWN_SANDBOX`, `MAX_ARG_COUNT`, `MAX_ARG_LEN`.
 

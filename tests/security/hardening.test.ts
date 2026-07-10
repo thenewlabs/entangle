@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { validateCwd, buildChildEnv } from '@thenewlabs/entangle-utils';
-import { RoutingState } from '../../server/src/state/routing.js';
-import { setupAgentRoute } from '../../server/src/routes/agent.js';
-import { PerIpRateLimiter } from '../../server/src/utils/rate-limit.js';
+import { RoutingState } from '../../relay/src/state/routing.js';
+import { setupAgentRoute } from '../../relay/src/routes/agent.js';
+import { PerIpRateLimiter } from '../../relay/src/utils/rate-limit.js';
 
 // Minimal WebSocket stand-in.
 class MockWebSocket extends EventEmitter {

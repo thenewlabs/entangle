@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'os';
-import { StreamManager } from '../../agent/src/stream-manager.js';
+import { StreamManager } from '../../serve/src/stream-manager.js';
 import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 
 interface Collected {

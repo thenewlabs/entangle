@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { RoutingState } from '../../server/src/state/routing.js';
+import { RoutingState } from '../../relay/src/state/routing.js';
 import { EventEmitter } from 'events';
 
 // Mock WebSocket

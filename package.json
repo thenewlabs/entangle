@@ -1,14 +1,15 @@
 {
-  "name": "@thenewlabs/entangle",
+  "name": "@thenewlabs/entangle-monorepo",
   "version": "2.0.3",
   "private": true,
-  "description": "Secure blind relay for exposing CLI tools",
+  "description": "Secure blind relay for exposing CLI tools (monorepo root)",
   "workspaces": [
     "packages/*",
-    "agent",
-    "server",
-    "invoke",
-    "web"
+    "serve",
+    "relay",
+    "connect",
+    "web",
+    "cli"
   ],
   "scripts": {
     "build": "npm run build --workspaces && node scripts/build-dist.js",

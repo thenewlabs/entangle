@@ -40,7 +40,7 @@ The default address is `http://localhost:8080`.
 ```bash
 AGENT_DEFAULT_CWD=/srv/my-project \
 RELAY_URL=http://localhost:8080 \
-entangle-agent start
+entangle-serve start
 ```
 
 The agent prints a capability URL like `http://localhost:8080/cap/<capId>#S=<secret>`.
@@ -92,7 +92,7 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 - Server: `PORT`, `HOST`, `MAX_FRAME_BYTES`, `RELAY_RATE_RPS`, `RELAY_BURST`, `CORS_ORIGINS`, `TRUST_PROXY`, `RELAY_AGENT_TOKEN`
 - Agent: `RELAY_URL`, `AGENT_DEFAULT_CWD` (working dir + execution boundary; defaults to the launch directory), `AGENT_ENV_PASSTHROUGH`, `RELAY_AGENT_TOKEN`, `MAX_OUT_BYTES`
 
-> Note: this is protocol **v2** and is not wire‑compatible with 1.0.0 — upgrade agent, relay, and connect together. Existing capabilities (`~/.entangle/capabilities.json`, shared `#S=` URLs) stay valid; password‑protected capabilities must have their password re‑set. Put the relay behind TLS and set `TRUST_PROXY=1` only when it sits behind a proxy you control.
+> Note: this is protocol **v2** and is not wire‑compatible with 1.0.0 — upgrade agent, relay, and connect together. The agent mints an ephemeral capability on each start unless you pin one with `--capability <url>` or `ENTANGLE_CAPABILITY` (its host is used as the relay server). Existing shared `#S=` capability URLs stay valid; password‑protected capabilities must have their password re‑set. Put the relay behind TLS and set `TRUST_PROXY=1` only when it sits behind a proxy you control.
 
 ## Repo Layout
 - `agent/` Agent CLI + runner + PTY
@@ -106,7 +106,7 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 - End‑to‑end & protocol: `docs/e2e.md`
 - Agent: `docs/agent.md`
 - Server: `docs/server.md`
-- Invoke CLI: `docs/invoke.md`
+- Connect CLI: `docs/connect.md`
 
 ## Testing
 - `npm test` (Vitest)

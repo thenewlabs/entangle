@@ -1,5 +1,6 @@
 import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { InvokeConnection } from './connection.js';
+import { promptHidden } from './prompt.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -12,7 +13,7 @@ export async function openTerminal(
   const { cwd, cols = 80, rows = 24 } = options;
 
   const capId = wsUrl.split('/').pop()!;
-  const conn = new InvokeConnection(capId, S, password);
+  const conn = new InvokeConnection(capId, S, password, () => promptHidden('Agent password: '));
 
   await conn.connect(wsUrl);
   output.info('Authenticated');

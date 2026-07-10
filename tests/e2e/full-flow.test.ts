@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
 import { join } from 'path';
-import { writeFileSync, mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { initCrypto, generateCapId, generateSecret } from '@thenewlabs/entangle-crypto';
-import { InvokeConnection } from '../../invoke/src/connection.js';
+import { InvokeConnection } from '../../connect/src/connection.js';
 
 // Real end-to-end: relay + agent as child processes, driven by the actual
 // InvokeConnection client. Exercises the v2 handshake (per-session keys,
@@ -32,28 +32,27 @@ describe('E2E Full Flow (v2 protocol)', () => {
 
   beforeAll(async () => {
     await initCrypto();
-    // Seed a known capability into a temp HOME the agent will read.
-    mkdirSync(join(home, '.entangle'), { recursive: true });
+    // The agent binds its cwd/boundary to this dir, so it must exist.
+    mkdirSync(home, { recursive: true });
+    // Pin a known capability the agent will serve (persistence is gone; the
+    // capability is supplied via the ENTANGLE_CAPABILITY env var instead).
     capId = generateCapId().capId;
     S = generateSecret();
-    writeFileSync(
-      join(home, '.entangle', 'capabilities.json'),
-      JSON.stringify([{ capId, S, policy: { singleRun: false, maxStreams: 4 } }], null, 2),
-      { mode: 0o600 }
-    );
 
-    server = spawn('node', [join(repoRoot, 'server/dist/index.js'), 'start'], {
+    server = spawn('node', [join(repoRoot, 'relay/dist/index.js'), 'start'], {
       env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', LOG_LEVEL: 'warn' },
       stdio: 'ignore',
     });
 
     await waitFor(async () => (await fetch(`${httpBase}/__health`)).ok, 10000, 'relay health');
 
-    agent = spawn('node', [join(repoRoot, 'agent/dist/index.js'), 'start', '--server', httpBase], {
+    agent = spawn('node', [join(repoRoot, 'serve/dist/index.js'), 'start', '--server', httpBase], {
       env: {
         ...process.env,
         HOME: home,
         LOG_LEVEL: 'warn',
+        // Pin the capability the agent serves instead of minting a fresh one.
+        ENTANGLE_CAPABILITY: `${httpBase}/cap/${capId}#S=${S}`,
         // Bind the agent to the temp home (working dir + execution boundary).
         AGENT_DEFAULT_CWD: home,
       },

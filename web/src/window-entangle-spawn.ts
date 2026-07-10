@@ -66,8 +66,9 @@ class EntangleConnection {
   }
 
   private getPassword(): string | undefined {
-    const hash = new URLSearchParams(window.location.hash.slice(1));
-    return (window as any).entangle?.password || hash.get('PW') || undefined;
+    // The password is supplied interactively (the UI stores it here); it is
+    // never read from the URL, so a second factor can't travel with S.
+    return (window as any).entangle?.password || undefined;
   }
 
   private async connect(): Promise<void> {

@@ -5,30 +5,26 @@ import { getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/enta
 import { openTerminal } from './terminal.js';
 import { runSingle } from './single.js';
 
-function parseCapUrl(u: string): { host: string; capId: string; S: string; password?: string } {
+function parseCapUrl(u: string): { host: string; capId: string; S: string } {
   const url = new URL(u);
   const parts = url.pathname.split('/');
   const capId = parts[parts.length - 1];
-  
+
   if (!capId || capId === '') {
     throw new Error('Invalid capability URL: missing capId');
   }
-  
-  // Extract S and optional PW from fragment
+
+  // Extract S from the fragment. A password is intentionally NOT read from the
+  // URL — supply it via --password or the interactive prompt so the second
+  // factor never travels alongside S.
   const hashParams = new URLSearchParams(url.hash.slice(1));
   const s = hashParams.get('S');
-  const password = hashParams.get('PW') || undefined;
-  
+
   if (!s) {
     throw new Error('Invalid capability URL: missing S in fragment');
   }
-  
-  return { 
-    host: url.host, 
-    capId, 
-    S: s,
-    ...(password && { password })
-  };
+
+  return { host: url.host, capId, S: s };
 }
 
 const program = new Command();
@@ -58,8 +54,8 @@ program
       const outputMode = parseOutputMode(options.outputMode);
       const output = new OutputHandler({ mode: outputMode });
       
-      const { host, capId, S, password: urlPassword } = parseCapUrl(capUrl);
-      const password = options.password || urlPassword;
+      const { host, capId, S } = parseCapUrl(capUrl);
+      const password = options.password;
       const protocol = capUrl.startsWith('https://') ? 'wss' : 'ws';
       const wsUrl = `${protocol}://${host}/relay/${capId}`;
       

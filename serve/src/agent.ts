@@ -3,12 +3,13 @@ import { randomBytes } from 'crypto';
 import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
-import { loadCapabilities, createCapability } from './capability.js';
+import { createCapability, type CapabilityInfo } from './capability.js';
 
 interface AgentOptions {
   serverUrl: string;
   outputMode?: string;
   password?: string;
+  pinnedCapability?: CapabilityInfo;
 }
 
 interface AgentState {
@@ -20,6 +21,7 @@ interface AgentState {
   outputMode?: string;
   password?: string;
   passwordHash?: string;
+  pinned?: boolean;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
@@ -41,11 +43,20 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     output.info('Password protection enabled');
   }
   
-  const caps = await loadCapabilities();
-  for (const cap of caps) {
-    state.capabilities.set(cap.capId, cap);
+  // Exactly one capability is served: a pinned one supplied by the caller, or a
+  // fresh ephemeral one minted in memory (never written to disk).
+  let cap: CapabilityInfo;
+  if (options.pinnedCapability) {
+    cap = options.pinnedCapability;
+    state.pinned = true;
+  } else {
+    cap = await createCapability({
+      singleRun: false,
+      ...(state.outputMode && { outputMode: state.outputMode }),
+    });
   }
-  
+  state.capabilities.set(cap.capId, cap);
+
   await connectToServer(state, options.serverUrl);
   
   setInterval(() => {
@@ -92,14 +103,9 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         state.agentId = msg.agentId;
         state.output.info(`Agent registered: ${msg.agentId}`);
         
-        // Create capability if none exist
-        if (state.capabilities.size === 0) {
-          await createAndDisplayCapability(state);
-        } else {
-          // Display existing capabilities
-          displayCapabilities(state);
-        }
-        
+        // Display the single served capability (pinned or ephemeral).
+        displayCapability(state);
+
         // Announce all capabilities
         for (const capId of state.capabilities.keys()) {
           announceCapability(state, capId);
@@ -153,22 +159,22 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
   });
 }
 
-async function createAndDisplayCapability(state: AgentState): Promise<void> {
+function displayCapability(state: AgentState): void {
   const config = getConfig();
   const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'https://suncoder.dev';
-  
-  const cap = await createCapability({
-    singleRun: false,
-    ...(state.outputMode && { outputMode: state.outputMode }),
-  });
-  
-  state.capabilities.set(cap.capId, cap);
-  
+
+  // There is exactly one capability. Print its full URL block including the
+  // secret S: this capability is ephemeral (or explicitly pinned by the
+  // operator) and the secret is intentionally shown here so it can be copied
+  // and handed to an invoker — without it the capability is unusable.
+  const cap = state.capabilities.values().next().value as CapabilityInfo | undefined;
+  if (!cap) return;
+
   const link = `${relayUrl}/cap/${cap.capId}#S=${cap.S}`;
-  
+
   state.output.info('');
   state.output.info('=====================================');
-  state.output.info('Capability created');
+  state.output.info(state.pinned ? 'Using pinned capability' : 'Ephemeral capability created (not stored)');
   state.output.info(`capId: ${cap.capId}`);
   state.output.info(`S: ${cap.S}`);
   state.output.info('');
@@ -202,21 +208,4 @@ function sendHeartbeat(state: AgentState): void {
 
 function getMachineId(): string {
   return randomBytes(16).toString('hex');
-}
-
-function displayCapabilities(state: AgentState): void {
-  if (state.capabilities.size === 0) return;
-
-  // Do NOT re-print the secret S or the S-bearing Web URL on every startup:
-  // these logs land in systemd/journald/container/centralized logs and S is a
-  // remote-shell credential. S is shown only at explicit creation time.
-  state.output.info('');
-  state.output.info('=====================================');
-  state.output.info('Using existing capabilities:');
-
-  for (const capId of state.capabilities.keys()) {
-    state.output.info(`capId: ${capId} (secret hidden; shown only at creation)`);
-  }
-  state.output.info('=====================================');
-  state.output.info('');
 }

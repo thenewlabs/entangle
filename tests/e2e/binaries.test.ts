@@ -9,13 +9,13 @@ import { join } from 'path';
 //  - entangle-connect rejecting dashed command args ("unknown option '-c'")
 // These run the COMPILED output, so they require a prior `npm run build`.
 const root = process.cwd();
-const agentBin = join(root, 'agent/dist/index.js');
-const connectBin = join(root, 'invoke/dist/index.js');
-const relayBin = join(root, 'server/dist/index.js');
+const agentBin = join(root, 'serve/dist/index.js');
+const connectBin = join(root, 'connect/dist/index.js');
+const relayBin = join(root, 'relay/dist/index.js');
 const built = existsSync(agentBin) && existsSync(connectBin) && existsSync(relayBin);
 
 describe.skipIf(!built)('Built binaries — startup & CLI regressions', () => {
-  it('entangle-agent --version runs (no ESM `require is not defined`)', () => {
+  it('entangle-serve --version runs (no ESM `require is not defined`)', () => {
     const r = spawnSync('node', [agentBin, '--version'], { encoding: 'utf8', timeout: 10000 });
     const out = (r.stdout || '') + (r.stderr || '');
     expect(out).not.toMatch(/require is not defined/i);

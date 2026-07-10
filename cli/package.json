@@ -1,0 +1,41 @@
+{
+  "name": "@thenewlabs/entangle",
+  "version": "2.0.3",
+  "type": "module",
+  "description": "Unified Entangle CLI — one command that dispatches to serve, relay, and connect",
+  "main": "./dist/index.js",
+  "bin": {
+    "entangle": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "entangle",
+    "cli",
+    "relay",
+    "remote"
+  ],
+  "author": "Sunpix",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@thenewlabs/entangle-serve": "^2.0.3",
+    "@thenewlabs/entangle-connect": "^2.0.3",
+    "@thenewlabs/entangle-relay": "^2.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.3"
+  }
+}
