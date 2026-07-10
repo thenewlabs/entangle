@@ -28,6 +28,8 @@ export interface Stream {
     wallMs?: number;
     maxOutBytes?: number;
   };
+  wallTimer?: ReturnType<typeof setTimeout>;
+  idleTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface StreamManagerOptions {
@@ -120,24 +122,71 @@ export class StreamManager extends EventEmitter {
       return limits;
     }
     
-    // Fallback to global limits divided by max streams
+    // Fallback to global limits divided by max streams. Where the policy is
+    // silent we still apply the operator-configured ceilings so every stream is
+    // bounded by default (a capability created without explicit limits must not
+    // run unbounded).
     const maxStreams = this.policy.maxStreams || 1;
+    const config = getConfig();
     const limits: Stream['limits'] = {};
-    
+
     if (this.policy.maxCpuMs !== undefined) {
       limits.cpuMs = Math.floor(this.policy.maxCpuMs / maxStreams);
     }
     if (this.policy.maxMemMB !== undefined) {
       limits.memMB = Math.floor(this.policy.maxMemMB / maxStreams);
     }
-    if (this.policy.maxWallMs !== undefined) {
-      limits.wallMs = Math.floor(this.policy.maxWallMs / maxStreams);
+
+    const wallMs = this.policy.maxWallMs ?? config.cmdDefaultWallMs;
+    if (wallMs > 0) {
+      limits.wallMs = Math.floor(wallMs / maxStreams);
     }
-    if (this.policy.maxOutBytes !== undefined) {
-      limits.maxOutBytes = Math.floor(this.policy.maxOutBytes / maxStreams);
+
+    const maxOutBytes = this.policy.maxOutBytes ?? config.maxOutBytes;
+    if (maxOutBytes > 0) {
+      limits.maxOutBytes = Math.floor(maxOutBytes / maxStreams);
     }
-    
+
     return limits;
+  }
+
+  /**
+   * Arm a wall-clock deadline that force-closes the stream if it outlives its
+   * limit. Unref'd so the timer never keeps the process alive on its own.
+   */
+  private armWallClock(stream: Stream): void {
+    const wallMs = stream.limits.wallMs;
+    if (!wallMs || wallMs <= 0) return;
+    stream.wallTimer = setTimeout(() => {
+      const current = this.streams.get(stream.sid);
+      if (current && current.endedAt === undefined) {
+        this.output.warn(`Stream wall-clock limit exceeded for ${stream.sid}: limit=${wallMs}ms`);
+        this.closeStream(stream.sid, 'Wall-clock limit exceeded');
+      }
+    }, wallMs);
+    if (typeof stream.wallTimer.unref === 'function') stream.wallTimer.unref();
+  }
+
+  /**
+   * (Re)arm the PTY idle timeout. Called on every byte of PTY output so an
+   * interactive session is only reaped after genuine inactivity.
+   */
+  private armIdleTimeout(stream: Stream, idleMs: number): void {
+    if (!idleMs || idleMs <= 0) return;
+    if (stream.idleTimer) clearTimeout(stream.idleTimer);
+    stream.idleTimer = setTimeout(() => {
+      const current = this.streams.get(stream.sid);
+      if (current && current.endedAt === undefined) {
+        this.output.warn(`PTY idle timeout for ${stream.sid}: idle=${idleMs}ms`);
+        this.closeStream(stream.sid, 'Idle timeout');
+      }
+    }, idleMs);
+    if (typeof stream.idleTimer.unref === 'function') stream.idleTimer.unref();
+  }
+
+  private clearTimers(stream: Stream): void {
+    if (stream.wallTimer) { clearTimeout(stream.wallTimer); delete stream.wallTimer; }
+    if (stream.idleTimer) { clearTimeout(stream.idleTimer); delete stream.idleTimer; }
   }
 
   /**
@@ -175,6 +224,8 @@ export class StreamManager extends EventEmitter {
       limits,
     };
 
+    const idleMs = config.ttyIdleTimeoutMs;
+
     // Handle PTY data
     ptyProcess.onData((data) => {
       if (stream.aborted) return;
@@ -189,6 +240,7 @@ export class StreamManager extends EventEmitter {
         return;
       }
 
+      this.armIdleTimeout(stream, idleMs);
       this.options.onStreamData?.(sid, chunk, 'stdout');
     });
 
@@ -196,13 +248,16 @@ export class StreamManager extends EventEmitter {
     ptyProcess.onExit((exitCode) => {
       stream.endedAt = Date.now();
       stream.usage.wallMs = stream.endedAt - stream.startedAt;
-      
+      this.clearTimers(stream);
+
       this.output.info(`PTY stream exited for ${sid}: code=${exitCode.exitCode}, signal=${exitCode.signal}`);
       this.options.onStreamExit?.(sid, exitCode.exitCode ?? null, exitCode.signal ? String(exitCode.signal) : null, stream.usage);
       this.streams.delete(sid);
     });
 
     this.streams.set(sid, stream);
+    this.armWallClock(stream);
+    this.armIdleTimeout(stream, idleMs);
     this.output.info(`Opened PTY stream ${sid}: cols=${options.cols}, rows=${options.rows}`);
 
     return sid;
@@ -290,6 +345,7 @@ export class StreamManager extends EventEmitter {
     childProcess.on('close', (code: number | null, signal: string | null) => {
       stream.endedAt = Date.now();
       stream.usage.wallMs = stream.endedAt - stream.startedAt;
+      this.clearTimers(stream);
 
       this.output.info(`Command stream exited for ${sid}: code=${code}, signal=${signal}`);
       this.options.onStreamExit?.(sid, code, signal, stream.usage);
@@ -298,13 +354,16 @@ export class StreamManager extends EventEmitter {
 
     // Handle process errors
     childProcess.on('error', (err: Error) => {
+      this.clearTimers(stream);
       this.output.error(`Command stream error for ${sid}`, err.message);
       this.options.onStreamError?.(sid, err.message);
       this.streams.delete(sid);
     });
 
     this.streams.set(sid, stream);
-    this.output.info(`Opened command stream ${sid}: ${options.argv.join(' ')}`);
+    this.armWallClock(stream);
+    // Log the command name and arg count only; full argv can carry secrets.
+    this.output.info(`Opened command stream ${sid}: ${command} (${args.length} args)`);
 
     return sid;
   }
@@ -381,6 +440,7 @@ export class StreamManager extends EventEmitter {
     }
 
     stream.aborted = true;
+    this.clearTimers(stream);
 
     if (stream.mode === 'pty') {
       const ptyProcess = stream.process as pty.IPty;
@@ -393,12 +453,20 @@ export class StreamManager extends EventEmitter {
       const childProcess = stream.process as ChildProcess;
       try {
         childProcess.kill('SIGTERM');
-        // Give it time to clean up
-        setTimeout(() => {
-          if (!childProcess.killed) {
-            childProcess.kill('SIGKILL');
+        // Escalate to SIGKILL if the process has not actually exited. Note:
+        // childProcess.killed only means "a signal was delivered", so it is
+        // true right after SIGTERM and must NOT gate escalation. We key off the
+        // real exit state instead: the 'close' handler deletes the stream from
+        // the map and sets endedAt, so a still-present, not-yet-ended stream is
+        // one that ignored SIGTERM.
+        const timer = setTimeout(() => {
+          const current = this.streams.get(sid);
+          if (current && current.endedAt === undefined) {
+            try { childProcess.kill('SIGKILL'); } catch {}
           }
         }, 5000);
+        // Don't keep the event loop alive just for the escalation timer.
+        if (typeof timer.unref === 'function') timer.unref();
       } catch (err) {
         this.output.error(`Failed to kill process for stream ${sid}`, err instanceof Error ? err.message : String(err));
       }

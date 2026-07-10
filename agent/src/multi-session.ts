@@ -45,6 +45,21 @@ export interface MultiSession {
   nonceB?: string;
   nonceC?: string;
   streamManager?: StreamManager;
+  terminated?: boolean;
+}
+
+// Tear down a single invoker session on a protocol/counter error WITHOUT
+// closing session.ws — that socket is the shared agent-to-relay control
+// connection carrying every invoker. Killing it here would take down all of
+// them, so instead we close just this session's streams, mark it terminated so
+// further frames are ignored, and let the relay's idle timeout drop the peer.
+function terminateSession(session: MultiSession, reason: string): void {
+  if (session.terminated) return;
+  session.terminated = true;
+  output.warn(`Terminating invoker session ${session.socketId}: ${reason}`);
+  if (session.streamManager) {
+    try { session.streamManager.closeAllStreams(reason); } catch {}
+  }
 }
 
 // Helper to send encrypted messages with per-stream counters
@@ -306,9 +321,10 @@ export async function handleMultiStreamFrame(
   session: MultiSession,
   frame: { type: FrameType; payload: Uint8Array }
 ): Promise<void> {
+  if (session.terminated) return;
+
   if (!session.authenticated) {
-    output.warn(`Received frame before authentication: type=${frame.type}`);
-    session.ws.close(1002, 'Not authenticated');
+    terminateSession(session, 'Frame received before authentication');
     return;
   }
 
@@ -339,13 +355,19 @@ export async function handleMultiStreamFrame(
     const plaintext = await streamAeadDecrypt(session.keys.K_enc, frame.payload, aad);
     const message: any = decode(plaintext);
 
+    // Bounded structural validation before we trust any field. A decoded value
+    // that is not a well-formed envelope terminates only this invoker session.
+    if (!message || typeof message !== 'object' || typeof message.ctr !== 'number') {
+      terminateSession(session, 'Malformed message envelope');
+      return;
+    }
+
     // For stream messages, verify per-stream counter
-    if (message.msg && message.msg.sid) {
+    if (message.msg && typeof message.msg.sid === 'string') {
       const sid = message.msg.sid;
       const expectedCounter = session.streamCounters.getNext(sid, 'incoming');
       if (message.ctr !== expectedCounter) {
-        output.error(`Stream counter mismatch for stream ${sid}: expected=${expectedCounter}, received=${message.ctr}`);
-        session.ws.close(1002, 'Counter mismatch');
+        terminateSession(session, `Stream counter mismatch for ${sid}: expected=${expectedCounter}, received=${message.ctr}`);
         return;
       }
       session.streamCounters.increment(sid, 'incoming');
@@ -354,8 +376,7 @@ export async function handleMultiStreamFrame(
       try {
         session.counters.incoming.validate(message.ctr);
       } catch (err: any) {
-        output.error('Counter mismatch', err.message);
-        session.ws.close(1002, 'Counter mismatch');
+        terminateSession(session, `Counter mismatch: ${err.message}`);
         return;
       }
     }
@@ -431,7 +452,7 @@ export async function handleMultiStreamFrame(
     }
   } catch (error: any) {
     output.error(`Error handling multi-stream frame type ${frame.type}`, error.message);
-    session.ws.close(1002, 'Protocol error');
+    terminateSession(session, 'Protocol error');
   }
 }
 

@@ -26,63 +26,73 @@ export class FrameReader {
   private buffer: Uint8Array = new Uint8Array(0);
   private headerParsed = false;
   private currentType: FrameType | undefined;
-  private currentLength: bigint | undefined;
-  private droppingOversize = false;
-  
+  private currentLength = 0;
+  // Bytes of an oversize payload still to be discarded. While > 0 incoming
+  // bytes are dropped WITHOUT ever entering `buffer`, so a frame declaring a
+  // huge (e.g. UINT64_MAX) length cannot grow memory while we wait for a
+  // payload that never fully arrives.
+  private discardRemaining = 0;
+
   push(chunk: Uint8Array): Frame[] {
     const frames: Frame[] = [];
-    
+
+    // Consume any pending oversize payload straight from the incoming chunk;
+    // only the unconsumed tail is ever buffered.
+    if (this.discardRemaining > 0) {
+      const drop = Math.min(this.discardRemaining, chunk.length);
+      this.discardRemaining -= drop;
+      chunk = chunk.subarray(drop);
+      if (this.discardRemaining > 0) return frames;
+    }
+
     const newBuffer = new Uint8Array(this.buffer.length + chunk.length);
     newBuffer.set(this.buffer);
     newBuffer.set(chunk, this.buffer.length);
     this.buffer = newBuffer;
-    
+
     while (true) {
       if (!this.headerParsed) {
         if (this.buffer.length < 9) break;
-        
+
         const header = decodeFrameHeader(this.buffer.slice(0, 9));
         if (!header) break;
-        
+
         this.currentType = header.type;
-        this.currentLength = header.length;
         this.headerParsed = true;
         this.buffer = this.buffer.slice(9);
 
-        // Enforce maximum frame size; if exceeded, drop this frame
-        const lengthNum = Number(this.currentLength);
-        if (lengthNum > MAX_FRAME_BYTES) {
-          // Enter dropping mode: discard remaining buffered data for this frame
-          this.droppingOversize = true;
-        }
-      }
-      
-      if (this.headerParsed && this.currentLength !== undefined) {
-        const length = Number(this.currentLength);
-        if (this.buffer.length < length) break;
-
-        if (this.droppingOversize) {
-          // Discard the oversize payload without emitting a frame
-          this.buffer = this.buffer.slice(length);
+        // Reject oversize frames up front so we never buffer more than a single
+        // frame's worth. Discard exactly `length` payload bytes across chunks
+        // and emit nothing. BigInt comparison avoids precision loss for lengths
+        // beyond 2^53.
+        if (header.length > BigInt(MAX_FRAME_BYTES)) {
+          const available = BigInt(this.buffer.length);
+          const dropNow = header.length < available ? header.length : available;
+          this.buffer = this.buffer.slice(Number(dropNow));
+          this.discardRemaining = Number(header.length - dropNow);
           this.headerParsed = false;
           this.currentType = undefined;
-          this.currentLength = undefined;
-          this.droppingOversize = false;
+          if (this.discardRemaining > 0) break;
           continue;
         }
 
+        this.currentLength = Number(header.length);
+      }
+
+      if (this.headerParsed) {
+        if (this.buffer.length < this.currentLength) break;
+
         frames.push({
           type: this.currentType!,
-          payload: this.buffer.slice(0, length),
+          payload: this.buffer.slice(0, this.currentLength),
         });
-        
-        this.buffer = this.buffer.slice(length);
+
+        this.buffer = this.buffer.slice(this.currentLength);
         this.headerParsed = false;
         this.currentType = undefined;
-        this.currentLength = undefined;
       }
     }
-    
+
     return frames;
   }
 }

@@ -206,22 +206,16 @@ function getMachineId(): string {
 
 function displayCapabilities(state: AgentState): void {
   if (state.capabilities.size === 0) return;
-  
-  const config = getConfig();
-  const relayUrl = config.relayUrl || state.serverUrl || config.publicOrigin || 'https://suncoder.dev';
-  
+
+  // Do NOT re-print the secret S or the S-bearing Web URL on every startup:
+  // these logs land in systemd/journald/container/centralized logs and S is a
+  // remote-shell credential. S is shown only at explicit creation time.
   state.output.info('');
   state.output.info('=====================================');
   state.output.info('Using existing capabilities:');
-  
-  for (const [capId, cap] of state.capabilities) {
-    state.output.info('');
-    state.output.info(`capId: ${capId}`);
-    state.output.info(`S: ${cap.S}`);
-    
-    const link = `${relayUrl}/cap/${capId}#S=${cap.S}`;
-    state.output.info('');
-    state.output.info(`Web URL: ${link}`);
+
+  for (const capId of state.capabilities.keys()) {
+    state.output.info(`capId: ${capId} (secret hidden; shown only at creation)`);
   }
   state.output.info('=====================================');
   state.output.info('');

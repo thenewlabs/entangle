@@ -23,14 +23,24 @@ interface InvokerInfo {
   connectedAt: number;
 }
 
+// Hard ceilings so a client cannot grow the routing maps without bound.
+// Overridable via env for large deployments.
+const MAX_AGENTS = parseInt(process.env.RELAY_MAX_AGENTS || '10000', 10);
+const MAX_CAPS_PER_AGENT = parseInt(process.env.RELAY_MAX_CAPS_PER_AGENT || '256', 10);
+
 export class RoutingState {
   private agents = new Map<string, AgentInfo>();
   private invokers = new Map<string, InvokerInfo>();
   private capIdToAgent = new Map<string, string>(); // capId -> agentId
-  
-  registerAgent(ws: WebSocket, machineId: string): string {
+
+  registerAgent(ws: WebSocket, machineId: string): string | null {
+    if (this.agents.size >= MAX_AGENTS) {
+      output.warn(`Rejecting agent registration: at capacity (${this.agents.size}/${MAX_AGENTS})`);
+      return null;
+    }
+
     const agentId = newId();
-    
+
     const agent: AgentInfo = {
       ws,
       machineId,
@@ -59,7 +69,14 @@ export class RoutingState {
       output.warn(`Capability ${capId} already owned by agent ${existingAgentId} (requested by ${agentId})`);
       return false;
     }
-    
+
+    // Bound the per-agent capability set so a single connection cannot announce
+    // unlimited capabilities into the routing maps.
+    if (!agent.capabilities.has(capId) && agent.capabilities.size >= MAX_CAPS_PER_AGENT) {
+      output.warn(`Rejecting capability ${capId}: agent ${agentId} at cap limit (${MAX_CAPS_PER_AGENT})`);
+      return false;
+    }
+
     agent.capabilities.add(capId);
     this.capIdToAgent.set(capId, agentId);
     output.info(`Capability announced: ${capId} by agent ${agentId}`);

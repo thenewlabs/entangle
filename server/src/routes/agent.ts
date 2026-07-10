@@ -13,6 +13,13 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'CLIENT_HELLO') {
+        // One registration per socket: a second CLIENT_HELLO would orphan the
+        // first agent entry and let one connection inflate the routing maps.
+        if (agentId) {
+          output.warn(`Ignoring duplicate CLIENT_HELLO on socket for agent ${agentId}`);
+          return;
+        }
+
         // Gate agent registration behind a shared token when configured, so
         // random clients cannot register and squat capabilities.
         if (requiredToken && msg.token !== requiredToken) {
@@ -21,7 +28,12 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
           return;
         }
 
-        agentId = routing.registerAgent(ws, msg.machineId);
+        const newAgentId = routing.registerAgent(ws, msg.machineId);
+        if (!newAgentId) {
+          try { ws.close(1013, 'Server at capacity'); } catch {}
+          return;
+        }
+        agentId = newAgentId;
 
         ws.send(JSON.stringify({
           type: 'ASSIGN',

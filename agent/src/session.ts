@@ -49,6 +49,7 @@ export interface Session {
   passwordHash?: string | undefined; // Argon2id encoded string
   nonceB?: string;
   nonceC?: string;
+  auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
 }
 
 // Helper to send wrapped relay responses
@@ -165,16 +166,28 @@ async function handleFrame(
 }
 
 async function handleAuth1(session: Session, payload: Uint8Array): Promise<void> {
+  // Bound the expensive Argon2 derivation to a single attempt per connection so
+  // a client that only knows capId cannot queue unbounded key-derivation work.
+  // (Connection setup is separately rate-limited per IP at the relay.)
+  if (session.auth1Seen) {
+    output.warn(`Ignoring repeat AUTH1 for socket ${session.socketId}`);
+    return;
+  }
+  session.auth1Seen = true;
+
+  // Cheap structural checks BEFORE any key derivation. AUTH1 payload is
+  // HMAC(32 bytes) || nonceB, and nonceB is a 16-byte hex string (32 chars).
+  const EXPECTED_NONCE_LEN = 32;
+  if (payload.length !== 32 + EXPECTED_NONCE_LEN) {
+    output.warn(`Rejecting malformed AUTH1 for socket ${session.socketId}: len=${payload.length}`);
+    return;
+  }
+
   try {
     const saltCap = extractSaltFromCapId(session.cap.capId);
     const K_raw = await deriveKeyMaterial(session.cap.S, saltCap);
     session.K_raw = K_raw;
     session.bootstrapKeys = deriveBootstrapKeys(K_raw);
-
-    // AUTH1 payload = HMAC(32 bytes) || nonceB
-    if (payload.length < 32) {
-      throw new Error('Invalid AUTH1 payload: too short');
-    }
 
     const receivedHmac = payload.slice(0, 32);
     const nonceBBytes = payload.slice(32);

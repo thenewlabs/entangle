@@ -1,6 +1,24 @@
 import { describe, it, expect } from 'vitest';
 import { FrameType } from './types.js';
 import { encodeFrame, decodeFrameHeader, FrameReader } from './frame.js';
+import { MAX_FRAME_BYTES } from './constants.js';
+
+// Build a 9-byte frame header with an arbitrary declared length (which
+// encodeFrame won't do, since it derives length from the payload).
+function makeHeader(type: FrameType, length: bigint): Uint8Array {
+  const h = new Uint8Array(9);
+  h[0] = type;
+  new DataView(h.buffer).setBigUint64(1, length, false);
+  return h;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
 
 describe('Frame Codec', () => {
   describe('encodeFrame', () => {
@@ -185,6 +203,43 @@ describe('Frame Codec', () => {
       expect(frames).toHaveLength(1);
       expect(frames[0]!.type).toBe(type);
       expect(frames[0]!.payload).toHaveLength(0);
+    });
+
+    it('should discard an oversize-but-finite frame and then recover', () => {
+      const reader = new FrameReader();
+      const over = MAX_FRAME_BYTES + 100;
+
+      // Header declaring an over-limit length: no frame emitted.
+      expect(reader.push(makeHeader(FrameType.STDOUT, BigInt(over)))).toHaveLength(0);
+
+      // Stream the oversize payload in chunks; every push must drop it.
+      let remaining = over;
+      const chunk = new Uint8Array(4096);
+      while (remaining > 0) {
+        const n = Math.min(chunk.length, remaining);
+        expect(reader.push(chunk.subarray(0, n))).toHaveLength(0);
+        remaining -= n;
+      }
+
+      // A valid frame arriving right after must still parse.
+      const good = encodeFrame(FrameType.RUN, new Uint8Array([7, 8, 9]));
+      const frames = reader.push(good);
+      expect(frames).toHaveLength(1);
+      expect(frames[0]!.type).toBe(FrameType.RUN);
+      expect(frames[0]!.payload).toEqual(new Uint8Array([7, 8, 9]));
+    });
+
+    it('should not buffer a frame declaring an impossibly large length', () => {
+      const reader = new FrameReader();
+      // 2^60 bytes will never arrive; the reader must keep discarding without
+      // retaining data (the memory-exhaustion guard) and never emit a frame.
+      const header = makeHeader(FrameType.STDOUT, 1n << 60n);
+      const mib = new Uint8Array(1024 * 1024);
+
+      expect(reader.push(concat(header, mib))).toHaveLength(0);
+      for (let i = 0; i < 8; i++) {
+        expect(reader.push(mib)).toHaveLength(0);
+      }
     });
 
     it('should maintain state across multiple pushes', () => {

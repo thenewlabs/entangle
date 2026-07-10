@@ -108,6 +108,21 @@ describe('Server Routing', () => {
       expect(success2).toBe(false);
     });
 
+    it('should cap the number of capabilities per agent', () => {
+      const ws = new MockWebSocket() as any;
+      const agentId = routing.registerAgent(ws, 'test-machine');
+
+      // Default RELAY_MAX_CAPS_PER_AGENT is 256; announcing up to the cap works.
+      for (let i = 0; i < 256; i++) {
+        expect(routing.announceCapability(agentId, `cap-${i}`)).toBe(true);
+      }
+      // The 257th distinct capability is rejected so one connection cannot grow
+      // the routing maps without bound.
+      expect(routing.announceCapability(agentId, 'cap-over')).toBe(false);
+      // Re-announcing an already-owned capId is still allowed (idempotent).
+      expect(routing.announceCapability(agentId, 'cap-0')).toBe(true);
+    });
+
     it('should clean up capabilities when agent disconnects', () => {
       const ws = new MockWebSocket() as any;
       const agentId = routing.registerAgent(ws, 'test-machine');

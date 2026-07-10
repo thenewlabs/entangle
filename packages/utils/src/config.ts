@@ -6,6 +6,12 @@ import { dirname } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// The directory the process was launched in, captured once at startup (before
+// anything can chdir). By default the agent binds both its working directory
+// and its execution boundary to this, so a run cannot escape the directory the
+// operator started the agent in.
+const LAUNCH_DIR = process.cwd();
+
 export function loadConfig(): void {
   const rootDir = resolve(__dirname, '../../..');
   const envPath = resolve(rootDir, '.env');
@@ -46,28 +52,59 @@ export interface Config {
   agentEnvPassthrough: string[];
 }
 
+let warnedKeys: Set<string> | undefined;
+
+/**
+ * Parse a security-sensitive integer setting, failing CLOSED to the default on
+ * a malformed or out-of-range value instead of silently propagating NaN (which
+ * would disable comparisons like `size > limit` and turn a limit off). A value
+ * below `min` or above `max` is clamped back to the default.
+ */
+function intEnv(name: string, def: number, min = 1, max = Number.MAX_SAFE_INTEGER): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) {
+    warnedKeys ??= new Set();
+    if (!warnedKeys.has(name)) {
+      warnedKeys.add(name);
+      // eslint-disable-next-line no-console
+      console.warn(`[config] Invalid ${name}=${JSON.stringify(raw)}; using default ${def}`);
+    }
+    return def;
+  }
+  return n;
+}
+
 export function getConfig(): Config {
   loadConfig();
-  
+
   return {
-    port: parseInt(process.env.PORT || '8080', 10),
+    port: intEnv('PORT', 8080, 1, 65535),
     host: process.env.HOST || '0.0.0.0',
     publicOrigin: process.env.PUBLIC_ORIGIN || 'http://localhost:8080',
-    maxFrameBytes: parseInt(process.env.MAX_FRAME_BYTES || '1048576', 10),
-    relayIdleTimeoutMs: parseInt(process.env.RELAY_IDLE_TIMEOUT_MS || '120000', 10),
-    agentHeartbeatMs: parseInt(process.env.AGENT_HEARTBEAT_MS || '15000', 10),
-    cmdDefaultWallMs: parseInt(process.env.CMD_DEFAULT_WALL_MS || '60000', 10),
-    ttyIdleTimeoutMs: parseInt(process.env.TTY_IDLE_TIMEOUT_MS || '1200000', 10),
-    maxOutBytes: parseInt(process.env.MAX_OUT_BYTES || '10485760', 10),
+    maxFrameBytes: intEnv('MAX_FRAME_BYTES', 1048576),
+    relayIdleTimeoutMs: intEnv('RELAY_IDLE_TIMEOUT_MS', 120000),
+    agentHeartbeatMs: intEnv('AGENT_HEARTBEAT_MS', 15000),
+    cmdDefaultWallMs: intEnv('CMD_DEFAULT_WALL_MS', 60000),
+    ttyIdleTimeoutMs: intEnv('TTY_IDLE_TIMEOUT_MS', 1200000),
+    maxOutBytes: intEnv('MAX_OUT_BYTES', 10485760),
     logLevel: process.env.LOG_LEVEL || 'info',
-    relayRateRps: parseInt(process.env.RELAY_RATE_RPS || '10', 10),
-    relayBurst: parseInt(process.env.RELAY_BURST || '50', 10),
+    relayRateRps: intEnv('RELAY_RATE_RPS', 10),
+    relayBurst: intEnv('RELAY_BURST', 50),
     agentShell: process.env.AGENT_SHELL || process.env.SHELL || '/bin/bash',
-    agentDefaultCwd: process.env.AGENT_DEFAULT_CWD || process.env.HOME || process.cwd(),
-    agentAllowedCwd: process.env.AGENT_ALLOWED_CWD?.split(':').filter(Boolean),
+    // Default working directory is the launch directory (not $HOME), so runs
+    // start where the agent was started unless explicitly overridden.
+    agentDefaultCwd: process.env.AGENT_DEFAULT_CWD || LAUNCH_DIR,
+    // When no explicit allow-list is set, bind execution to the launch
+    // directory so a capability holder cannot cd/exec outside it. An explicit
+    // AGENT_ALLOWED_CWD (colon-separated) widens or changes this boundary.
+    agentAllowedCwd: process.env.AGENT_ALLOWED_CWD
+      ? process.env.AGENT_ALLOWED_CWD.split(':').filter(Boolean)
+      : [process.env.AGENT_DEFAULT_CWD || LAUNCH_DIR],
     spawnSandbox: process.env.SPAWN_SANDBOX || 'none',
-    maxArgCount: parseInt(process.env.MAX_ARG_COUNT || '256', 10),
-    maxArgLen: parseInt(process.env.MAX_ARG_LEN || '16384', 10),
+    maxArgCount: intEnv('MAX_ARG_COUNT', 256),
+    maxArgLen: intEnv('MAX_ARG_LEN', 16384),
     relayUrl: process.env.RELAY_URL,
     corsOrigins: (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
     trustProxy: process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true',

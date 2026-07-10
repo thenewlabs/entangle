@@ -112,7 +112,14 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
     output.warn('Web assets not found');
   }
   
-  const wss = new WebSocketServer({ noServer: true });
+  // Cap control-plane message size. Payloads are JSON envelopes wrapping a
+  // base64 frame (~1.33x the raw frame) plus routing metadata; allow generous
+  // headroom over maxFrameBytes but far below the ws 100 MiB default so a
+  // single message cannot exhaust memory before it is parsed.
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: config.maxFrameBytes * 2,
+  });
   
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url!, `http://${request.headers.host}`);

@@ -83,6 +83,35 @@ describe('StreamManager exec', () => {
     await expect(sm.openCmdStream({ argv: ['echo', 'x'], cwd: '/etc' })).rejects.toThrow(/allowed|cwd/i);
   });
 
+  it('enforces a default output ceiling from config when the policy is silent', async () => {
+    // Policy carries no maxOutBytes, so the operator-configured default must
+    // apply. A tiny ceiling means a large output stream is cut off well short.
+    process.env.MAX_OUT_BYTES = '1000';
+    const c: Collected = { data: [], exit: [], error: [] };
+    const sm = makeManager(c);
+
+    await sm.openCmdStream({ argv: ['sh', '-c', 'head -c 200000 /dev/zero | tr "\\0" "a"'] });
+    await waitFor(() => c.exit.length > 0);
+
+    const delivered = c.data.reduce((n, d) => n + d.text.length, 0);
+    expect(delivered).toBeLessThan(200000); // never the full stream
+  });
+
+  it('force-closes a stream that exceeds the wall-clock deadline', async () => {
+    // No per-policy wall limit; the config default must reap a long sleeper.
+    process.env.CMD_DEFAULT_WALL_MS = '200';
+    const c: Collected = { data: [], exit: [], error: [] };
+    const sm = makeManager(c);
+
+    const start = Date.now();
+    // Direct child (no shell) so SIGTERM reaps it; killing whole process
+    // groups for shell pipelines is a separate, larger change.
+    await sm.openCmdStream({ argv: ['sleep', '30'] });
+    await waitFor(() => c.exit.length > 0, 5000);
+
+    expect(Date.now() - start).toBeLessThan(5000); // killed long before 30s
+  });
+
   it('enforces the maxStreams concurrency cap', async () => {
     const c: Collected = { data: [], exit: [], error: [] };
     const sm = new StreamManager({

@@ -1,7 +1,10 @@
 node_modules/
 dist/
 *.log
+.env
 .env.local
+.env.*
+!.env.example
 .vite/
 .DS_Store
 *.swp
