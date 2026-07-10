@@ -1,0 +1,14 @@
+# Publish runtime dependencies first
+npm publish --access public --workspace=@thenewlabs/entangle-protocol
+npm publish --access public --workspace=@thenewlabs/entangle-crypto
+npm publish --access public --workspace=@thenewlabs/entangle-utils
+
+# Publish the user-facing packages
+npm publish --access public --workspace=@thenewlabs/entangle-agent
+npm publish --access public --workspace=@thenewlabs/entangle-relay
+npm publish --access public --workspace=@thenewlabs/entangle-connect
+
+# Install globally
+npm install -g @thenewlabs/entangle-agent
+npm install -g @thenewlabs/entangle-relay
+npm install -g @thenewlabs/entangle-connect

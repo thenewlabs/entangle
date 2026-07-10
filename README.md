@@ -8,25 +8,70 @@ Secure, blind relay to run your local CLI tools from anywhere. The server only f
 - Works for single commands or an interactive terminal (PTY).
 
 ## Quick Start
-1) Build
-- `npm install` (first time)
-- `npm run build`
+### From npm
+Install the three user-facing packages after publishing:
 
-2) Start the server
-- `entangle-relay` (env: `PORT=8080` by default)
+```bash
+npm install -g @thenewlabs/entangle-relay
+npm install -g @thenewlabs/entangle-agent
+npm install -g @thenewlabs/entangle-connect
+```
 
-3) Start the agent and create a capability
-- `entangle-agent create-cap`
-- `entangle-agent start --server http://localhost:8080`
-  - Output shows a web URL like: `http://localhost:8080/cap/<capId>#S=<secret>`
+### Local development
+1. Install dependencies and build:
 
-4) Invoke (CLI)
-- Interactive terminal: `entangle-connect <cap-url>`
-- Single command: `entangle-connect <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N]`
+```bash
+npm install
+npm run build
+```
+
+2. Start the relay:
+
+```bash
+entangle-relay start
+```
+
+The default address is `http://localhost:8080`.
+
+3. Start the agent with the directory restricted:
+
+```bash
+AGENT_ALLOWED_CWD=/srv/my-project \
+AGENT_DEFAULT_CWD=/srv/my-project \
+RELAY_URL=http://localhost:8080 \
+entangle-agent start
+```
+
+The agent prints a capability URL like `http://localhost:8080/cap/<capId>#S=<secret>`.
+
+4. Connect from another terminal:
+
+```bash
+entangle-connect '<cap-url>' pwd
+entangle-connect '<cap-url>'
+```
+
+The first command runs one command; the second opens an interactive terminal.
+
+### Production relay
+Point `entangle.thenewlabs.com` to the relay host with DNS, then proxy HTTPS and WebSocket traffic to port `8080`. For Caddy:
+
+```caddyfile
+entangle.thenewlabs.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Start the relay with:
+
+```bash
+PUBLIC_ORIGIN=https://entangle.thenewlabs.com \
+entangle-relay start
+```
+
+Verify it with `curl https://entangle.thenewlabs.com/__health`.
 
 Tip: All CLIs support `--output-mode text|stream-json`.
-
-## Minimal Usage (Dev mode)
 - Server: `npm run dev --workspace=@thenewlabs/entangle-relay`
 - Agent: `npm run dev --workspace=@thenewlabs/entangle-agent`
 
@@ -46,7 +91,7 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 ## Repo Layout
 - `agent/` Agent CLI + runner + PTY
 - `server/` Relay server (Express + WS)
-- `invoke/` Invoker CLI (single command or PTY)
+- `invoke/` Connect CLI (single command or PTY)
 - `packages/` Protocol, crypto, and utils libraries
 - `web/` Optional SPA terminal client
 
