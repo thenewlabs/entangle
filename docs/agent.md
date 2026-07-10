@@ -43,7 +43,7 @@ PTY Details
 —
 
 **Security & Limits**
-- CWD control: set `AGENT_ALLOWED_CWD` (colon‑separated). Real‑paths are validated to mitigate traversal/symlinks.
+- CWD control: `AGENT_DEFAULT_CWD` is the working directory and the execution boundary (defaults to the agent's launch directory). Real‑paths are validated to mitigate traversal/symlinks. This bounds only the initial cwd, not a full filesystem sandbox.
 - Arguments: checked for NULs, unpaired surrogates, count/length.
 - Output ceiling: `MAX_OUT_BYTES` (default 10MB) — agent truncates and terminates the process when exceeded.
 - Wall clock: `limits.wallMs` on `RUN` triggers SIGTERM → SIGKILL.
@@ -56,7 +56,7 @@ Concurrency
 
 **Configuration (env)**
 - `RELAY_URL`: default server URL (overridden by `--server`).
-- `AGENT_SHELL`, `AGENT_DEFAULT_CWD`, `AGENT_ALLOWED_CWD`
+- `AGENT_SHELL`, `AGENT_DEFAULT_CWD`
 - `MAX_OUT_BYTES`, `CMD_DEFAULT_WALL_MS`, `TTY_IDLE_TIMEOUT_MS`
 - `MAX_ARG_COUNT`, `MAX_ARG_LEN`
 - `LOG_LEVEL`, `OUTPUT_MODE`

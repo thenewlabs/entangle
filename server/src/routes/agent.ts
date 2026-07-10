@@ -1,12 +1,13 @@
 import type WebSocket from 'ws';
-import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode, isValidCapId, isBoundedString } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
   let agentId: string | undefined;
-  const requiredToken = getConfig().agentToken;
+  const cfg = getConfig();
+  const requiredToken = cfg.agentToken;
 
   ws.on('message', (data) => {
     try {
@@ -20,6 +21,14 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
           return;
         }
 
+        // Fail closed when configured to require authentication but no token is
+        // set: an unauthenticated control plane lets arbitrary clients register.
+        if (!requiredToken && cfg.requireAgentToken) {
+          output.warn('Rejected agent registration: authentication required but RELAY_AGENT_TOKEN is not set');
+          try { ws.close(1008, 'Agent authentication required'); } catch {}
+          return;
+        }
+
         // Gate agent registration behind a shared token when configured, so
         // random clients cannot register and squat capabilities.
         if (requiredToken && msg.token !== requiredToken) {
@@ -28,7 +37,10 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
           return;
         }
 
-        const newAgentId = routing.registerAgent(ws, msg.machineId);
+        // Bound the untrusted machineId before it enters maps/logs.
+        const machineId = isBoundedString(msg.machineId, 128) ? msg.machineId : 'unknown';
+
+        const newAgentId = routing.registerAgent(ws, machineId);
         if (!newAgentId) {
           try { ws.close(1013, 'Server at capacity'); } catch {}
           return;
@@ -42,8 +54,13 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
 
         output.info(`Agent registered: ${agentId}`);
       } else if (msg.type === 'ANNOUNCE_CAP' && agentId) {
+        // Reject malformed capability ids up front (also bounds log size).
+        if (!isValidCapId(msg.capId)) {
+          output.warn(`Ignoring ANNOUNCE_CAP with invalid capId from agent ${agentId}`);
+          return;
+        }
         const success = routing.announceCapability(agentId, msg.capId);
-        
+
         if (success) {
           output.info(`Capability announced: ${msg.capId} by agent ${agentId}`);
         } else {
@@ -52,6 +69,11 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
       } else if (msg.type === 'HEARTBEAT' && agentId) {
         routing.updateHeartbeat(agentId);
       } else if (msg.type === 'RELAY_RESPONSE' && agentId) {
+        // Reject malformed routing ids before any map lookup.
+        if (!isBoundedString(msg.socketId, 64)) {
+          output.warn('Dropping RELAY_RESPONSE with invalid socketId');
+          return;
+        }
         // Route the message to the appropriate invoker — but only if that
         // invoker belongs to a capability THIS agent owns.
         if (!routing.invokerBelongsToAgent(msg.socketId, agentId)) {

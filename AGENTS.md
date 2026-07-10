@@ -41,4 +41,4 @@
 ## Security & Configuration Tips
 - Keep the relay blind: never log plaintext payloads or secrets.
 - Respect limits and validation; avoid expanding defaults without justification.
-- Key env vars: see README and `packages/utils/src/config.ts` (e.g., `AGENT_ALLOWED_CWD`, `MAX_FRAME_BYTES`).
+- Key env vars: see README and `packages/utils/src/config.ts` (e.g., `AGENT_DEFAULT_CWD`, `MAX_FRAME_BYTES`).

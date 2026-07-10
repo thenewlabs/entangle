@@ -47,6 +47,13 @@ export interface Config {
   // Optional shared secret required to register an agent. When set, random
   // clients can no longer claim /agent/register and squat capabilities.
   agentToken: string | undefined;
+  // When true, /agent/register is refused unless a token is configured (fail
+  // closed). Defaults on in production or via RELAY_REQUIRE_AGENT_TOKEN.
+  requireAgentToken: boolean;
+  // Ceilings on the routing maps, validated like other numeric settings so a
+  // malformed value cannot disable the comparison.
+  relayMaxAgents: number;
+  relayMaxCapsPerAgent: number;
   // Passthrough allow-list of env var names a caller may set on spawned
   // processes. Everything else is dropped; children otherwise get a minimal env.
   agentEnvPassthrough: string[];
@@ -79,6 +86,18 @@ function intEnv(name: string, def: number, min = 1, max = Number.MAX_SAFE_INTEGE
 export function getConfig(): Config {
   loadConfig();
 
+  // AGENT_ALLOWED_CWD was merged into AGENT_DEFAULT_CWD (the working directory
+  // is now the boundary). Warn once if the old var is still set so it does not
+  // silently do nothing.
+  if (process.env.AGENT_ALLOWED_CWD) {
+    warnedKeys ??= new Set();
+    if (!warnedKeys.has('AGENT_ALLOWED_CWD')) {
+      warnedKeys.add('AGENT_ALLOWED_CWD');
+      // eslint-disable-next-line no-console
+      console.warn('[config] AGENT_ALLOWED_CWD is deprecated and ignored; use AGENT_DEFAULT_CWD (it is both the working directory and the execution boundary).');
+    }
+  }
+
   return {
     port: intEnv('PORT', 8080, 1, 65535),
     host: process.env.HOST || '0.0.0.0',
@@ -93,15 +112,11 @@ export function getConfig(): Config {
     relayRateRps: intEnv('RELAY_RATE_RPS', 10),
     relayBurst: intEnv('RELAY_BURST', 50),
     agentShell: process.env.AGENT_SHELL || process.env.SHELL || '/bin/bash',
-    // Default working directory is the launch directory (not $HOME), so runs
-    // start where the agent was started unless explicitly overridden.
+    // One directory knob: runs start here AND are confined here. Defaults to the
+    // directory the agent was launched in (not $HOME). The execution boundary is
+    // simply the working directory — there is no separate allow-list.
     agentDefaultCwd: process.env.AGENT_DEFAULT_CWD || LAUNCH_DIR,
-    // When no explicit allow-list is set, bind execution to the launch
-    // directory so a capability holder cannot cd/exec outside it. An explicit
-    // AGENT_ALLOWED_CWD (colon-separated) widens or changes this boundary.
-    agentAllowedCwd: process.env.AGENT_ALLOWED_CWD
-      ? process.env.AGENT_ALLOWED_CWD.split(':').filter(Boolean)
-      : [process.env.AGENT_DEFAULT_CWD || LAUNCH_DIR],
+    agentAllowedCwd: [process.env.AGENT_DEFAULT_CWD || LAUNCH_DIR],
     spawnSandbox: process.env.SPAWN_SANDBOX || 'none',
     maxArgCount: intEnv('MAX_ARG_COUNT', 256),
     maxArgLen: intEnv('MAX_ARG_LEN', 16384),
@@ -109,6 +124,12 @@ export function getConfig(): Config {
     corsOrigins: (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
     trustProxy: process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true',
     agentToken: process.env.RELAY_AGENT_TOKEN || undefined,
+    requireAgentToken:
+      process.env.RELAY_REQUIRE_AGENT_TOKEN === '1' ||
+      process.env.RELAY_REQUIRE_AGENT_TOKEN === 'true' ||
+      process.env.NODE_ENV === 'production',
+    relayMaxAgents: intEnv('RELAY_MAX_AGENTS', 10000),
+    relayMaxCapsPerAgent: intEnv('RELAY_MAX_CAPS_PER_AGENT', 256),
     agentEnvPassthrough: (process.env.AGENT_ENV_PASSTHROUGH || '').split(',').map(s => s.trim()).filter(Boolean),
   };
 }

@@ -105,9 +105,9 @@ Run From Source
 Key Environment Variables (see `packages/utils/src/config.ts`)
 - `PORT`, `HOST`, `PUBLIC_ORIGIN`, `RELAY_URL` (agent/invoke default target), `MAX_FRAME_BYTES`, `RELAY_IDLE_TIMEOUT_MS`,
   `AGENT_HEARTBEAT_MS`, `CMD_DEFAULT_WALL_MS`, `TTY_IDLE_TIMEOUT_MS`, `MAX_OUT_BYTES`, `LOG_LEVEL`, `RELAY_RATE_RPS`, `RELAY_BURST`,
-  `AGENT_SHELL`, `AGENT_DEFAULT_CWD`, `AGENT_ALLOWED_CWD`, `SPAWN_SANDBOX`, `MAX_ARG_COUNT`, `MAX_ARG_LEN`.
+  `AGENT_SHELL`, `AGENT_DEFAULT_CWD`, `SPAWN_SANDBOX`, `MAX_ARG_COUNT`, `MAX_ARG_LEN`.
 
 Operational Notes
 - The server is intentionally blind; apply OS‑level sandboxing where appropriate for the agent.
-- Use `AGENT_ALLOWED_CWD` to constrain where commands/PTY can run.
+- `AGENT_DEFAULT_CWD` is both the working directory and the execution boundary (defaults to the agent's launch directory).
 - Tune `RELAY_RATE_RPS` and `RELAY_BURST` to protect the relay in hostile environments.

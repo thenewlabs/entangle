@@ -3,11 +3,13 @@ import { getConfig } from './config.js';
 
 // getConfig() loads .env via dotenv, which does NOT override variables already
 // present in process.env, so setting them here reliably exercises the parser.
-const KEYS = ['MAX_FRAME_BYTES', 'RELAY_BURST', 'PORT', 'AGENT_DEFAULT_CWD', 'AGENT_ALLOWED_CWD'];
+const KEYS = ['MAX_FRAME_BYTES', 'RELAY_BURST', 'PORT', 'AGENT_DEFAULT_CWD', 'AGENT_ALLOWED_CWD', 'RELAY_MAX_AGENTS', 'RELAY_REQUIRE_AGENT_TOKEN'];
 
 describe('config integer validation', () => {
   afterEach(() => {
     for (const k of KEYS) delete process.env[k];
+    // Restore the harness default so requireAgentToken assertions elsewhere hold.
+    process.env.NODE_ENV = 'test';
   });
 
   it('accepts a valid integer', () => {
@@ -39,23 +41,30 @@ describe('config integer validation', () => {
 
   it('binds cwd to the launch directory when unset', () => {
     delete process.env.AGENT_DEFAULT_CWD;
-    delete process.env.AGENT_ALLOWED_CWD;
     const cfg = getConfig();
     expect(cfg.agentDefaultCwd).toBe(process.cwd());
-    // Execution boundary defaults to exactly the launch directory.
+    // Execution boundary is exactly the working directory.
     expect(cfg.agentAllowedCwd).toEqual([process.cwd()]);
   });
 
-  it('defaults the allow-list to an explicit AGENT_DEFAULT_CWD', () => {
+  it('uses AGENT_DEFAULT_CWD as both working dir and boundary', () => {
     process.env.AGENT_DEFAULT_CWD = '/srv/work';
-    delete process.env.AGENT_ALLOWED_CWD;
     const cfg = getConfig();
     expect(cfg.agentDefaultCwd).toBe('/srv/work');
     expect(cfg.agentAllowedCwd).toEqual(['/srv/work']);
   });
 
-  it('honors an explicit AGENT_ALLOWED_CWD override', () => {
-    process.env.AGENT_ALLOWED_CWD = '/home:/srv';
-    expect(getConfig().agentAllowedCwd).toEqual(['/home', '/srv']);
+  it('validates routing ceilings (bad value -> default)', () => {
+    process.env.RELAY_MAX_AGENTS = 'nope';
+    expect(getConfig().relayMaxAgents).toBe(10000);
+  });
+
+  it('requires the agent token in production or when explicitly set', () => {
+    expect(getConfig().requireAgentToken).toBe(false); // NODE_ENV=test
+    process.env.RELAY_REQUIRE_AGENT_TOKEN = '1';
+    expect(getConfig().requireAgentToken).toBe(true);
+    delete process.env.RELAY_REQUIRE_AGENT_TOKEN;
+    process.env.NODE_ENV = 'production';
+    expect(getConfig().requireAgentToken).toBe(true);
   });
 });

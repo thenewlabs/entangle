@@ -1,5 +1,24 @@
 import { DEFAULT_LIMITS } from '@thenewlabs/entangle-protocol';
 
+// Upper bound for any untrusted control-plane string (machineId, socketId, …)
+// before it is placed in a map or a log line.
+export const MAX_CONTROL_STRING = 256;
+
+/**
+ * A capability id is base64url; real ids are 43 chars. Bound the charset and
+ * length so an attacker cannot push very large or log-injecting values through
+ * the relay's routing maps. Kept permissive on the low end so short ids used in
+ * tests/tools still pass — the goal here is a DoS/injection bound, not auth.
+ */
+export function isValidCapId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+}
+
+/** A non-empty string within the control-plane length bound. */
+export function isBoundedString(value: unknown, max = MAX_CONTROL_STRING): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max;
+}
+
 export function validateArguments(argv: string[], maxCount: number, maxLen: number): void {
   if (argv.length > maxCount) {
     throw new Error(`Too many arguments: ${argv.length} > ${maxCount}`);

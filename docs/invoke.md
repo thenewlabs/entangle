@@ -41,7 +41,7 @@ Output Modes
 —
 
 **Notes & Tips**
-- `--cwd` is validated by the agent; it may be rejected if outside `AGENT_ALLOWED_CWD`.
+- `--cwd` is validated by the agent; it may be rejected if outside `AGENT_DEFAULT_CWD` (the agent's working directory / boundary).
 - `--abort-after-ms` for single commands maps to `limits.wallMs` on the agent.
 - Ctrl+C in terminal mode sends `SIGINT` to the remote PTY session.
  - You can open multiple PTY sessions by re‑invoking with the same capability URL; each is independent.

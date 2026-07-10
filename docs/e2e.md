@@ -62,7 +62,7 @@ Replay Resistance
 
 **Validation & Limits**
 - Arguments: max count/len; prohibits NULs and unpaired surrogates.
-- CWD: normalize + resolve; must be within `AGENT_ALLOWED_CWD` if configured.
+- CWD: normalize + resolve; must be within `AGENT_DEFAULT_CWD` (defaults to the agent's launch directory).
 - Output ceiling: `MAX_OUT_BYTES` (default 10MB) across stdout+stderr.
 - Wall clock: optional `limits.wallMs` triggers soft SIGTERM then SIGKILL.
 - Frames: `MAX_FRAME_BYTES` (default 1MB) enforced at relay and in `FrameReader`.
@@ -81,12 +81,12 @@ Session Semantics
 - Replay: prevented by per‑direction monotonic counters and fresh AUTH nonces.
 - Integrity: AEAD binds ciphertext to frame type via AAD.
 - Cross‑capability isolation: different `capId`/`S` derive different keys.
-- Host safety: agent executes under host user; configure OS‑level sandboxing, `AGENT_ALLOWED_CWD`, and process limits as needed.
+- Host safety: agent executes under host user; configure OS‑level sandboxing, `AGENT_DEFAULT_CWD`, and process limits as needed.
 
 —
 
 **Operational Checklist**
 - Restrict agent’s execution context: filesystem ACLs, sandbox/container, PATH hygiene.
-- Set `AGENT_ALLOWED_CWD` (colon‑separated) when exposing broad environments.
+- Set `AGENT_DEFAULT_CWD` to pin the agent's working directory / boundary when exposing broad environments.
 - Tune `RELAY_RATE_RPS` and `RELAY_BURST` for hostile networks.
 - Monitor health: `GET /__health` returns basic status.

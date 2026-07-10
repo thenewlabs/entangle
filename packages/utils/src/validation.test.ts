@@ -1,38 +1,45 @@
 import { describe, it, expect } from 'vitest';
-import { validateArguments, validateCwd, validateLimits } from './validation.js';
+import {
+  validateArguments,
+  validateCwd,
+  validateLimits,
+  isValidCapId,
+  isBoundedString,
+  MAX_CONTROL_STRING,
+} from './validation.js';
 
 describe('Validation Utils', () => {
   describe('validateArguments', () => {
     it('should accept valid arguments', () => {
       const argv = ['--help', 'test', 'file.txt'];
-      
+
       expect(() => validateArguments(argv, 10, 100)).not.toThrow();
     });
 
     it('should reject too many arguments', () => {
       const argv = new Array(10).fill('arg');
-      
+
       expect(() => validateArguments(argv, 5, 100))
         .toThrow('Too many arguments: 10 > 5');
     });
 
     it('should reject arguments that are too long', () => {
       const argv = ['x'.repeat(101)];
-      
+
       expect(() => validateArguments(argv, 10, 100))
         .toThrow('Argument too long: 101 > 100');
     });
 
     it('should reject arguments with NUL bytes', () => {
       const argv = ['test\0arg'];
-      
+
       expect(() => validateArguments(argv, 10, 100))
         .toThrow('Arguments cannot contain NUL bytes');
     });
 
     it('should reject arguments with unpaired surrogates', () => {
       const argv = ['test\uD800'];
-      
+
       expect(() => validateArguments(argv, 10, 100))
         .toThrow('Arguments cannot contain unpaired surrogates');
     });
@@ -42,8 +49,8 @@ describe('Validation Utils', () => {
     });
 
     it('should accept arguments with paired surrogates', () => {
-      const argv = ['test\uD800\uDC00']; // Valid surrogate pair
-      
+      const argv = ['test𐀀']; // Valid surrogate pair
+
       expect(() => validateArguments(argv, 10, 100)).not.toThrow();
     });
   });
@@ -60,28 +67,63 @@ describe('Validation Utils', () => {
 
     it('should accept cwd matching allowed prefix', () => {
       const prefixes = ['/home', '/srv'];
-      
+
       expect(() => validateCwd('/home/user/project', prefixes)).not.toThrow();
       expect(() => validateCwd('/srv/app', prefixes)).not.toThrow();
     });
 
     it('should reject cwd not matching any prefix', () => {
       const prefixes = ['/home', '/srv'];
-      
+
       expect(() => validateCwd('/etc/passwd', prefixes))
         .toThrow('CWD not in allowed directories: /etc/passwd');
     });
 
     it('should normalize Windows paths', () => {
       const prefixes = ['/home'];
-      
+
       expect(() => validateCwd('\\home\\user', prefixes)).not.toThrow();
     });
 
     it('should handle trailing slashes', () => {
       const prefixes = ['/home/'];
-      
+
       expect(() => validateCwd('/home/user', prefixes)).not.toThrow();
+    });
+  });
+
+  describe('control-plane field validation', () => {
+    describe('isValidCapId', () => {
+      it('accepts base64url ids (including real 43-char ids)', () => {
+        expect(isValidCapId('a'.repeat(43))).toBe(true);
+        expect(isValidCapId('cap-0')).toBe(true);
+        expect(isValidCapId('Ab_9-xYz')).toBe(true);
+      });
+
+      it('rejects non-strings, empty, oversized, and bad charsets', () => {
+        expect(isValidCapId(undefined)).toBe(false);
+        expect(isValidCapId(123 as unknown)).toBe(false);
+        expect(isValidCapId('')).toBe(false);
+        expect(isValidCapId('a'.repeat(65))).toBe(false); // over 64
+        expect(isValidCapId('has space')).toBe(false);
+        expect(isValidCapId('slash/../etc')).toBe(false);
+        expect(isValidCapId('newline\n')).toBe(false);
+      });
+    });
+
+    describe('isBoundedString', () => {
+      it('accepts a non-empty string within the bound', () => {
+        expect(isBoundedString('machine-1')).toBe(true);
+        expect(isBoundedString('x'.repeat(MAX_CONTROL_STRING))).toBe(true);
+        expect(isBoundedString('x'.repeat(10), 64)).toBe(true);
+      });
+
+      it('rejects empty, oversized, and non-strings', () => {
+        expect(isBoundedString('')).toBe(false);
+        expect(isBoundedString('x'.repeat(MAX_CONTROL_STRING + 1))).toBe(false);
+        expect(isBoundedString('x'.repeat(65), 64)).toBe(false);
+        expect(isBoundedString(null)).toBe(false);
+      });
     });
   });
 
@@ -97,7 +139,7 @@ describe('Validation Utils', () => {
         wallMs: 5000,
         maxOutBytes: 1024,
       };
-      
+
       expect(() => validateLimits(limits)).not.toThrow();
     });
 

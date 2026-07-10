@@ -31,8 +31,8 @@ async function waitFor(fn: () => boolean, ms = 4000): Promise<void> {
 describe('StreamManager exec', () => {
   const OLD = { ...process.env };
   beforeEach(() => {
-    // Unrestricted cwd by default for these tests; default to a writable dir.
-    process.env.AGENT_ALLOWED_CWD = '';
+    // Bind the agent to a writable temp dir; it is both the working directory
+    // and the execution boundary.
     process.env.AGENT_DEFAULT_CWD = tmpdir();
   });
   afterEach(() => {
@@ -76,8 +76,8 @@ describe('StreamManager exec', () => {
     expect(c.exit[0]).toBe(7);
   });
 
-  it('rejects opening a command with a cwd outside the allow-list', async () => {
-    process.env.AGENT_ALLOWED_CWD = tmpdir(); // only the temp dir is allowed
+  it('rejects opening a command with a cwd outside the boundary', async () => {
+    // Boundary is AGENT_DEFAULT_CWD (tmpdir, set in beforeEach); /etc is outside.
     const c: Collected = { data: [], exit: [], error: [] };
     const sm = makeManager(c);
     await expect(sm.openCmdStream({ argv: ['echo', 'x'], cwd: '/etc' })).rejects.toThrow(/allowed|cwd/i);
@@ -110,6 +110,25 @@ describe('StreamManager exec', () => {
     await waitFor(() => c.exit.length > 0, 5000);
 
     expect(Date.now() - start).toBeLessThan(5000); // killed long before 30s
+  });
+
+  it.skipIf(process.platform !== 'linux')('kills a CPU-bound process that exceeds the CPU limit', async () => {
+    const c: Collected = { data: [], exit: [], error: [] };
+    const sm = new StreamManager({
+      policy: { singleRun: false, maxStreams: 1, perStream: { maxCpuMs: 300 } } as any,
+      output: new OutputHandler({ mode: parseOutputMode('text') }),
+      onStreamData: () => {},
+      onStreamExit: (_sid, code) => c.exit.push(code),
+      onStreamError: (_sid, err) => c.error.push(err),
+    });
+
+    const start = Date.now();
+    // Busy loop pegs a CPU; the /proc resource monitor must reap it once
+    // accumulated CPU time passes the limit.
+    await sm.openCmdStream({ argv: ['sh', '-c', 'while :; do :; done'] });
+    await waitFor(() => c.exit.length > 0, 8000);
+
+    expect(Date.now() - start).toBeLessThan(8000);
   });
 
   it('enforces the maxStreams concurrency cap', async () => {

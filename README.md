@@ -33,10 +33,11 @@ entangle-relay start
 
 The default address is `http://localhost:8080`.
 
-3. Start the agent with the directory restricted:
+3. Start the agent. By default it binds to the directory it is launched in
+   (that directory is both the working dir and the execution boundary). Set
+   `AGENT_DEFAULT_CWD` to pin a different one:
 
 ```bash
-AGENT_ALLOWED_CWD=/srv/my-project \
 AGENT_DEFAULT_CWD=/srv/my-project \
 RELAY_URL=http://localhost:8080 \
 entangle-agent start
@@ -89,7 +90,7 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 
 ## Key Env Vars
 - Server: `PORT`, `HOST`, `MAX_FRAME_BYTES`, `RELAY_RATE_RPS`, `RELAY_BURST`, `CORS_ORIGINS`, `TRUST_PROXY`, `RELAY_AGENT_TOKEN`
-- Agent: `RELAY_URL`, `AGENT_ALLOWED_CWD`, `AGENT_DEFAULT_CWD`, `AGENT_ENV_PASSTHROUGH`, `RELAY_AGENT_TOKEN`, `MAX_OUT_BYTES`
+- Agent: `RELAY_URL`, `AGENT_DEFAULT_CWD` (working dir + execution boundary; defaults to the launch directory), `AGENT_ENV_PASSTHROUGH`, `RELAY_AGENT_TOKEN`, `MAX_OUT_BYTES`
 
 > Note: this is protocol **v2** and is not wire‑compatible with 1.0.0 — upgrade agent, relay, and connect together. Existing capabilities (`~/.entangle/capabilities.json`, shared `#S=` URLs) stay valid; password‑protected capabilities must have their password re‑set. Put the relay behind TLS and set `TRUST_PROXY=1` only when it sits behind a proxy you control.
 
@@ -111,4 +112,4 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 - `npm test` (Vitest)
 
 ---
-Use `AGENT_ALLOWED_CWD` to constrain where remote commands can run, and consider OS‑level sandboxing for the agent in sensitive environments.
+By default the agent confines runs to the directory it was launched in (override with `AGENT_DEFAULT_CWD`). This constrains only the initial working directory — it is not a filesystem sandbox — so use OS‑level sandboxing/containers for the agent in sensitive environments.

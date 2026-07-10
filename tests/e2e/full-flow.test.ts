@@ -54,9 +54,8 @@ describe('E2E Full Flow (v2 protocol)', () => {
         ...process.env,
         HOME: home,
         LOG_LEVEL: 'warn',
-        // Run inside the temp home; allow it (repo .env otherwise restricts cwd).
+        // Bind the agent to the temp home (working dir + execution boundary).
         AGENT_DEFAULT_CWD: home,
-        AGENT_ALLOWED_CWD: home,
       },
       stdio: 'ignore',
     });

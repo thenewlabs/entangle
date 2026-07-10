@@ -1,6 +1,6 @@
 import type WebSocket from 'ws';
 import { randomBytes } from 'crypto';
-import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
+import { OutputHandler, parseOutputMode, getConfig, isValidCapId } from '@thenewlabs/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -23,19 +23,17 @@ interface InvokerInfo {
   connectedAt: number;
 }
 
-// Hard ceilings so a client cannot grow the routing maps without bound.
-// Overridable via env for large deployments.
-const MAX_AGENTS = parseInt(process.env.RELAY_MAX_AGENTS || '10000', 10);
-const MAX_CAPS_PER_AGENT = parseInt(process.env.RELAY_MAX_CAPS_PER_AGENT || '256', 10);
-
 export class RoutingState {
   private agents = new Map<string, AgentInfo>();
   private invokers = new Map<string, InvokerInfo>();
   private capIdToAgent = new Map<string, string>(); // capId -> agentId
 
   registerAgent(ws: WebSocket, machineId: string): string | null {
-    if (this.agents.size >= MAX_AGENTS) {
-      output.warn(`Rejecting agent registration: at capacity (${this.agents.size}/${MAX_AGENTS})`);
+    // Ceilings come from the validated config so a malformed RELAY_MAX_* value
+    // falls back to a safe default instead of NaN (which disables the check).
+    const maxAgents = getConfig().relayMaxAgents;
+    if (this.agents.size >= maxAgents) {
+      output.warn(`Rejecting agent registration: at capacity (${this.agents.size}/${maxAgents})`);
       return null;
     }
 
@@ -62,7 +60,14 @@ export class RoutingState {
   announceCapability(agentId: string, capId: string): boolean {
     const agent = this.agents.get(agentId);
     if (!agent) return false;
-    
+
+    // Reject malformed / oversized capability ids before they enter any map or
+    // log line.
+    if (!isValidCapId(capId)) {
+      output.warn(`Rejecting capability announcement with invalid capId from agent ${agentId}`);
+      return false;
+    }
+
     // Check if another agent already owns this capId
     const existingAgentId = this.capIdToAgent.get(capId);
     if (existingAgentId && existingAgentId !== agentId) {
@@ -72,8 +77,9 @@ export class RoutingState {
 
     // Bound the per-agent capability set so a single connection cannot announce
     // unlimited capabilities into the routing maps.
-    if (!agent.capabilities.has(capId) && agent.capabilities.size >= MAX_CAPS_PER_AGENT) {
-      output.warn(`Rejecting capability ${capId}: agent ${agentId} at cap limit (${MAX_CAPS_PER_AGENT})`);
+    const maxCaps = getConfig().relayMaxCapsPerAgent;
+    if (!agent.capabilities.has(capId) && agent.capabilities.size >= maxCaps) {
+      output.warn(`Rejecting capability ${capId}: agent ${agentId} at cap limit (${maxCaps})`);
       return false;
     }
 

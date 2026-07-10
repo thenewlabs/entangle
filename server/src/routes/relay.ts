@@ -1,5 +1,5 @@
 import type WebSocket from 'ws';
-import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode, isValidCapId } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 // import { FrameReader } from '@thenewlabs/entangle-protocol';
 
@@ -11,8 +11,16 @@ export function setupRelayRoute(
   capId: string
 ): void {
   const config = getConfig();
+
+  // The capId arrives straight from the URL path; reject malformed/oversized
+  // values before any map lookup or log line.
+  if (!isValidCapId(capId)) {
+    invokerWs.close(1008, 'Invalid capability');
+    return;
+  }
+
   const agentWs = routing.findAgent(capId);
-  
+
   if (!agentWs) {
     output.warn(`Agent not found for capability: ${capId}`);
     invokerWs.close(1008, 'Capability not found');

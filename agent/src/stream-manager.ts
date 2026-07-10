@@ -2,7 +2,7 @@ import { validateArguments, validateCwd, buildChildEnv, getConfig, OutputHandler
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
-import { realpathSync } from 'fs';
+import { readFileSync, realpathSync } from 'fs';
 import { resolve as resolvePath } from 'path';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { 
@@ -11,7 +11,8 @@ import {
   StreamUsage,
   StreamPtyOptions,
   StreamExecOptions,
-  Policy
+  Policy,
+  DEFAULT_LIMITS
 } from '@thenewlabs/entangle-protocol';
 
 export interface Stream {
@@ -30,6 +31,7 @@ export interface Stream {
   };
   wallTimer?: ReturnType<typeof setTimeout>;
   idleTimer?: ReturnType<typeof setTimeout>;
+  resourceTimer?: ReturnType<typeof setInterval>;
 }
 
 interface StreamManagerOptions {
@@ -65,10 +67,11 @@ export class StreamManager extends EventEmitter {
   }
 
   /**
-   * Resolve a requested cwd and enforce the AGENT_ALLOWED_CWD allow-list.
-   * Symlinks are resolved (realpath) BEFORE the prefix check so a symlink
-   * inside an allowed dir can't point the process outside it. Throws if the
-   * resolved path is not within an allowed prefix.
+   * Resolve a requested cwd and confine it to AGENT_DEFAULT_CWD (the working
+   * directory doubles as the execution boundary). Symlinks are resolved
+   * (realpath) BEFORE the prefix check so a symlink inside the dir can't point
+   * the process outside it. Throws if the resolved path is outside the boundary.
+   * NOTE: this only constrains the initial cwd, not a full filesystem sandbox.
    */
   private resolveCwd(requestedCwd?: string): string {
     const config = getConfig();
@@ -105,47 +108,22 @@ export class StreamManager extends EventEmitter {
    * Get stream-specific limits
    */
   private getStreamLimits(): Stream['limits'] {
-    if (this.policy.perStream) {
-      const limits: Stream['limits'] = {};
-      if (this.policy.perStream.maxCpuMs !== undefined) {
-        limits.cpuMs = this.policy.perStream.maxCpuMs;
-      }
-      if (this.policy.perStream.maxMemMB !== undefined) {
-        limits.memMB = this.policy.perStream.maxMemMB;
-      }
-      if (this.policy.perStream.maxWallMs !== undefined) {
-        limits.wallMs = this.policy.perStream.maxWallMs;
-      }
-      if (this.policy.perStream.maxOutBytes !== undefined) {
-        limits.maxOutBytes = this.policy.perStream.maxOutBytes;
-      }
-      return limits;
-    }
-    
-    // Fallback to global limits divided by max streams. Where the policy is
-    // silent we still apply the operator-configured ceilings so every stream is
-    // bounded by default (a capability created without explicit limits must not
-    // run unbounded).
     const maxStreams = this.policy.maxStreams || 1;
     const config = getConfig();
     const limits: Stream['limits'] = {};
+    const perStream = this.policy.perStream;
 
-    if (this.policy.maxCpuMs !== undefined) {
-      limits.cpuMs = Math.floor(this.policy.maxCpuMs / maxStreams);
-    }
-    if (this.policy.maxMemMB !== undefined) {
-      limits.memMB = Math.floor(this.policy.maxMemMB / maxStreams);
-    }
+    // Apply defaults even when a partial per-stream policy is present.
+    const cpuMs = perStream?.maxCpuMs ?? this.policy.maxCpuMs ?? DEFAULT_LIMITS.MAX_CPU_MS;
+    const memMB = perStream?.maxMemMB ?? this.policy.maxMemMB ?? DEFAULT_LIMITS.MAX_MEM_MB;
+    limits.cpuMs = Math.max(1, Math.floor(cpuMs / maxStreams));
+    limits.memMB = Math.max(1, Math.floor(memMB / maxStreams));
 
-    const wallMs = this.policy.maxWallMs ?? config.cmdDefaultWallMs;
-    if (wallMs > 0) {
-      limits.wallMs = Math.floor(wallMs / maxStreams);
-    }
+    const wallMs = perStream?.maxWallMs ?? this.policy.maxWallMs ?? config.cmdDefaultWallMs;
+    if (wallMs > 0) limits.wallMs = Math.floor(wallMs / maxStreams);
 
-    const maxOutBytes = this.policy.maxOutBytes ?? config.maxOutBytes;
-    if (maxOutBytes > 0) {
-      limits.maxOutBytes = Math.floor(maxOutBytes / maxStreams);
-    }
+    const maxOutBytes = perStream?.maxOutBytes ?? this.policy.maxOutBytes ?? config.maxOutBytes;
+    if (maxOutBytes > 0) limits.maxOutBytes = Math.floor(maxOutBytes / maxStreams);
 
     return limits;
   }
@@ -187,6 +165,39 @@ export class StreamManager extends EventEmitter {
   private clearTimers(stream: Stream): void {
     if (stream.wallTimer) { clearTimeout(stream.wallTimer); delete stream.wallTimer; }
     if (stream.idleTimer) { clearTimeout(stream.idleTimer); delete stream.idleTimer; }
+    if (stream.resourceTimer) { clearInterval(stream.resourceTimer); delete stream.resourceTimer; }
+  }
+
+  private readProcessUsage(pid: number): { cpuMs: number; rssBytes: number } | undefined {
+    if (process.platform !== 'linux') return undefined;
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const endComm = stat.lastIndexOf(')');
+      if (endComm < 0) return undefined;
+      const fields = stat.slice(endComm + 2).trim().split(/\s+/);
+      const userTicks = Number(fields[11]);
+      const systemTicks = Number(fields[12]);
+      const rssPages = Number(fields[21]);
+      if (![userTicks, systemTicks, rssPages].every(Number.isFinite)) return undefined;
+      return { cpuMs: ((userTicks + systemTicks) * 1000) / 100, rssBytes: rssPages * 4096 };
+    } catch { return undefined; }
+  }
+
+  private armResourceMonitor(stream: Stream): void {
+    const pid = stream.process && 'pid' in stream.process ? stream.process.pid : undefined;
+    if (!pid || (!stream.limits.cpuMs && !stream.limits.memMB)) return;
+    stream.resourceTimer = setInterval(() => {
+      const usage = this.readProcessUsage(pid);
+      if (!usage) return;
+      stream.usage.cpuMs = usage.cpuMs;
+      stream.usage.rssMaxBytes = Math.max(stream.usage.rssMaxBytes, usage.rssBytes);
+      if (stream.limits.cpuMs && usage.cpuMs > stream.limits.cpuMs) {
+        this.closeStream(stream.sid, 'CPU limit exceeded');
+      } else if (stream.limits.memMB && usage.rssBytes > stream.limits.memMB * 1024 * 1024) {
+        this.closeStream(stream.sid, 'Memory limit exceeded');
+      }
+    }, 100);
+    if (typeof stream.resourceTimer.unref === 'function') stream.resourceTimer.unref();
   }
 
   /**
@@ -258,6 +269,7 @@ export class StreamManager extends EventEmitter {
     this.streams.set(sid, stream);
     this.armWallClock(stream);
     this.armIdleTimeout(stream, idleMs);
+    this.armResourceMonitor(stream);
     this.output.info(`Opened PTY stream ${sid}: cols=${options.cols}, rows=${options.rows}`);
 
     return sid;
@@ -287,6 +299,7 @@ export class StreamManager extends EventEmitter {
     // Spawn process with a validated cwd and a minimal, curated environment.
     const spawnOptions: SpawnOptions = {
       shell: false,
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.resolveCwd(options.cwd),
       env: buildChildEnv(config.agentEnvPassthrough, options.env) as NodeJS.ProcessEnv,
@@ -362,6 +375,7 @@ export class StreamManager extends EventEmitter {
 
     this.streams.set(sid, stream);
     this.armWallClock(stream);
+    this.armResourceMonitor(stream);
     // Log the command name and arg count only; full argv can carry secrets.
     this.output.info(`Opened command stream ${sid}: ${command} (${args.length} args)`);
 
@@ -452,7 +466,12 @@ export class StreamManager extends EventEmitter {
     } else {
       const childProcess = stream.process as ChildProcess;
       try {
-        childProcess.kill('SIGTERM');
+        // Signal the whole process group (child was spawned detached) so shell
+        // pipelines and descendants are torn down, not just the direct child.
+        try {
+          if (process.platform !== 'win32' && childProcess.pid) process.kill(-childProcess.pid, 'SIGTERM');
+          else childProcess.kill('SIGTERM');
+        } catch { childProcess.kill('SIGTERM'); }
         // Escalate to SIGKILL if the process has not actually exited. Note:
         // childProcess.killed only means "a signal was delivered", so it is
         // true right after SIGTERM and must NOT gate escalation. We key off the
@@ -462,7 +481,10 @@ export class StreamManager extends EventEmitter {
         const timer = setTimeout(() => {
           const current = this.streams.get(sid);
           if (current && current.endedAt === undefined) {
-            try { childProcess.kill('SIGKILL'); } catch {}
+            try {
+              if (process.platform !== 'win32' && childProcess.pid) process.kill(-childProcess.pid, 'SIGKILL');
+              else childProcess.kill('SIGKILL');
+            } catch {}
           }
         }, 5000);
         // Don't keep the event loop alive just for the escalation timer.
