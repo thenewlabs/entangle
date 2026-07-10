@@ -1,5 +1,5 @@
 import sodium from 'libsodium-wrappers-sumo';
-import { CRYPTO_PARAMS } from '@sunpix/entangle-protocol';
+import { CRYPTO_PARAMS } from '@thenewlabs/entangle-protocol';
 
 /**
  * Stream-aware AEAD encryption that handles counters separately

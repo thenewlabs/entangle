@@ -13,11 +13,11 @@
 ## Build, Test, and Dev
 - `npm install`: Install root deps and workspaces.
 - `npm run build`: Build all workspaces, then bundle `dist/{agent,invoke,server}.js`.
-- `npm run dev --workspace=@sunpix/entangle-server`: Start server in watch mode.
-- `npm run dev --workspace=@sunpix/entangle-agent`: Start agent in watch mode.
+- `npm run dev --workspace=@thenewlabs/entangle-relay`: Start server in watch mode.
+- `npm run dev --workspace=@thenewlabs/entangle-agent`: Start agent in watch mode.
 - `npm test`: Run Vitest.
 - `npm run test:coverage`: Generate V8 coverage (text, JSON, HTML).
-- Example binaries after build: `entangle-server`, `entangle-agent`, `entangle-invoke`.
+- Example binaries after build: `entangle-relay`, `entangle-agent`, `entangle-connect`.
 
 ## Coding Style & Naming
 - Language: TypeScript (Node 18+, `module`/`resolution: NodeNext`, strict on).

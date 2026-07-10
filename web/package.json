@@ -1,5 +1,5 @@
 {
-  "name": "@sunpix/entangle-web",
+  "name": "@thenewlabs/entangle-web",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -9,8 +9,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@sunpix/entangle-crypto": "^1.0.0",
-    "@sunpix/entangle-protocol": "^1.0.0",
+    "@thenewlabs/entangle-crypto": "^1.0.0",
+    "@thenewlabs/entangle-protocol": "^1.0.0",
     "cborg": "^4.5.8",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

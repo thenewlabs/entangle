@@ -1,4 +1,4 @@
-`entangle-invoke` is a small CLI that consumes a capability URL to execute a single command or open an interactive terminal through the Entangle relay.
+`entangle-connect` is a small CLI that consumes a capability URL to execute a single command or open an interactive terminal through the Entangle relay.
 
 **What It Does**
 - Parses a capability URL like `https://relay.example.com/cap/<capId>#S=<secret>`.
@@ -13,17 +13,17 @@
 - Show help (no args):
   - Prints version and usage examples.
 - Terminal mode:
-  - `entangle-invoke <cap-url> [--cwd PATH] [--cols N] [--rows N] [--output-mode text|stream-json]`
+  - `entangle-connect <cap-url> [--cwd PATH] [--cols N] [--rows N] [--output-mode text|stream-json]`
   - With no trailing args after the URL, an interactive shell opens.
 - Single command mode:
-  - `entangle-invoke <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N] [--output-mode ...]`
+  - `entangle-connect <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N] [--output-mode ...]`
   - Exits with the remote command’s exit code.
 
 Examples
 - Open an interactive shell:
-  - `entangle-invoke https://relay.example.com/cap/capId#S=secret`
+  - `entangle-connect https://relay.example.com/cap/capId#S=secret`
 - Run a command with a working directory and timeout:
-  - `entangle-invoke https://relay.example.com/cap/capId#S=secret ls -la --cwd /srv/app --abort-after-ms 30000`
+  - `entangle-connect https://relay.example.com/cap/capId#S=secret ls -la --cwd /srv/app --abort-after-ms 30000`
 
 Output Modes
 - `--output-mode text` (default): human‑readable.
@@ -52,4 +52,4 @@ Output Modes
 - Entry: `invoke/src/index.ts` (argument parsing and mode selection).
 - Single command: `invoke/src/single.ts`.
 - Terminal: `invoke/src/terminal.ts`.
-- Uses `FrameReader`, crypto from `@sunpix/entangle-crypto`, and utilities from `@sunpix/entangle-utils`.
+- Uses `FrameReader`, crypto from `@thenewlabs/entangle-crypto`, and utilities from `@thenewlabs/entangle-utils`.

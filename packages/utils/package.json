@@ -1,5 +1,5 @@
 {
-  "name": "@sunpix/entangle-utils",
+  "name": "@thenewlabs/entangle-utils",
   "version": "1.0.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,15 +16,19 @@
   },
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@sunpix/entangle-protocol": "^1.0.0",
+    "@thenewlabs/entangle-protocol": "^1.0.0",
     "dotenv": "^17.4.2",
     "pino": "^10.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
     "typescript": "^5.9.3"
-  }
+  },
+  "files": [
+    "dist"
+  ]
 }

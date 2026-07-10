@@ -11,19 +11,19 @@ import {
   StreamExitMessage,
   StreamClosedMessage,
   StreamErrorMessage,
-} from '@sunpix/entangle-protocol';
+} from '@thenewlabs/entangle-protocol';
 import {
   deriveKeys,
   streamAeadEncrypt,
   streamAeadDecrypt,
   aeadDecrypt,
-} from '@sunpix/entangle-crypto';
+} from '@thenewlabs/entangle-crypto';
 import { 
   OutputHandler,
   parseOutputMode,
   BidirectionalCounters,
   StreamCounters,
-} from '@sunpix/entangle-utils';
+} from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 import { StreamManager } from './stream-manager.js';
 import type { CapabilityInfo } from './capability.js';

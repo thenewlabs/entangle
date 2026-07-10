@@ -1,6 +1,6 @@
 import { spawn as ptySpawn, IPty } from '@homebridge/node-pty-prebuilt-multiarch';
-import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
-import { FrameType, TtyOpenMessage, TtyDataMessage, TtyResizeMessage, TtySignalMessage } from '@sunpix/entangle-protocol';
+import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
+import { FrameType, TtyOpenMessage, TtyDataMessage, TtyResizeMessage, TtySignalMessage } from '@thenewlabs/entangle-protocol';
 // import type { Session } from './session.js';
 import { resolveCwd, validateCwd } from './runner.js';
 

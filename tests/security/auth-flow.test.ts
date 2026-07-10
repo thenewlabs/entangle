@@ -7,7 +7,7 @@ import {
   extractSaltFromCapId,
   computeHmac,
   verifyHmac,
-} from '@sunpix/entangle-crypto';
+} from '@thenewlabs/entangle-crypto';
 
 describe('Security - Authentication Flow', () => {
   beforeAll(async () => {

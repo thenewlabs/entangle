@@ -1,4 +1,4 @@
-import { DEFAULT_LIMITS } from '@sunpix/entangle-protocol';
+import { DEFAULT_LIMITS } from '@thenewlabs/entangle-protocol';
 
 export function validateArguments(argv: string[], maxCount: number, maxLen: number): void {
   if (argv.length > maxCount) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { startAgent } from './agent.js';
 import { createCapability } from './capability.js';
 

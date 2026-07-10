@@ -1,21 +1,22 @@
 {
-  "name": "@sunpix/entangle-server",
+  "name": "@thenewlabs/entangle-relay",
   "version": "1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "entangle-server": "./dist/index.js"
+    "entangle-relay": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@sunpix/entangle-crypto": "^1.0.0",
-    "@sunpix/entangle-protocol": "^1.0.0",
-    "@sunpix/entangle-utils": "^1.0.0",
+    "@thenewlabs/entangle-crypto": "^1.0.0",
+    "@thenewlabs/entangle-protocol": "^1.0.0",
+    "@thenewlabs/entangle-utils": "^1.0.0",
     "commander": "^15.0.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
@@ -28,5 +29,8 @@
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3"
-  }
+  },
+  "files": [
+    "dist"
+  ]
 }

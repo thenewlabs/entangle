@@ -1,13 +1,13 @@
 import { spawn } from 'child_process';
-import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { 
   FrameType, 
   encodeFrame,
   type ExitMessage,
   type StdoutMessage,
   type StderrMessage,
-} from '@sunpix/entangle-protocol';
-import { aeadEncrypt } from '@sunpix/entangle-crypto';
+} from '@thenewlabs/entangle-protocol';
+import { aeadEncrypt } from '@thenewlabs/entangle-crypto';
 import { encode } from 'cborg';
 import { type Session, sendRelayResponse } from './session.js';
 import { realpath } from 'fs/promises';

@@ -1,6 +1,6 @@
-import { FrameType, FrameReader, encodeFrame } from '@sunpix/entangle-protocol';
-import { deriveKeys, extractSaltFromCapId, aeadDecrypt, aeadEncrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
-import { StreamCounters, BidirectionalCounters } from '@sunpix/entangle-utils/browser';
+import { FrameType, FrameReader, encodeFrame } from '@thenewlabs/entangle-protocol';
+import { deriveKeys, extractSaltFromCapId, aeadDecrypt, aeadEncrypt, computeHmac, sha256Hex } from '@thenewlabs/entangle-crypto';
+import { StreamCounters, BidirectionalCounters } from '@thenewlabs/entangle-utils/browser';
 import { encode, decode } from 'cborg';
 
 type SignalName = 'SIGINT' | 'SIGTERM' | 'SIGHUP' | 'SIGQUIT' | 'SIGKILL';
@@ -140,7 +140,7 @@ class EntangleConnection {
         return;
       } else {
         // Stream frames are sent with stream AEAD (raw bytes: nonce|cipher)
-        const { streamAeadDecrypt } = await import('@sunpix/entangle-crypto');
+        const { streamAeadDecrypt } = await import('@thenewlabs/entangle-crypto');
         const aad = encode({ type: frame.type });
         const plaintext = await streamAeadDecrypt(this.keys.K_enc, frame.payload, aad);
         decrypted = decode(plaintext) as any;
@@ -258,7 +258,7 @@ class EntangleConnection {
     const ciphertext = await (async () => {
       const plaintext = encode(msg);
       const aad = encode({ type: FrameType.STREAM_OPEN });
-      return await (await import('@sunpix/entangle-crypto')).streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+      return await (await import('@thenewlabs/entangle-crypto')).streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
     })();
     
     const frame = encodeFrame(FrameType.STREAM_OPEN, ciphertext);
@@ -276,7 +276,7 @@ class EntangleConnection {
     const aad = encode({ type: FrameType.STREAM_DATA });
     const plaintext = encode(msg);
     (async () => {
-      const { streamAeadEncrypt } = await import('@sunpix/entangle-crypto');
+      const { streamAeadEncrypt } = await import('@thenewlabs/entangle-crypto');
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_DATA, ct));
       this.streamCounters.increment(sid, 'outgoing');
@@ -290,7 +290,7 @@ class EntangleConnection {
     const aad = encode({ type: FrameType.STREAM_SIGNAL });
     const plaintext = encode(msg);
     (async () => {
-      const { streamAeadEncrypt } = await import('@sunpix/entangle-crypto');
+      const { streamAeadEncrypt } = await import('@thenewlabs/entangle-crypto');
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_SIGNAL, ct));
       this.streamCounters.increment(sid, 'outgoing');
@@ -304,7 +304,7 @@ class EntangleConnection {
     const aad = encode({ type: FrameType.STREAM_CLOSE });
     const plaintext = encode(msg);
     (async () => {
-      const { streamAeadEncrypt } = await import('@sunpix/entangle-crypto');
+      const { streamAeadEncrypt } = await import('@thenewlabs/entangle-crypto');
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_CLOSE, ct));
       this.streamCounters.increment(sid, 'outgoing');

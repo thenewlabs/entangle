@@ -13,7 +13,7 @@ The Entangle Server is a lightweight relay and static web host. It never sees pl
 
 **How To Use**
 - Run the server:
-  - `entangle-server [--output-mode text|stream-json]`
+  - `entangle-relay [--output-mode text|stream-json]`
 
 Health Check
 - `curl http://localhost:8080/__health`

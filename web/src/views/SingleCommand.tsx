@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac } from '@sunpix/entangle-crypto';
-import { FrameType, FrameReader, encodeFrame } from '@sunpix/entangle-protocol';
-import { BidirectionalCounters } from '@sunpix/entangle-utils/browser';
+import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac } from '@thenewlabs/entangle-crypto';
+import { FrameType, FrameReader, encodeFrame } from '@thenewlabs/entangle-protocol';
+import { BidirectionalCounters } from '@thenewlabs/entangle-utils/browser';
 import { encode, decode } from 'cborg';
 
 interface SingleCommandViewProps {

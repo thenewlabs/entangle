@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
-import { FrameType, FrameReader, encodeFrame, StdoutMessage, StderrMessage, ExitMessage } from '@sunpix/entangle-protocol';
-import { OutputHandler, parseOutputMode, BidirectionalCounters } from '@sunpix/entangle-utils';
+import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@thenewlabs/entangle-crypto';
+import { FrameType, FrameReader, encodeFrame, StdoutMessage, StderrMessage, ExitMessage } from '@thenewlabs/entangle-protocol';
+import { OutputHandler, parseOutputMode, BidirectionalCounters } from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });

@@ -4,7 +4,7 @@ import {
   FrameType, 
   FrameReader, 
   encodeFrame,
-} from '@sunpix/entangle-protocol';
+} from '@thenewlabs/entangle-protocol';
 import {
   deriveKeys,
   extractSaltFromCapId,
@@ -12,7 +12,7 @@ import {
   aeadDecrypt,
   computeHmac,
   initCrypto,
-} from '@sunpix/entangle-crypto';
+} from '@thenewlabs/entangle-crypto';
 import { encode, decode } from 'cborg';
 
 export class RelayClient {

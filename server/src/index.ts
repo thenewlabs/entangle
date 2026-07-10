@@ -5,7 +5,7 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { setupAgentRoute } from './routes/agent.js';
 import { setupRelayRoute } from './routes/relay.js';
 import { RoutingState } from './state/routing.js';
@@ -124,7 +124,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const program = new Command();
 
   program
-    .name('entangle-server')
+    .name('entangle-relay')
     .description('Entangle blind relay server')
     .version(getVersionInfo())
     .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');

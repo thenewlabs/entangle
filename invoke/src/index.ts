@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { getVersionInfo, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { openTerminal } from './terminal.js';
 import { runSingle } from './single.js';
 
@@ -34,7 +34,7 @@ function parseCapUrl(u: string): { host: string; capId: string; S: string; passw
 const program = new Command();
 
 program
-  .name('entangle-invoke')
+  .name('entangle-connect')
   .description('Invoke commands or terminal sessions on remote capabilities')
   .version(getVersionInfo())
   .argument('<cap-url>', 'Capability URL (e.g., https://suncoder.dev/cap/capId#S=secret)')
@@ -91,15 +91,15 @@ program
 program.addHelpText('after', `
 Examples:
   # Interactive terminal
-  entangle-invoke https://suncoder.dev/cap/capId#S=secret
+  entangle-connect https://suncoder.dev/cap/capId#S=secret
 
   # Single command
-  entangle-invoke https://suncoder.dev/cap/capId#S=secret ls -la
+  entangle-connect https://suncoder.dev/cap/capId#S=secret ls -la
 
   # With custom working directory
-  entangle-invoke https://suncoder.dev/cap/capId#S=secret --cwd /home/user ls -la
+  entangle-connect https://suncoder.dev/cap/capId#S=secret --cwd /home/user ls -la
 
   # Terminal with custom size
-  entangle-invoke https://suncoder.dev/cap/capId#S=secret --cols 120 --rows 40`);
+  entangle-connect https://suncoder.dev/cap/capId#S=secret --cols 120 --rows 40`);
 
 program.parse();

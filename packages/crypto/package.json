@@ -1,16 +1,17 @@
 {
-  "name": "@sunpix/entangle-crypto",
+  "name": "@thenewlabs/entangle-crypto",
   "version": "1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
-    "@sunpix/entangle-protocol": "^1.0.0",
+    "@thenewlabs/entangle-protocol": "^1.0.0",
     "cborg": "^4.5.8",
     "libsodium-wrappers-sumo": "^0.8.4"
   },
@@ -18,5 +19,8 @@
     "@types/libsodium-wrappers-sumo": "^0.8.2",
     "@types/node": "^20.19.43",
     "typescript": "^5.9.3"
-  }
+  },
+  "files": [
+    "dist"
+  ]
 }

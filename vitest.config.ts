@@ -14,9 +14,9 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@sunpix/entangle-protocol': resolve(__dirname, './packages/protocol/src'),
-      '@sunpix/entangle-crypto': resolve(__dirname, './packages/crypto/src'),
-      '@sunpix/entangle-utils': resolve(__dirname, './packages/utils/src'),
+      '@thenewlabs/entangle-protocol': resolve(__dirname, './packages/protocol/src'),
+      '@thenewlabs/entangle-crypto': resolve(__dirname, './packages/crypto/src'),
+      '@thenewlabs/entangle-utils': resolve(__dirname, './packages/utils/src'),
     },
   },
 });

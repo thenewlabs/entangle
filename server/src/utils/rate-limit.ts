@@ -1,4 +1,4 @@
-import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 

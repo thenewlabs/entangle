@@ -8,9 +8,9 @@ import {
   aeadDecrypt,
   computeHmac,
   verifyHmac,
-} from '@sunpix/entangle-crypto';
-import { validateArguments, validateCwd, validateLimits } from '@sunpix/entangle-utils';
-import { FrameType } from '@sunpix/entangle-protocol';
+} from '@thenewlabs/entangle-crypto';
+import { validateArguments, validateCwd, validateLimits } from '@thenewlabs/entangle-utils';
+import { FrameType } from '@thenewlabs/entangle-protocol';
 
 describe('Security - Input Validation & Attack Prevention', () => {
   beforeAll(async () => {

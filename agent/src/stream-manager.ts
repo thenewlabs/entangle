@@ -1,4 +1,4 @@
-import { validateArguments, getConfig, OutputHandler } from '@sunpix/entangle-utils';
+import { validateArguments, getConfig, OutputHandler } from '@thenewlabs/entangle-utils';
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
@@ -10,7 +10,7 @@ import {
   StreamPtyOptions,
   StreamExecOptions,
   Policy
-} from '@sunpix/entangle-protocol';
+} from '@thenewlabs/entangle-protocol';
 
 export interface Stream {
   sid: string;

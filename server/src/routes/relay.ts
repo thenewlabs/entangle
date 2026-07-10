@@ -1,7 +1,7 @@
 import type WebSocket from 'ws';
-import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
-// import { FrameReader } from '@sunpix/entangle-protocol';
+// import { FrameReader } from '@thenewlabs/entangle-protocol';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 

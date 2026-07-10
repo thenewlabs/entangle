@@ -95,11 +95,11 @@ Validation & Limits
 
 **CLI & Binaries**
 - Agent: `entangle-agent`
-- Server: `entangle-server`
-- Invoke: `entangle-invoke`
+- Server: `entangle-relay`
+- Invoke: `entangle-connect`
 
 Run From Source
-- Dev: `npm run dev --workspace=@sunpix/entangle-server` (server), `npm run dev --workspace=@sunpix/entangle-agent` (agent).
+- Dev: `npm run dev --workspace=@thenewlabs/entangle-relay` (server), `npm run dev --workspace=@thenewlabs/entangle-agent` (agent).
 - Build: `npm run build` creates bundled binaries in `dist/` (`agent.js`, `server.js`, `invoke.js`).
 
 Key Environment Variables (see `packages/utils/src/config.ts`)

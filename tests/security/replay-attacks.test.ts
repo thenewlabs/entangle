@@ -8,9 +8,9 @@ import {
   aeadDecrypt,
   computeHmac,
   verifyHmac,
-} from '@sunpix/entangle-crypto';
-import { FrameType } from '@sunpix/entangle-protocol';
-import { MonotonicCounter, BidirectionalCounters } from '@sunpix/entangle-utils';
+} from '@thenewlabs/entangle-crypto';
+import { FrameType } from '@thenewlabs/entangle-protocol';
+import { MonotonicCounter, BidirectionalCounters } from '@thenewlabs/entangle-utils';
 import { encode } from 'cborg';
 
 describe('Security - Replay Attack Prevention', () => {

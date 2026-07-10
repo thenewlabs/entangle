@@ -10,7 +10,7 @@ import {
   type TtyResizeMessage,
   type TtySignalMessage,
   ErrorCode,
-} from '@sunpix/entangle-protocol';
+} from '@thenewlabs/entangle-protocol';
 import {
   deriveKeys,
   extractSaltFromCapId,
@@ -18,20 +18,20 @@ import {
   aeadDecrypt,
   verifyHmac,
   hashPolicy,
-} from '@sunpix/entangle-crypto';
+} from '@thenewlabs/entangle-crypto';
 import { 
   OutputHandler,
   parseOutputMode,
   BidirectionalCounters,
   validateArguments,
   getConfig,
-} from '@sunpix/entangle-utils';
+} from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 import { runCommand } from './runner.js';
 import { PtyManager } from './pty.js';
 import type { CapabilityInfo } from './capability.js';
 import { handleMultiStreamFrame } from './multi-session.js';
-import { StreamCounters } from '@sunpix/entangle-utils';
+import { StreamCounters } from '@thenewlabs/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 

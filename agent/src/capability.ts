@@ -1,10 +1,10 @@
-import { generateCapId, generateSecret, initCrypto } from '@sunpix/entangle-crypto';
-import { type Policy } from '@sunpix/entangle-protocol';
+import { generateCapId, generateSecret, initCrypto } from '@thenewlabs/entangle-crypto';
+import { type Policy } from '@thenewlabs/entangle-protocol';
 import { promises as fs } from 'fs';
 import { chmod, stat } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
-import { OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 

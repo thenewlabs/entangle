@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { getConfig, OutputHandler, parseOutputMode } from '@sunpix/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { handleInvokerConnection } from './session.js';
 import { loadCapabilities, createCapability } from './capability.js';
 

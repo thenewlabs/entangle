@@ -3,7 +3,7 @@ import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
 import { hmac } from '@noble/hashes/hmac';
 import { encode, decode } from 'cborg';
-import { CRYPTO_PARAMS } from '@sunpix/entangle-protocol';
+import { CRYPTO_PARAMS } from '@thenewlabs/entangle-protocol';
 
 export interface DerivedKeys {
   K_enc: Uint8Array;

@@ -1,5 +1,5 @@
 {
-  "name": "@sunpix/entangle",
+  "name": "@thenewlabs/entangle",
   "version": "1.0.0",
   "private": true,
   "description": "Secure blind relay for exposing CLI tools",
@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces && node scripts/build-dist.js",
-    "dev": "npm run dev --workspace=@sunpix/entangle-server",
+    "dev": "npm run dev --workspace=@thenewlabs/entangle-relay",
     "test": "vitest run",
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",

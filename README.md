@@ -13,7 +13,7 @@ Secure, blind relay to run your local CLI tools from anywhere. The server only f
 - `npm run build`
 
 2) Start the server
-- `entangle-server` (env: `PORT=8080` by default)
+- `entangle-relay` (env: `PORT=8080` by default)
 
 3) Start the agent and create a capability
 - `entangle-agent create-cap`
@@ -21,14 +21,14 @@ Secure, blind relay to run your local CLI tools from anywhere. The server only f
   - Output shows a web URL like: `http://localhost:8080/cap/<capId>#S=<secret>`
 
 4) Invoke (CLI)
-- Interactive terminal: `entangle-invoke <cap-url>`
-- Single command: `entangle-invoke <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N]`
+- Interactive terminal: `entangle-connect <cap-url>`
+- Single command: `entangle-connect <cap-url> <cmd> [args...] [--cwd PATH] [--abort-after-ms N]`
 
 Tip: All CLIs support `--output-mode text|stream-json`.
 
 ## Minimal Usage (Dev mode)
-- Server: `npm run dev --workspace=@sunpix/entangle-server`
-- Agent: `npm run dev --workspace=@sunpix/entangle-agent`
+- Server: `npm run dev --workspace=@thenewlabs/entangle-relay`
+- Agent: `npm run dev --workspace=@thenewlabs/entangle-agent`
 
 ## Security Highlights
 - AEAD (XChaCha20‑Poly1305) with counters prevents replay and reordering.

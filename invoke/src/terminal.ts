@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
-import { FrameType, FrameReader, encodeFrame, TtyDataMessage, TtyExitMessage } from '@sunpix/entangle-protocol';
-import { OutputHandler, parseOutputMode, BidirectionalCounters } from '@sunpix/entangle-utils';
+import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@thenewlabs/entangle-crypto';
+import { FrameType, FrameReader, encodeFrame, TtyDataMessage, TtyExitMessage } from '@thenewlabs/entangle-protocol';
+import { OutputHandler, parseOutputMode, BidirectionalCounters } from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 // import * as readline from 'readline';
 

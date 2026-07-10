@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@sunpix/entangle-crypto';
-import { FrameType, FrameReader, encodeFrame } from '@sunpix/entangle-protocol';
-import { BidirectionalCounters } from '@sunpix/entangle-utils/browser';
+import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@thenewlabs/entangle-crypto';
+import { FrameType, FrameReader, encodeFrame } from '@thenewlabs/entangle-protocol';
+import { BidirectionalCounters } from '@thenewlabs/entangle-utils/browser';
 import { encode, decode } from 'cborg';
 import 'xterm/css/xterm.css';
 

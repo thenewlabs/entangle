@@ -4,7 +4,7 @@ import { WebSocket } from 'ws';
 import { join } from 'path';
 import { writeFileSync, chmodSync, mkdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
-import { generateCapId, generateSecret, deriveKeys, extractSaltFromCapId } from '@sunpix/entangle-crypto';
+import { generateCapId, generateSecret, deriveKeys, extractSaltFromCapId } from '@thenewlabs/entangle-crypto';
 import { startServer } from '../../server/src/index.js';
 
 describe.skip('E2E Full Flow', () => {

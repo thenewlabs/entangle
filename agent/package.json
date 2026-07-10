@@ -1,10 +1,10 @@
 {
-  "name": "@sunpix/entangle-agent",
+  "name": "@thenewlabs/entangle-agent",
   "version": "1.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "entangle-agent": "./dist/index.js"
+    "entangle-agent": "dist/index.js"
   },
   "files": [
     "dist"
@@ -17,9 +17,9 @@
   },
   "dependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
-    "@sunpix/entangle-crypto": "^1.0.0",
-    "@sunpix/entangle-protocol": "^1.0.0",
-    "@sunpix/entangle-utils": "^1.0.0",
+    "@thenewlabs/entangle-crypto": "^1.0.0",
+    "@thenewlabs/entangle-protocol": "^1.0.0",
+    "@thenewlabs/entangle-utils": "^1.0.0",
     "cborg": "^4.5.8",
     "commander": "^15.0.0",
     "ws": "^8.21.0"
