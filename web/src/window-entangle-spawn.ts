@@ -297,6 +297,18 @@ class EntangleConnection {
     return child;
   }
 
+  /**
+   * Open a forwarded-channel ('pipe') stream to a named agent-side endpoint.
+   * Mirrors the Node connect client's `openPipe`: sends STREAM_OPEN
+   * { v:1, kind:'open', sid, mode:'pipe', pipe:{ name } }, rebinds the sid on
+   * `opened`, and routes inbound STREAM_DATA (channel 'stdout') to onData.
+   * Returns an ergonomic Uint8Array duplex handle.
+   */
+  openPipe(name: string): BrowserPipe {
+    const child = new BrowserChildProcess(this, '', [], {}, 'pipe', undefined, name);
+    return new BrowserPipe(child);
+  }
+
   async _openChild(child: BrowserChildProcess): Promise<void> {
     await this.ensureConnected();
     if (!this.ws || !this.keys) throw new Error('Not connected');
@@ -324,6 +336,14 @@ class EntangleConnection {
         mode: 'pty' as const,
         pty: { cols: child._ptyOptions!.cols, rows: child._ptyOptions!.rows },
         ...(child._options.cwd ? { exec: { argv: [], cwd: child._options.cwd } } : {}),
+      };
+    } else if (child._mode === 'pipe') {
+      openMsg = {
+        v: 1 as const,
+        kind: 'open' as const,
+        sid,
+        mode: 'pipe' as const,
+        pipe: { name: child._pipeName! },
       };
     } else {
       const argv = child._options.shell
@@ -420,8 +440,9 @@ class BrowserChildProcess {
     public _command: string,
     public _args: string[],
     public _options: SpawnOptions,
-    public _mode: 'cmd' | 'pty' = 'cmd',
-    public _ptyOptions?: { cols: number; rows: number }
+    public _mode: 'cmd' | 'pty' | 'pipe' = 'cmd',
+    public _ptyOptions?: { cols: number; rows: number },
+    public _pipeName?: string
   ) {
     this._sid = crypto.getRandomValues(new Uint8Array(8)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '');
     // Initiate open asap
@@ -446,6 +467,7 @@ class BrowserChildProcess {
       this.conn._sendClose(this._sid);
     },
   };
+  on(event: 'opened', handler: () => void): this;
   on(event: 'data', handler: DataHandler): this;
   on(event: 'exit', handler: ExitHandler): this;
   on(event: 'error', handler: ErrorHandler): this;
@@ -469,6 +491,32 @@ class BrowserChildProcess {
   _onExit(code: number | null, signal: string | null) { this.emitter.emit('exit', code, signal); }
   _onError(message: string) { this.emitter.emit('error', message); }
   _onClosed() {}
+}
+
+/**
+ * Ergonomic Uint8Array duplex over a `pipe`-mode stream — the browser sibling of
+ * the Node connect client's pipe `StreamHandle`. Data is bytes in both
+ * directions (no channels, no exit codes to speak of): `write()` sends
+ * STREAM_DATA, inbound STREAM_DATA (channel 'stdout') fans out to onData
+ * callbacks, socket close surfaces as onClose, and STREAM_ERROR as onError.
+ * `@locus/web`'s entangle-transport adapts this to its `DuplexBytes` seam.
+ */
+class BrowserPipe {
+  constructor(private child: BrowserChildProcess) {}
+  /** Underlying stream id (provisional until `onOpen`, then agent-assigned). */
+  get sid(): string { return this.child._sid; }
+  /** Send bytes to the remote endpoint. */
+  write(chunk: Uint8Array): void { this.child.stdin.write(chunk); }
+  /** Register an inbound-bytes handler (may be called multiple times). */
+  onData(cb: (chunk: Uint8Array) => void): this { this.child.on('data', (c: Uint8Array) => cb(c)); return this; }
+  /** Fires once the agent confirms the pipe is bridged (STREAM_OPENED). */
+  onOpen(cb: () => void): this { this.child.on('opened', cb); return this; }
+  /** Fires when the pipe closes (socket close → STREAM_EXIT). */
+  onClose(cb: () => void): this { this.child.on('exit', () => cb()); return this; }
+  /** Fires on a bridge/allow-list error (e.g. Unknown pipe: <name>). */
+  onError(cb: (message: string) => void): this { this.child.on('error', cb); return this; }
+  /** Tear the pipe down (STREAM_CLOSE). */
+  close(): void { this.child.close(); }
 }
 
 function parseCapabilityFromUrl(): { capId: string; S: string } | null {
@@ -495,12 +543,15 @@ declare global {
     // Expose a lazy erroring spawn
     entangle.spawn = () => { throw new Error('Capability not found in URL'); };
     entangle.exec = async () => { throw new Error('Capability not found in URL'); };
+    entangle.openPipe = () => { throw new Error('Capability not found in URL'); };
     return;
   }
   const conn = new EntangleConnection(cap.capId, cap.S);
   entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
   // Interactive PTY session (used by the terminal UI).
   entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string }) => conn.spawnPty(options);
+  // Forwarded channel: open a named agent-side pipe as a byte duplex.
+  entangle.openPipe = (name: string) => conn.openPipe(name);
 
   // Helper: execute a command line via shell and await completion
   entangle.execCommand = async (
