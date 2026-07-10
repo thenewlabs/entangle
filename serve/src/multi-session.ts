@@ -26,8 +26,10 @@ import {
   StreamCounters,
 } from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
+import { randomBytes } from 'crypto';
 import { StreamManager } from './stream-manager.js';
 import type { CapabilityInfo } from './capability.js';
+import type { SharedSession } from './shared-session.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -46,6 +48,11 @@ export interface MultiSession {
   nonceC?: string;
   streamManager?: StreamManager;
   terminated?: boolean;
+  // Shared-terminal mode: a single PTY that every viewer attaches to. When set,
+  // a `pty` STREAM_OPEN attaches to it instead of spawning a fresh shell, and
+  // `sharedViewers` tracks the sids bound to it so their data/close route there.
+  sharedSession?: SharedSession | undefined;
+  sharedViewers?: Set<string>;
 }
 
 // Tear down a single invoker session on a protocol/counter error WITHOUT
@@ -97,11 +104,65 @@ async function sendEncrypted(
   }
 }
 
+// Attach a viewer to the shared terminal instead of spawning a new shell.
+// Ordering matters: the 'opened' confirmation and the replay snapshot must be
+// the first frames the client sees for this sid, so any live output produced
+// during setup is buffered and flushed only after they are sent.
+async function handleSharedAttach(
+  session: MultiSession,
+  _message: StreamOpenMessage
+): Promise<void> {
+  const shared = session.sharedSession!;
+  const sid = randomBytes(8).toString('base64url');
+  if (!session.sharedViewers) session.sharedViewers = new Set<string>();
+  session.sharedViewers.add(sid);
+
+  let live = false;
+  const pending: Uint8Array[] = [];
+
+  const { replay } = shared.attach({
+    sid,
+    onData: (chunk) => {
+      if (!live) { pending.push(chunk); return; }
+      void sendStreamData(session, sid, chunk, 'stdout');
+    },
+    onExit: (code, signal) => {
+      session.sharedViewers?.delete(sid);
+      void sendStreamExit(session, sid, code, signal);
+    },
+  });
+
+  // Confirm the open with the agent-assigned sid (first frame for this sid).
+  const openedMsg: StreamOpenedMessage = {
+    ctr: 0,
+    msg: { v: 1, kind: 'opened', sid, startedAt: Date.now(), mode: 'pty' },
+  };
+  await sendEncrypted(session, FrameType.STREAM_OPEN, openedMsg, sid);
+
+  // Sync the late joiner's screen with the recent scrollback.
+  if (replay.length > 0) {
+    await sendStreamData(session, sid, replay, 'stdout');
+  }
+
+  // Go live and flush anything captured during setup, preserving order.
+  live = true;
+  for (const chunk of pending) {
+    await sendStreamData(session, sid, chunk, 'stdout');
+  }
+}
+
 // Handle stream open request
 async function handleStreamOpen(
   session: MultiSession,
   message: StreamOpenMessage
 ): Promise<void> {
+  // In shared-terminal mode a PTY open attaches to the one shared shell; a
+  // 'cmd' open still spawns normally so one-off `connect <url> ls` keeps working.
+  if (session.sharedSession && message.msg?.mode === 'pty') {
+    await handleSharedAttach(session, message);
+    return;
+  }
+
   if (!session.streamManager) {
     session.streamManager = new StreamManager({
       policy: session.cap.policy,
@@ -175,6 +236,12 @@ async function handleStreamData(
   session: MultiSession,
   message: StreamDataMessage
 ): Promise<void> {
+  // Collaborative input: a viewer's keystrokes merge into the shared shell.
+  if (session.sharedViewers?.has(message.msg.sid)) {
+    session.sharedSession?.write(message.msg.chunk);
+    return;
+  }
+
   if (!session.streamManager) {
     await sendStreamError(session, message.msg.sid, 'No active streams');
     return;
@@ -192,6 +259,10 @@ async function handleStreamResize(
   session: MultiSession,
   message: StreamResizeMessage
 ): Promise<void> {
+  // The host terminal owns the shared shell's size; ignore viewer resizes so
+  // participants don't fight over the dimensions.
+  if (session.sharedViewers?.has(message.msg.sid)) return;
+
   if (!session.streamManager) {
     await sendStreamError(session, message.msg.sid, 'No active streams');
     return;
@@ -213,6 +284,11 @@ async function handleStreamSignal(
   session: MultiSession,
   message: StreamSignalMessage
 ): Promise<void> {
+  // In the shared shell, control chars (e.g. Ctrl-C) arrive as raw data and are
+  // written through; explicit signal frames from a viewer are ignored so one
+  // participant can't kill the shell out from under the others.
+  if (session.sharedViewers?.has(message.msg.sid)) return;
+
   if (!session.streamManager) {
     await sendStreamError(session, message.msg.sid, 'No active streams');
     return;
@@ -230,6 +306,20 @@ async function handleStreamClose(
   session: MultiSession,
   message: StreamCloseMessage
 ): Promise<void> {
+  // A viewer leaving the shared shell just detaches — the shell keeps running
+  // for everyone else.
+  if (session.sharedViewers?.has(message.msg.sid)) {
+    session.sharedViewers.delete(message.msg.sid);
+    session.sharedSession?.detach(message.msg.sid);
+    const closedMsg: StreamClosedMessage = {
+      ctr: 0,
+      msg: { v: 1, kind: 'closed', sid: message.msg.sid },
+    };
+    await sendEncrypted(session, FrameType.STREAM_CLOSE, closedMsg, message.msg.sid);
+    session.streamCounters.removeStream(message.msg.sid);
+    return;
+  }
+
   if (!session.streamManager) {
     return;
   }
@@ -458,6 +548,13 @@ export async function handleMultiStreamFrame(
 
 // Clean up session
 export function cleanupMultiSession(session: MultiSession): void {
+  // Detach this invoker's viewers from the shared shell without killing it.
+  if (session.sharedViewers && session.sharedSession) {
+    for (const sid of session.sharedViewers) {
+      session.sharedSession.detach(sid);
+    }
+    session.sharedViewers.clear();
+  }
   if (session.streamManager) {
     session.streamManager.closeAllStreams('Session cleanup');
   }

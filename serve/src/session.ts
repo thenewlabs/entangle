@@ -27,6 +27,7 @@ import {
 import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
 import type { CapabilityInfo } from './capability.js';
+import type { SharedSession } from './shared-session.js';
 import { handleMultiStreamFrame, cleanupMultiSession } from './multi-session.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
@@ -50,6 +51,7 @@ export interface Session {
   nonceB?: string;
   nonceC?: string;
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
+  sharedSession?: SharedSession | undefined; // set when serving a shared terminal
 }
 
 // Helper to send wrapped relay responses
@@ -69,7 +71,8 @@ export function handleInvokerConnection(
   agentWs: WebSocket,
   socketId: string,
   cap: CapabilityInfo,
-  passwordHash?: string
+  passwordHash?: string,
+  sharedSession?: SharedSession
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -80,6 +83,7 @@ export function handleInvokerConnection(
     passwordVerified: !passwordHash, // If no password, consider it verified
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
+    sharedSession,
   };
 
   const reader = new FrameReader();
@@ -139,6 +143,8 @@ async function handleFrame(
         authenticated: true,
         requiresPassword: session.requiresPassword,
         passwordVerified: session.passwordVerified,
+        sharedSession: session.sharedSession,
+        sharedViewers: new Set<string>(),
       };
     }
     // Keep dynamic gating fields fresh (password may be verified after streams open attempts)

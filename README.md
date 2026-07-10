@@ -6,6 +6,7 @@ Secure, blind relay to run your local CLI tools from anywhere. The server only f
 - Share a capability URL to grant access temporarily.
 - End‑to‑end encryption; server sees only opaque frames.
 - Works for single commands or an interactive terminal (PTY).
+- Run in a terminal, everyone with the URL attaches to **one shared shell** for pairing (default). See [Shared terminals](docs/shared.md).
 
 ## Quick Start
 ### From npm
@@ -43,7 +44,7 @@ RELAY_URL=http://localhost:8080 \
 entangle-serve start
 ```
 
-The agent prints a capability URL like `http://localhost:8080/cap/<capId>#S=<secret>`.
+The agent prints a capability URL like `http://localhost:8080/cap/<capId>#S=<secret>`. When launched from a real terminal it opens a **shared** shell by default: everyone who opens that URL attaches to the same live shell (pass `--headless` for a private per‑connection shell). Anyone with the URL can type into it, so add `--password` and treat the URL as a live credential — see [Shared terminals](docs/shared.md).
 
 4. Connect from another terminal:
 
@@ -107,6 +108,7 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 - Agent: `docs/agent.md`
 - Server: `docs/server.md`
 - Connect CLI: `docs/connect.md`
+- Shared terminals: `docs/shared.md`
 
 ## Testing
 - `npm test` (Vitest)

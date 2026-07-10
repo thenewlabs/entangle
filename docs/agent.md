@@ -12,8 +12,9 @@ Entangle Agent runs on your machine and executes commands or hosts an interactiv
 
 **How To Use**
 - Install/build, then run:
-  - `entangle-serve start [--server <url>] [--capability <url>] [--output-mode text|stream-json]`
+  - `entangle-serve start [url] [--server <url>] [--capability <url>] [--password [pw]] [--shared] [--headless] [--output-mode text|stream-json]`
   - `entangle-serve create-cap [--single-run] [--output-mode ...]`
+- Shared terminal: when launched in a real terminal (text mode), `start` opens **one shared shell** that every invoker attaches to, rendered inside a bordered session frame (title bar with the live viewer count, bottom bar with the join URL). `--shared` forces it, `--headless` disables it (per‑connection shells). See [Shared terminals](shared.md).
 
 Examples
 - Start agent targeting a public relay:
