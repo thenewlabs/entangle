@@ -51,6 +51,10 @@ export const PolicySchema = z.object({
     maxWallMs: z.number().optional(),
     maxOutBytes: z.number().optional(),
   }).optional(),
+  // Advertised pipe names (forwarded-channel allow-list). Hashed into the AUTH2
+  // policyHash so the invoker can verify which named endpoints the capability
+  // exposes. Endpoint targets stay agent-side; only the names are advertised.
+  pipes: z.array(z.string()).optional(),
 });
 
 export type Policy = z.infer<typeof PolicySchema>;
@@ -60,7 +64,7 @@ export interface Frame {
   payload: Uint8Array;
 }
 
-export type StreamMode = 'pty' | 'cmd';
+export type StreamMode = 'pty' | 'cmd' | 'pipe';
 
 export interface StreamMetadata {
   sid: string; // Stream ID
@@ -80,6 +84,12 @@ export interface StreamExecOptions {
   cwd?: string;
   env?: Record<string, string>;
   stdin?: boolean;
+}
+
+export interface StreamPipeOptions {
+  // Name of a registered forwarded channel (allow-list key). The agent resolves
+  // it to a local unix/tcp endpoint; the client never sees the target.
+  name: string;
 }
 
 export interface StreamUsage {

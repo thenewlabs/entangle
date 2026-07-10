@@ -18,6 +18,78 @@ export function loadConfig(): void {
   config({ path: envPath });
 }
 
+/**
+ * A resolved forwarded-channel (pipe) target. Either a unix domain socket path
+ * or a TCP host:port. Only registered endpoints are reachable — an allow-list in
+ * the spirit of the existing cwd boundary.
+ */
+export type PipeEndpoint =
+  | { kind: 'unix'; path: string }
+  | { kind: 'tcp'; host: string; port: number };
+
+/**
+ * Parse pipe endpoint specs of the form `name=unix:/abs/path.sock` or
+ * `name=tcp:127.0.0.1:7060` into a name→endpoint map. Throws on any malformed
+ * spec (unknown scheme, empty name/path/host, out-of-range port, duplicate name)
+ * — pipe registration fails closed rather than silently dropping an endpoint.
+ */
+export function parsePipeEndpoints(specs: string[]): Map<string, PipeEndpoint> {
+  const map = new Map<string, PipeEndpoint>();
+  for (const raw of specs) {
+    const spec = raw.trim();
+    if (!spec) continue;
+
+    const eq = spec.indexOf('=');
+    if (eq <= 0) throw new Error(`Malformed pipe spec (expected name=target): ${raw}`);
+    const name = spec.slice(0, eq).trim();
+    const target = spec.slice(eq + 1).trim();
+    if (!name) throw new Error(`Malformed pipe spec (empty name): ${raw}`);
+    if (map.has(name)) throw new Error(`Duplicate pipe name: ${name}`);
+
+    if (target.startsWith('unix:')) {
+      const path = target.slice('unix:'.length);
+      if (!path) throw new Error(`Malformed pipe target (empty unix path): ${raw}`);
+      map.set(name, { kind: 'unix', path });
+    } else if (target.startsWith('tcp:')) {
+      const rest = target.slice('tcp:'.length);
+      const lastColon = rest.lastIndexOf(':');
+      if (lastColon <= 0) throw new Error(`Malformed pipe target (expected tcp:host:port): ${raw}`);
+      const host = rest.slice(0, lastColon).trim();
+      const port = Number(rest.slice(lastColon + 1));
+      if (!host) throw new Error(`Malformed pipe target (empty tcp host): ${raw}`);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error(`Malformed pipe target (invalid tcp port): ${raw}`);
+      }
+      map.set(name, { kind: 'tcp', host, port });
+    } else {
+      throw new Error(`Malformed pipe target (expected unix: or tcp: scheme): ${raw}`);
+    }
+  }
+  return map;
+}
+
+/**
+ * Read the ENTANGLE_PIPES env (comma- or whitespace-separated specs) into an
+ * endpoint map. A malformed value warns once and yields an empty map so an
+ * unrelated consumer of getConfig() (e.g. the relay) never crashes on it.
+ */
+function pipeEndpointsFromEnv(): Map<string, PipeEndpoint> {
+  const raw = process.env.ENTANGLE_PIPES;
+  if (!raw) return new Map();
+  const specs = raw.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  try {
+    return parsePipeEndpoints(specs);
+  } catch (err) {
+    warnedKeys ??= new Set();
+    if (!warnedKeys.has('ENTANGLE_PIPES')) {
+      warnedKeys.add('ENTANGLE_PIPES');
+      // eslint-disable-next-line no-console
+      console.warn(`[config] Invalid ENTANGLE_PIPES: ${err instanceof Error ? err.message : String(err)}; ignoring`);
+    }
+    return new Map();
+  }
+}
+
 export interface Config {
   port: number;
   host: string;
@@ -27,6 +99,9 @@ export interface Config {
   agentHeartbeatMs: number;
   cmdDefaultWallMs: number;
   ttyIdleTimeoutMs: number;
+  // Idle timeout (ms) for pipe/forwarded-channel streams. 0 disables reaping
+  // (pipes follow the PTY exemption model — long-lived, unbounded by cmd caps).
+  pipeIdleTimeoutMs: number;
   maxOutBytes: number;
   logLevel: string;
   relayRateRps: number;
@@ -57,6 +132,9 @@ export interface Config {
   // Passthrough allow-list of env var names a caller may set on spawned
   // processes. Everything else is dropped; children otherwise get a minimal env.
   agentEnvPassthrough: string[];
+  // Registered forwarded-channel endpoints, parsed from ENTANGLE_PIPES. Named
+  // pipes an invoker may bridge to via `mode: 'pipe'` (an allow-list).
+  pipeEndpoints: Map<string, PipeEndpoint>;
 }
 
 let warnedKeys: Set<string> | undefined;
@@ -107,6 +185,7 @@ export function getConfig(): Config {
     agentHeartbeatMs: intEnv('AGENT_HEARTBEAT_MS', 15000),
     cmdDefaultWallMs: intEnv('CMD_DEFAULT_WALL_MS', 60000),
     ttyIdleTimeoutMs: intEnv('TTY_IDLE_TIMEOUT_MS', 1200000),
+    pipeIdleTimeoutMs: intEnv('PIPE_IDLE_TIMEOUT_MS', 0, 0),
     maxOutBytes: intEnv('MAX_OUT_BYTES', 10485760),
     logLevel: process.env.LOG_LEVEL || 'info',
     relayRateRps: intEnv('RELAY_RATE_RPS', 10),
@@ -131,5 +210,6 @@ export function getConfig(): Config {
     relayMaxAgents: intEnv('RELAY_MAX_AGENTS', 10000),
     relayMaxCapsPerAgent: intEnv('RELAY_MAX_CAPS_PER_AGENT', 256),
     agentEnvPassthrough: (process.env.AGENT_ENV_PASSTHROUGH || '').split(',').map(s => s.trim()).filter(Boolean),
+    pipeEndpoints: pipeEndpointsFromEnv(),
   };
 }

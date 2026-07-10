@@ -272,6 +272,23 @@ export class InvokeConnection {
     return handle;
   }
 
+  /**
+   * Open a forwarded-channel ('pipe') stream to a named agent-side endpoint.
+   * Mirrors openCmd/openPty: returns a handle immediately; write() sends
+   * STREAM_DATA and close() sends STREAM_CLOSE over the same plumbing. Data
+   * flows on channel 'stdout' in both directions.
+   */
+  openPipe(name: string, handlers: StreamHandlers = {}): StreamHandle {
+    const handle = new StreamHandle(randomBytes(8).toString('hex'), this);
+    this.pendingOpens.push({ handle, handlers });
+    void this.sendStream(FrameType.STREAM_OPEN, handle.sid, {
+      kind: 'open',
+      mode: 'pipe',
+      pipe: { name },
+    });
+    return handle;
+  }
+
   sendData(sid: string, chunk: Uint8Array): void {
     void this.sendStream(FrameType.STREAM_DATA, sid, { kind: 'data', chunk });
   }

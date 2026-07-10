@@ -23,6 +23,7 @@ import {
   parseOutputMode,
   BidirectionalCounters,
   StreamCounters,
+  type PipeEndpoint,
 } from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
@@ -50,6 +51,8 @@ export interface Session {
   nonceB?: string;
   nonceC?: string;
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
+  // Registered forwarded-channel endpoints (allow-list) for `mode: 'pipe'`.
+  pipeEndpoints?: Map<string, PipeEndpoint>;
 }
 
 // Helper to send wrapped relay responses
@@ -69,7 +72,8 @@ export function handleInvokerConnection(
   agentWs: WebSocket,
   socketId: string,
   cap: CapabilityInfo,
-  passwordHash?: string
+  passwordHash?: string,
+  pipeEndpoints?: Map<string, PipeEndpoint>
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -80,6 +84,7 @@ export function handleInvokerConnection(
     passwordVerified: !passwordHash, // If no password, consider it verified
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
+    ...(pipeEndpoints && { pipeEndpoints }),
   };
 
   const reader = new FrameReader();
@@ -139,6 +144,7 @@ async function handleFrame(
         authenticated: true,
         requiresPassword: session.requiresPassword,
         passwordVerified: session.passwordVerified,
+        ...(session.pipeEndpoints && { pipeEndpoints: session.pipeEndpoints }),
       };
     }
     // Keep dynamic gating fields fresh (password may be verified after streams open attempts)

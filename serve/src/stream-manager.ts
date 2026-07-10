@@ -1,16 +1,18 @@
-import { validateArguments, validateCwd, buildChildEnv, getConfig, OutputHandler } from '@thenewlabs/entangle-utils';
+import { validateArguments, validateCwd, buildChildEnv, getConfig, OutputHandler, type PipeEndpoint } from '@thenewlabs/entangle-utils';
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import { readFileSync, realpathSync } from 'fs';
 import { resolve as resolvePath } from 'path';
+import * as net from 'net';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
-import { 
-  StreamMode, 
-  StreamMetadata, 
+import {
+  StreamMode,
+  StreamMetadata,
   StreamUsage,
   StreamPtyOptions,
   StreamExecOptions,
+  StreamPipeOptions,
   Policy,
   DEFAULT_LIMITS
 } from '@thenewlabs/entangle-protocol';
@@ -21,6 +23,9 @@ export interface Stream {
   startedAt: number;
   endedAt?: number;
   process?: ChildProcess | pty.IPty;
+  // Underlying socket for a forwarded-channel ('pipe') stream. Mutually
+  // exclusive with `process`.
+  socket?: net.Socket;
   usage: StreamUsage;
   aborted: boolean;
   limits: {
@@ -37,6 +42,8 @@ export interface Stream {
 interface StreamManagerOptions {
   policy: Policy;
   output: OutputHandler;
+  // Registered forwarded-channel endpoints, keyed by pipe name (allow-list).
+  pipeEndpoints?: Map<string, PipeEndpoint>;
   onStreamData?: (sid: string, data: Uint8Array, channel: 'stdout' | 'stderr') => void;
   onStreamExit?: (sid: string, code: number | null, signal: string | null, usage?: StreamUsage) => void;
   onStreamError?: (sid: string, error: string) => void;
@@ -116,7 +123,10 @@ export class StreamManager extends EventEmitter {
    */
   private getStreamLimits(mode: StreamMode): Stream['limits'] {
     const limits: Stream['limits'] = {};
-    if (mode === 'pty') return limits;
+    // Pipes get the PTY-style exemption: forwarded channels are long-lived and
+    // move far more than MAX_OUT_BYTES, so command-oriented caps would kill them
+    // mid-use. They are bounded only by the (optional) pipe idle timeout.
+    if (mode === 'pty' || mode === 'pipe') return limits;
 
     const maxStreams = this.policy.maxStreams || 1;
     const config = getConfig();
@@ -387,6 +397,84 @@ export class StreamManager extends EventEmitter {
   }
 
   /**
+   * Open a forwarded-channel ('pipe') stream.
+   *
+   * Bridges the encrypted stream to a registered local endpoint (unix socket or
+   * tcp host:port). Only names present in the pipeEndpoints allow-list are
+   * reachable — an unknown name throws (surfaced to the client as STREAM_ERROR).
+   * Unlike cmd/pty there is NO cwd resolution, NO arg validation, and NO env:
+   * the target is fixed agent-side, so none of that applies.
+   */
+  async openPipeStream(options: StreamPipeOptions): Promise<string> {
+    const check = this.canOpenStream();
+    if (!check.allowed) {
+      throw new Error(check.reason);
+    }
+
+    const endpoint = this.options.pipeEndpoints?.get(options.name);
+    if (!endpoint) {
+      throw new Error(`Unknown pipe: ${options.name}`);
+    }
+
+    const sid = this.generateStreamId();
+    const limits = this.getStreamLimits('pipe');
+    const config = getConfig();
+    const idleMs = config.pipeIdleTimeoutMs;
+
+    // Dial the registered endpoint. `net.connect` is async; data/close/error are
+    // all delivered via events, so the sid is returned immediately and a
+    // connection failure surfaces as onStreamError.
+    const socket = endpoint.kind === 'unix'
+      ? net.connect(endpoint.path)
+      : net.connect(endpoint.port, endpoint.host);
+
+    const stream: Stream = {
+      sid,
+      mode: 'pipe',
+      startedAt: Date.now(),
+      socket,
+      usage: { cpuMs: 0, rssMaxBytes: 0, wallMs: 0, outBytes: 0 },
+      aborted: false,
+      limits,
+    };
+
+    socket.on('data', (chunk: Buffer) => {
+      if (stream.aborted) return;
+      // Track bytes for usage only; pipes have no cumulative output ceiling.
+      stream.usage.outBytes += chunk.length;
+      if (idleMs > 0) this.armIdleTimeout(stream, idleMs);
+      this.options.onStreamData?.(sid, chunk, 'stdout');
+    });
+
+    // Socket close maps 1:1 onto stream exit (code 0, no signal — a pipe has no
+    // process exit status).
+    socket.on('close', () => {
+      if (stream.endedAt !== undefined) return; // already finalized (e.g. error)
+      stream.endedAt = Date.now();
+      stream.usage.wallMs = stream.endedAt - stream.startedAt;
+      this.clearTimers(stream);
+      this.output.info(`Pipe stream closed for ${sid}`);
+      this.options.onStreamExit?.(sid, 0, null, stream.usage);
+      this.streams.delete(sid);
+    });
+
+    socket.on('error', (err: Error) => {
+      if (stream.endedAt !== undefined) return;
+      stream.endedAt = Date.now();
+      this.clearTimers(stream);
+      this.output.error(`Pipe stream error for ${sid}`, err.message);
+      this.options.onStreamError?.(sid, err.message);
+      this.streams.delete(sid);
+    });
+
+    this.streams.set(sid, stream);
+    if (idleMs > 0) this.armIdleTimeout(stream, idleMs);
+    this.output.info(`Opened pipe stream ${sid}: name=${options.name} (${endpoint.kind})`);
+
+    return sid;
+  }
+
+  /**
    * Write data to a stream (stdin)
    */
   writeToStream(sid: string, data: Uint8Array): void {
@@ -402,6 +490,11 @@ export class StreamManager extends EventEmitter {
     if (stream.mode === 'pty') {
       const ptyProcess = stream.process as pty.IPty;
       ptyProcess.write(Buffer.from(data).toString());
+    } else if (stream.mode === 'pipe') {
+      const socket = stream.socket;
+      if (socket && !socket.destroyed) {
+        socket.write(Buffer.from(data));
+      }
     } else {
       const childProcess = stream.process as ChildProcess;
       if (childProcess.stdin && !childProcess.stdin.destroyed) {
@@ -440,6 +533,9 @@ export class StreamManager extends EventEmitter {
     if (stream.mode === 'pty') {
       const ptyProcess = stream.process as pty.IPty;
       ptyProcess.kill(signal as string);
+    } else if (stream.mode === 'pipe') {
+      // A pipe has no process to signal; a signal tears the channel down.
+      stream.socket?.destroy();
     } else {
       const childProcess = stream.process as ChildProcess;
       childProcess.kill(signal);
@@ -466,6 +562,12 @@ export class StreamManager extends EventEmitter {
         ptyProcess.kill();
       } catch (err) {
         this.output.error(`Failed to kill PTY for stream ${sid}`, err instanceof Error ? err.message : String(err));
+      }
+    } else if (stream.mode === 'pipe') {
+      try {
+        stream.socket?.destroy();
+      } catch (err) {
+        this.output.error(`Failed to destroy socket for stream ${sid}`, err instanceof Error ? err.message : String(err));
       }
     } else {
       const childProcess = stream.process as ChildProcess;

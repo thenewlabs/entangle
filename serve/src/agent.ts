@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { randomBytes } from 'crypto';
-import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode, type PipeEndpoint } from '@thenewlabs/entangle-utils';
 import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { createCapability, type CapabilityInfo } from './capability.js';
@@ -10,6 +10,9 @@ interface AgentOptions {
   outputMode?: string;
   password?: string;
   pinnedCapability?: CapabilityInfo;
+  // Registered forwarded-channel endpoints (allow-list). Merged with any parsed
+  // from the ENTANGLE_PIPES env; explicit entries here win on name collision.
+  pipeEndpoints?: Map<string, PipeEndpoint>;
 }
 
 interface AgentState {
@@ -22,20 +25,31 @@ interface AgentState {
   password?: string;
   passwordHash?: string;
   pinned?: boolean;
+  pipeEndpoints: Map<string, PipeEndpoint>;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
   const output = new OutputHandler({ mode: parseOutputMode(options.outputMode || process.env.OUTPUT_MODE || 'text') });
   const config = getConfig();
+  // Forwarded-channel allow-list: env-configured endpoints, overlaid with any
+  // supplied programmatically (the Locus team calls startAgent directly).
+  const pipeEndpoints = new Map<string, PipeEndpoint>(config.pipeEndpoints);
+  if (options.pipeEndpoints) {
+    for (const [name, endpoint] of options.pipeEndpoints) pipeEndpoints.set(name, endpoint);
+  }
   const state: AgentState = {
     capabilities: new Map(),
     serverUrl: options.serverUrl,
     output,
+    pipeEndpoints,
     ...(options.outputMode && { outputMode: options.outputMode }),
     ...(options.password && { password: options.password }),
   };
-  
+
   output.info('Starting agent');
+  if (pipeEndpoints.size > 0) {
+    output.info(`Registered pipes: ${Array.from(pipeEndpoints.keys()).join(', ')}`);
+  }
   
   // Hash password if provided (Argon2id with a random salt).
   if (state.password) {
@@ -123,7 +137,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
 
         // Register synchronously (no await) so the session exists before this
         // invoker's AUTH1 arrives on the next relay message.
-        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash);
+        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker

@@ -24,6 +24,7 @@ import {
   parseOutputMode,
   BidirectionalCounters,
   StreamCounters,
+  type PipeEndpoint,
 } from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 import { StreamManager } from './stream-manager.js';
@@ -45,6 +46,9 @@ export interface MultiSession {
   nonceB?: string;
   nonceC?: string;
   streamManager?: StreamManager;
+  // Registered forwarded-channel endpoints (allow-list) threaded from agent
+  // state; passed to the StreamManager for `mode: 'pipe'` opens.
+  pipeEndpoints?: Map<string, PipeEndpoint>;
   terminated?: boolean;
 }
 
@@ -106,6 +110,7 @@ async function handleStreamOpen(
     session.streamManager = new StreamManager({
       policy: session.cap.policy,
       output,
+      ...(session.pipeEndpoints && { pipeEndpoints: session.pipeEndpoints }),
       onStreamData: async (sid, data, channel) => {
         await sendStreamData(session, sid, data, channel);
       },
@@ -119,7 +124,7 @@ async function handleStreamOpen(
   }
 
   try {
-    const { mode, pty, exec } = message.msg;
+    const { mode, pty, exec, pipe } = message.msg;
     let actualSid: string;
 
     if (mode === 'pty' && pty) {
@@ -148,6 +153,8 @@ async function handleStreamOpen(
         cmdOptions.stdin = exec.stdin;
       }
       actualSid = await session.streamManager.openCmdStream(cmdOptions);
+    } else if (mode === 'pipe' && pipe) {
+      actualSid = await session.streamManager.openPipeStream({ name: pipe.name });
     } else {
       throw new Error(`Invalid stream configuration for mode ${mode}`);
     }

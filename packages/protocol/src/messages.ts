@@ -155,7 +155,7 @@ export const StreamOpenMessageSchema = z.object({
     v: z.literal(1),
     kind: z.literal('open'),
     sid: z.string(),
-    mode: z.enum(['pty', 'cmd']),
+    mode: z.enum(['pty', 'cmd', 'pipe']),
     pty: z.object({
       cols: z.number(),
       rows: z.number(),
@@ -166,6 +166,11 @@ export const StreamOpenMessageSchema = z.object({
       cwd: z.string().optional(),
       env: z.record(z.string()).optional(),
       stdin: z.boolean().optional(),
+    }).optional(),
+    // Forwarded-channel target: the registered pipe name to bridge this stream
+    // to. Data flows as STREAM_DATA on channel 'stdout' in both directions.
+    pipe: z.object({
+      name: z.string(),
     }).optional(),
   }),
 });
@@ -220,7 +225,7 @@ export const StreamOpenedMessageSchema = z.object({
     kind: z.literal('opened'),
     sid: z.string(),
     startedAt: z.number(),
-    mode: z.enum(['pty', 'cmd']),
+    mode: z.enum(['pty', 'cmd', 'pipe']),
   }),
 });
 
