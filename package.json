@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-monorepo",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "description": "Secure blind relay for exposing CLI tools (monorepo root)",
   "workspaces": [

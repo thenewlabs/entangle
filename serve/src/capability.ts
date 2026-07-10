@@ -94,3 +94,63 @@ export async function parseCapabilityUrl(
     ...(relayOrigin !== undefined && { relayOrigin }),
   };
 }
+
+/**
+ * A full capability URL carries a `/cap/<id>` path and/or an `#S=<secret>`
+ * fragment (or the compact `<capId>#S=<secret>` form). A bare relay origin
+ * (`https://relay`) has neither and selects only the relay to mint on.
+ */
+export function looksLikeCapabilityUrl(input: string): boolean {
+  return input.includes('/cap/') || input.includes('#');
+}
+
+/** Reduce a URL to its origin (`https://host[:port]`), tolerating trailing paths. */
+function normalizeOrigin(input: string): string {
+  try {
+    return new URL(input).origin;
+  } catch {
+    return input;
+  }
+}
+
+/**
+ * Decide the relay to register with and whether to pin a specific capability,
+ * from the (optional) positional URL and flags that `serve` accepts:
+ *
+ *   serve https://relay                         -> mint fresh cap, relay = origin
+ *   serve https://relay/cap/<capId>#S=<secret>  -> pin that cap, relay = origin
+ *   serve --capability <full-url>               -> pin that cap (positional ignored for the cap)
+ *   serve --server <url>                        -> force the relay regardless of the above
+ *   serve                                       -> mint fresh cap on the configured/default relay
+ *
+ * A full positional URL and a bare relay origin are disambiguated by
+ * {@link looksLikeCapabilityUrl}; a malformed cap URL surfaces the parse error
+ * rather than being silently treated as a bare relay.
+ */
+export async function resolveServeTarget(opts: {
+  positionalUrl?: string | undefined;
+  capabilityFlag?: string | undefined;
+  serverFlag?: string | undefined;
+  envCapability?: string | undefined;
+  configRelayUrl?: string | undefined;
+}): Promise<{ serverUrl: string; pinnedCapability?: CapabilityInfo & { relayOrigin?: string } }> {
+  const { positionalUrl, capabilityFlag, serverFlag, envCapability, configRelayUrl } = opts;
+
+  const positionalIsCap = !!positionalUrl && looksLikeCapabilityUrl(positionalUrl);
+  const capUrl = capabilityFlag || (positionalIsCap ? positionalUrl : undefined) || envCapability;
+  const pinned = capUrl ? await parseCapabilityUrl(capUrl) : undefined;
+
+  // A bare positional origin (not a cap URL) selects only the relay; a fresh
+  // capability gets minted downstream.
+  const relayFromPositional =
+    !positionalIsCap && positionalUrl ? normalizeOrigin(positionalUrl) : undefined;
+
+  const serverUrl =
+    serverFlag ||
+    pinned?.relayOrigin ||
+    relayFromPositional ||
+    configRelayUrl ||
+    'http://localhost:8080';
+
+  return pinned ? { serverUrl, pinnedCapability: pinned } : { serverUrl };
+}
