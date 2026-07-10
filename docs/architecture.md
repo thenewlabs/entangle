@@ -99,8 +99,8 @@ Validation & Limits
 - Connect: `entangle-connect`
 
 Run From Source
-- Dev: `npm run dev --workspace=@thenewlabs/entangle-relay` (server), `npm run dev --workspace=@thenewlabs/entangle-agent` (agent).
-- Build: `npm run build` creates bundled binaries in `dist/` (`agent.js`, `server.js`, `invoke.js`).
+- Dev: `npm run dev --workspace=@thenewlabs/entangle-relay` (relay), `npm run dev --workspace=@thenewlabs/entangle-serve` (serve).
+- Build: `npm run build` creates bundled binaries in `dist/` (`serve.js`, `relay.js`, `connect.js`).
 
 Key Environment Variables (see `packages/utils/src/config.ts`)
 - `PORT`, `HOST`, `PUBLIC_ORIGIN`, `RELAY_URL` (agent/connect default target), `MAX_FRAME_BYTES`, `RELAY_IDLE_TIMEOUT_MS`,

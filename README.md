@@ -13,7 +13,7 @@ Install the three user-facing packages after publishing:
 
 ```bash
 npm install -g @thenewlabs/entangle-relay
-npm install -g @thenewlabs/entangle-agent
+npm install -g @thenewlabs/entangle-serve
 npm install -g @thenewlabs/entangle-connect
 ```
 
@@ -73,8 +73,8 @@ entangle-relay start
 Verify it with `curl https://entangle.thenewlabs.com/__health`.
 
 Tip: All CLIs support `--output-mode text|stream-json`.
-- Server: `npm run dev --workspace=@thenewlabs/entangle-relay`
-- Agent: `npm run dev --workspace=@thenewlabs/entangle-agent`
+- Relay: `npm run dev --workspace=@thenewlabs/entangle-relay`
+- Serve: `npm run dev --workspace=@thenewlabs/entangle-serve`
 
 ## Security Highlights
 - AEAD (XChaCha20‑Poly1305) with per‑message counters prevents replay and reordering.
