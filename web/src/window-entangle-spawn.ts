@@ -1,5 +1,17 @@
 import { FrameType, FrameReader, encodeFrame } from '@thenewlabs/entangle-protocol';
-import { deriveKeys, extractSaltFromCapId, aeadDecrypt, aeadEncrypt, computeHmac, sha256Hex } from '@thenewlabs/entangle-crypto';
+import {
+  deriveKeyMaterial,
+  deriveBootstrapKeys,
+  deriveSessionKeys,
+  extractSaltFromCapId,
+  aeadDecrypt,
+  aeadEncrypt,
+  computeHmac,
+  frameAad,
+  AeadDir,
+  streamAeadEncrypt,
+  streamAeadDecrypt,
+} from '@thenewlabs/entangle-crypto';
 import { StreamCounters, BidirectionalCounters } from '@thenewlabs/entangle-utils/browser';
 import { encode, decode } from 'cborg';
 
@@ -13,7 +25,7 @@ interface SpawnOptions {
   shell?: boolean;
 }
 
-type DataHandler = (chunk: Uint8Array) => void;
+type DataHandler = (chunk: Uint8Array, channel?: 'stdout' | 'stderr') => void;
 type ExitHandler = (code: number | null, signal: string | null) => void;
 type ErrorHandler = (message: string) => void;
 
@@ -34,7 +46,10 @@ class Emitter {
 class EntangleConnection {
   private ws: WebSocket | null = null;
   private reader = new FrameReader();
-  private keys: any | null = null;
+  private K_raw: Uint8Array | null = null;
+  private bootstrapKeys: any | null = null;
+  private keys: any | null = null; // session keys, set after AUTH2
+  private nonceB: string | null = null;
   private authenticated = false;
   private requiresPassword = false;
   private passwordVerified = false;
@@ -50,9 +65,15 @@ class EntangleConnection {
     await this.connect();
   }
 
+  private getPassword(): string | undefined {
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    return (window as any).entangle?.password || hash.get('PW') || undefined;
+  }
+
   private async connect(): Promise<void> {
     const saltCap = extractSaltFromCapId(this.capId);
-    this.keys = await deriveKeys(this.S, saltCap);
+    this.K_raw = await deriveKeyMaterial(this.S, saltCap);
+    this.bootstrapKeys = deriveBootstrapKeys(this.K_raw);
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/relay/${this.capId}`;
@@ -63,12 +84,12 @@ class EntangleConnection {
       if (!this.ws) return reject(new Error('WebSocket not created'));
 
       this.ws.onopen = () => {
-        // AUTH1: HMAC(K_auth, 'hello' + capId + nonceBHex) || HMAC and nonceBHex payload
-        const nonceB = crypto.getRandomValues(new Uint8Array(16));
-        const nonceBHex = Array.from(nonceB).map(b => b.toString(16).padStart(2, '0')).join('');
-        const auth1Data = new TextEncoder().encode('hello' + this.capId + nonceBHex);
-        const hmac = computeHmac(this.keys!.K_auth, auth1Data);
-        const nonceBBytes = new TextEncoder().encode(nonceBHex);
+        // AUTH1: HMAC(bootstrap K_auth, 'hello' + capId + nonceB) || nonceB
+        const nonceRaw = crypto.getRandomValues(new Uint8Array(16));
+        this.nonceB = Array.from(nonceRaw).map(b => b.toString(16).padStart(2, '0')).join('');
+        const auth1Data = new TextEncoder().encode('hello' + this.capId + this.nonceB);
+        const hmac = computeHmac(this.bootstrapKeys!.K_auth, auth1Data);
+        const nonceBBytes = new TextEncoder().encode(this.nonceB);
         const payload = new Uint8Array(32 + nonceBBytes.length);
         payload.set(hmac, 0);
         payload.set(nonceBBytes, 32);
@@ -78,34 +99,41 @@ class EntangleConnection {
       this.ws!.onmessage = async (event) => {
         const frames = this.reader.push(new Uint8Array(await (event.data as ArrayBuffer)));
         for (const frame of frames) {
-          if (!this.keys) continue;
           if (!this.authenticated && frame.type === FrameType.AUTH2) {
+            if (!this.bootstrapKeys || !this.nonceB || !this.K_raw) continue;
             const encrypted = decode(frame.payload) as any;
-            const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH2, encrypted.nonce, encrypted.cipher);
-            const nonceC = decrypted.msg.nonceC as string;
-            this.requiresPassword = !!decrypted.msg.requiresPassword;
-            const auth3Data = new TextEncoder().encode('ready' + nonceC);
+            // AUTH2 is protected with the bootstrap key.
+            const decrypted = aeadDecrypt(this.bootstrapKeys.K_enc, FrameType.AUTH2, encrypted.nonce, encrypted.cipher, AeadDir.ServerToClient);
+            const auth2 = decrypted.msg as { nonceB: string; nonceC: string; expiryTs: number; requiresPassword?: boolean };
+
+            // Freshness checks defeat a relay replaying a stale AUTH2.
+            if (auth2.nonceB !== this.nonceB) { reject(new Error('AUTH2 nonce mismatch')); return; }
+            if (typeof auth2.expiryTs !== 'number' || auth2.expiryTs <= Date.now()) { reject(new Error('AUTH2 expired')); return; }
+
+            this.keys = deriveSessionKeys(this.K_raw, this.nonceB, auth2.nonceC);
+            this.requiresPassword = !!auth2.requiresPassword;
+
+            const auth3Data = new TextEncoder().encode('ready' + auth2.nonceC);
             const auth3Hmac = computeHmac(this.keys.K_auth, auth3Data);
             this.ws!.send(encodeFrame(FrameType.AUTH3, auth3Hmac));
             this.authenticated = true;
-            // If password is required and present in URL, send it now
+
             if (this.requiresPassword) {
-              const hash = new URLSearchParams(window.location.hash.slice(1));
-              const urlPw = hash.get('PW');
-              const pwHash = (window as any).entangle?.passwordHash || (urlPw ? sha256Hex(urlPw) : undefined);
-              if (pwHash) {
-                const pwMsg = { ctr: this.counters.outgoing.next(), msg: { passwordHash: pwHash } };
-                const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+              const password = this.getPassword();
+              if (password) {
+                const ctr = this.counters.outgoing.next();
+                const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
                 this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
               }
             }
             resolve();
             continue;
           }
+          if (!this.keys) continue;
           if (frame.type === FrameType.AUTH_PW && this.requiresPassword && !this.passwordVerified) {
             // Handle password verification response
             const encrypted = decode(frame.payload) as any;
-            const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
+            const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher, AeadDir.ServerToClient);
             this.counters.incoming.validate(decrypted.ctr);
             if (decrypted.msg && decrypted.msg.ok) {
               this.passwordVerified = true;
@@ -139,9 +167,8 @@ class EntangleConnection {
         // This shouldn't happen in normal flow as AUTH2 is handled during connection
         return;
       } else {
-        // Stream frames are sent with stream AEAD (raw bytes: nonce|cipher)
-        const { streamAeadDecrypt } = await import('@thenewlabs/entangle-crypto');
-        const aad = encode({ type: frame.type });
+        // Stream frames: session-key AEAD with direction-bound AAD.
+        const aad = frameAad(frame.type, AeadDir.ServerToClient);
         const plaintext = await streamAeadDecrypt(this.keys.K_enc, frame.payload, aad);
         decrypted = decode(plaintext) as any;
       }
@@ -176,7 +203,7 @@ class EntangleConnection {
         }
         case FrameType.STREAM_DATA: {
           const child = this.children.get(msg.sid);
-          child?._onData(new Uint8Array(msg.chunk));
+          child?._onData(new Uint8Array(msg.chunk), msg.channel === 'stderr' ? 'stderr' : 'stdout');
           break;
         }
         case FrameType.STREAM_EXIT: {
@@ -220,12 +247,10 @@ class EntangleConnection {
     await this.ensureConnected();
     if (!this.ws || !this.keys) throw new Error('Not connected');
     if (this.requiresPassword && !this.passwordVerified) {
-      const hash = new URLSearchParams(window.location.hash.slice(1));
-      const urlPw = hash.get('PW');
-      const pwHash = (window as any).entangle?.passwordHash || (urlPw ? sha256Hex(urlPw) : undefined);
-      if (pwHash) {
-        const pwMsg = { ctr: this.counters.outgoing.next(), msg: { passwordHash: pwHash } };
-        const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
+      const password = this.getPassword();
+      if (password) {
+        const ctr = this.counters.outgoing.next();
+        const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
         this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
       } else {
         child._onError('Password verification required');
@@ -235,14 +260,22 @@ class EntangleConnection {
     const sid = child._sid;
     // Start counters for this stream
     const ctr = this.streamCounters.getNext(sid, 'outgoing');
-    // Build argv based on shell option
-    const argv = child._options.shell
-      ? ['sh', '-lc', [child._command, ...child._args].join(' ')]
-      : [child._command, ...child._args];
 
-    const msg = {
-      ctr,
-      msg: {
+    let openMsg: any;
+    if (child._mode === 'pty') {
+      openMsg = {
+        v: 1 as const,
+        kind: 'open' as const,
+        sid,
+        mode: 'pty' as const,
+        pty: { cols: child._ptyOptions!.cols, rows: child._ptyOptions!.rows },
+        ...(child._options.cwd ? { exec: { argv: [], cwd: child._options.cwd } } : {}),
+      };
+    } else {
+      const argv = child._options.shell
+        ? ['sh', '-lc', [child._command, ...child._args].join(' ')]
+        : [child._command, ...child._args];
+      openMsg = {
         v: 1 as const,
         kind: 'open' as const,
         sid,
@@ -253,14 +286,13 @@ class EntangleConnection {
           env: child._options.env,
           stdin: true,
         },
-      },
-    };
-    const ciphertext = await (async () => {
-      const plaintext = encode(msg);
-      const aad = encode({ type: FrameType.STREAM_OPEN });
-      return await (await import('@thenewlabs/entangle-crypto')).streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
-    })();
-    
+      };
+    }
+    const msg = { ctr, msg: openMsg };
+    const plaintext = encode(msg);
+    const aad = frameAad(FrameType.STREAM_OPEN, AeadDir.ClientToServer);
+    const ciphertext = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
+
     const frame = encodeFrame(FrameType.STREAM_OPEN, ciphertext);
 
     this.ws.send(frame);
@@ -273,10 +305,9 @@ class EntangleConnection {
     if (!this.ws || !this.keys) return;
     const ctr = this.streamCounters.getNext(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'data' as const, sid, chunk } };
-    const aad = encode({ type: FrameType.STREAM_DATA });
+    const aad = frameAad(FrameType.STREAM_DATA, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
-      const { streamAeadEncrypt } = await import('@thenewlabs/entangle-crypto');
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_DATA, ct));
       this.streamCounters.increment(sid, 'outgoing');
@@ -287,24 +318,39 @@ class EntangleConnection {
     if (!this.ws || !this.keys) return;
     const ctr = this.streamCounters.getNext(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'signal' as const, sid, signal } };
-    const aad = encode({ type: FrameType.STREAM_SIGNAL });
+    const aad = frameAad(FrameType.STREAM_SIGNAL, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
-      const { streamAeadEncrypt } = await import('@thenewlabs/entangle-crypto');
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_SIGNAL, ct));
       this.streamCounters.increment(sid, 'outgoing');
     })();
   }
 
+  _sendResize(sid: string, cols: number, rows: number): void {
+    if (!this.ws || !this.keys) return;
+    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const msg = { ctr, msg: { v: 1 as const, kind: 'pty-resize' as const, sid, cols, rows } };
+    const aad = frameAad(FrameType.STREAM_RESIZE, AeadDir.ClientToServer);
+    const plaintext = encode(msg);
+    (async () => {
+      const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+      this.ws!.send(encodeFrame(FrameType.STREAM_RESIZE, ct));
+      this.streamCounters.increment(sid, 'outgoing');
+    })();
+  }
+
+  spawnPty(options: { cols: number; rows: number; cwd?: string }): BrowserChildProcess {
+    return new BrowserChildProcess(this, '', [], options.cwd ? { cwd: options.cwd } : {}, 'pty', { cols: options.cols, rows: options.rows });
+  }
+
   _sendClose(sid: string): void {
     if (!this.ws || !this.keys) return;
     const ctr = this.streamCounters.getNext(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'close' as const, sid } };
-    const aad = encode({ type: FrameType.STREAM_CLOSE });
+    const aad = frameAad(FrameType.STREAM_CLOSE, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
-      const { streamAeadEncrypt } = await import('@thenewlabs/entangle-crypto');
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_CLOSE, ct));
       this.streamCounters.increment(sid, 'outgoing');
@@ -319,9 +365,11 @@ class BrowserChildProcess {
     private conn: EntangleConnection,
     public _command: string,
     public _args: string[],
-    public _options: SpawnOptions
+    public _options: SpawnOptions,
+    public _mode: 'cmd' | 'pty' = 'cmd',
+    public _ptyOptions?: { cols: number; rows: number }
   ) {
-    this._sid = Math.random().toString(36).slice(2, 10);
+    this._sid = crypto.getRandomValues(new Uint8Array(8)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '');
     // Initiate open asap
     this.conn._openChild(this);
     if (this._options.signal) {
@@ -329,6 +377,10 @@ class BrowserChildProcess {
       if (this._options.signal.aborted) onAbort();
       else this._options.signal.addEventListener('abort', onAbort, { once: true });
     }
+  }
+
+  resize(cols: number, rows: number) {
+    this.conn._sendResize(this._sid, cols, rows);
   }
   stdin = {
     write: (data: Uint8Array | string) => {
@@ -358,8 +410,8 @@ class BrowserChildProcess {
     this.conn._sendClose(this._sid);
   }
   // Internal events from connection
-  _onOpened() {}
-  _onData(chunk: Uint8Array) { this.emitter.emit('data', chunk); }
+  _onOpened() { this.emitter.emit('opened'); }
+  _onData(chunk: Uint8Array, channel: 'stdout' | 'stderr' = 'stdout') { this.emitter.emit('data', chunk, channel); }
   _onExit(code: number | null, signal: string | null) { this.emitter.emit('exit', code, signal); }
   _onError(message: string) { this.emitter.emit('error', message); }
   _onClosed() {}
@@ -393,6 +445,8 @@ declare global {
   }
   const conn = new EntangleConnection(cap.capId, cap.S);
   entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
+  // Interactive PTY session (used by the terminal UI).
+  entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string }) => conn.spawnPty(options);
 
   // Helper: execute a command line via shell and await completion
   entangle.execCommand = async (

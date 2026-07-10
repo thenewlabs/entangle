@@ -1,7 +1,14 @@
 import type WebSocket from 'ws';
+import { randomBytes } from 'crypto';
 import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
+
+// Unguessable routing identifier (CSPRNG) so a malicious agent cannot target
+// another relay's invoker by guessing ids.
+function newId(): string {
+  return randomBytes(12).toString('base64url');
+}
 
 interface AgentInfo {
   ws: WebSocket;
@@ -22,7 +29,7 @@ export class RoutingState {
   private capIdToAgent = new Map<string, string>(); // capId -> agentId
   
   registerAgent(ws: WebSocket, machineId: string): string {
-    const agentId = Math.random().toString(36).substr(2, 9);
+    const agentId = newId();
     
     const agent: AgentInfo = {
       ws,
@@ -80,7 +87,7 @@ export class RoutingState {
       try { ws.close(1013, 'Over capacity'); } catch {}
       throw new Error('Over capacity');
     }
-    const invokerId = Math.random().toString(36).substr(2, 9);
+    const invokerId = newId();
     
     const invoker: InvokerInfo = {
       ws,
@@ -143,6 +150,17 @@ export class RoutingState {
   
   findInvoker(invokerId: string): InvokerInfo | null {
     return this.invokers.get(invokerId) || null;
+  }
+
+  /**
+   * True only if `invokerId` is connected for a capability currently owned by
+   * `agentId`. Used to stop an agent from delivering frames to an invoker that
+   * belongs to a different agent's relay.
+   */
+  invokerBelongsToAgent(invokerId: string, agentId: string): boolean {
+    const invoker = this.invokers.get(invokerId);
+    if (!invoker) return false;
+    return this.capIdToAgent.get(invoker.capId) === agentId;
   }
   
   cleanupStale(maxAge: number = 300000): void {

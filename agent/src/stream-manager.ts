@@ -1,7 +1,9 @@
-import { validateArguments, getConfig, OutputHandler } from '@thenewlabs/entangle-utils';
+import { validateArguments, validateCwd, buildChildEnv, getConfig, OutputHandler } from '@thenewlabs/entangle-utils';
 import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
+import { realpathSync } from 'fs';
+import { resolve as resolvePath } from 'path';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { 
   StreamMode, 
@@ -31,7 +33,7 @@ export interface Stream {
 interface StreamManagerOptions {
   policy: Policy;
   output: OutputHandler;
-  onStreamData?: (sid: string, data: Uint8Array) => void;
+  onStreamData?: (sid: string, data: Uint8Array, channel: 'stdout' | 'stderr') => void;
   onStreamExit?: (sid: string, code: number | null, signal: string | null, usage?: StreamUsage) => void;
   onStreamError?: (sid: string, error: string) => void;
 }
@@ -58,6 +60,30 @@ export class StreamManager extends EventEmitter {
    */
   private generateStreamId(): string {
     return randomBytes(8).toString('base64url');
+  }
+
+  /**
+   * Resolve a requested cwd and enforce the AGENT_ALLOWED_CWD allow-list.
+   * Symlinks are resolved (realpath) BEFORE the prefix check so a symlink
+   * inside an allowed dir can't point the process outside it. Throws if the
+   * resolved path is not within an allowed prefix.
+   */
+  private resolveCwd(requestedCwd?: string): string {
+    const config = getConfig();
+    const base = requestedCwd
+      ? resolvePath(config.agentDefaultCwd, requestedCwd)
+      : config.agentDefaultCwd;
+
+    let real = base;
+    try {
+      real = realpathSync(base);
+    } catch {
+      // Path may not exist yet; validate the resolved (non-symlink) form.
+    }
+
+    // Boundary-aware prefix check (see utils validateCwd).
+    validateCwd(real, config.agentAllowedCwd);
+    return real;
   }
 
   /**
@@ -125,18 +151,18 @@ export class StreamManager extends EventEmitter {
 
     const sid = this.generateStreamId();
     const limits = this.getStreamLimits();
+    const config = getConfig();
+    const cwd = this.resolveCwd(options.cwd);
+    const env = buildChildEnv(config.agentEnvPassthrough, options.env);
+    env.TERM = 'xterm-256color';
 
     // Create PTY
-    const ptyProcess = pty.spawn(process.env.SHELL || '/bin/bash', [], {
+    const ptyProcess = pty.spawn(config.agentShell, [], {
       name: 'xterm-256color',
       cols: options.cols,
       rows: options.rows,
-      cwd: options.cwd || process.cwd(),
-      env: {
-        ...process.env,
-        ...options.env,
-        TERM: 'xterm-256color',
-      },
+      cwd,
+      env,
     });
 
     const stream: Stream = {
@@ -163,7 +189,7 @@ export class StreamManager extends EventEmitter {
         return;
       }
 
-      this.options.onStreamData?.(sid, chunk);
+      this.options.onStreamData?.(sid, chunk, 'stdout');
     });
 
     // Handle PTY exit
@@ -201,19 +227,16 @@ export class StreamManager extends EventEmitter {
 
     const sid = this.generateStreamId();
     const limits = this.getStreamLimits();
+    const config = getConfig();
 
-    // Spawn process
+    // Spawn process with a validated cwd and a minimal, curated environment.
     const spawnOptions: SpawnOptions = {
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: this.resolveCwd(options.cwd),
+      env: buildChildEnv(config.agentEnvPassthrough, options.env) as NodeJS.ProcessEnv,
     };
-    if (options.cwd) {
-      spawnOptions.cwd = options.cwd;
-    }
-    if (options.env) {
-      spawnOptions.env = { ...process.env, ...options.env } as NodeJS.ProcessEnv;
-    }
-    
+
     if (!options.argv || options.argv.length === 0) {
       throw new Error('No command specified');
     }
@@ -235,8 +258,9 @@ export class StreamManager extends EventEmitter {
       limits,
     };
 
-    // Handle stdout
-    const handleOutput = (chunk: Buffer) => {
+    // Handle stdout / stderr (both count toward the output ceiling, but are
+    // tagged so the invoker can route them to the right fd).
+    const handleOutput = (channel: 'stdout' | 'stderr') => (chunk: Buffer) => {
       if (stream.aborted) return;
 
       stream.usage.outBytes += chunk.length;
@@ -248,23 +272,25 @@ export class StreamManager extends EventEmitter {
         return;
       }
 
-      this.options.onStreamData?.(sid, chunk);
+      this.options.onStreamData?.(sid, chunk, channel);
     };
-    
+
     if (childProcess.stdout) {
-      childProcess.stdout.on('data', handleOutput);
+      childProcess.stdout.on('data', handleOutput('stdout'));
     }
 
-    // Handle stderr (also counts toward output)
     if (childProcess.stderr) {
-      childProcess.stderr.on('data', handleOutput);
+      childProcess.stderr.on('data', handleOutput('stderr'));
     }
 
-    // Handle process exit
-    childProcess.on('exit', (code: number | null, signal: string | null) => {
+    // Use 'close' (not 'exit') so all stdout/stderr 'data' events have been
+    // emitted before we report exit. Otherwise a fast command can emit EXIT
+    // ahead of its final output, and the client — which tears the stream down
+    // on exit — would drop that trailing data.
+    childProcess.on('close', (code: number | null, signal: string | null) => {
       stream.endedAt = Date.now();
       stream.usage.wallMs = stream.endedAt - stream.startedAt;
-      
+
       this.output.info(`Command stream exited for ${sid}: code=${code}, signal=${signal}`);
       this.options.onStreamExit?.(sid, code, signal, stream.usage);
       this.streams.delete(sid);

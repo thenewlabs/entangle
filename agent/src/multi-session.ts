@@ -16,7 +16,8 @@ import {
   deriveKeys,
   streamAeadEncrypt,
   streamAeadDecrypt,
-  aeadDecrypt,
+  frameAad,
+  AeadDir,
 } from '@thenewlabs/entangle-crypto';
 import { 
   OutputHandler,
@@ -44,9 +45,6 @@ export interface MultiSession {
   nonceB?: string;
   nonceC?: string;
   streamManager?: StreamManager;
-  // For backward compatibility
-  legacyMode: boolean;
-  hasRun: boolean; // Only used in legacy single-stream mode
 }
 
 // Helper to send encrypted messages with per-stream counters
@@ -66,7 +64,7 @@ async function sendEncrypted(
   }
 
   const plaintext = encode(message);
-  const aad = encode({ type: frameType });
+  const aad = frameAad(frameType, AeadDir.ServerToClient);
   const ciphertext = await streamAeadEncrypt(session.keys.K_enc, plaintext, aad);
   const frame = encodeFrame(frameType, ciphertext);
 
@@ -93,8 +91,8 @@ async function handleStreamOpen(
     session.streamManager = new StreamManager({
       policy: session.cap.policy,
       output,
-      onStreamData: async (sid, data) => {
-        await sendStreamData(session, sid, data);
+      onStreamData: async (sid, data, channel) => {
+        await sendStreamData(session, sid, data, channel);
       },
       onStreamExit: async (sid, code, signal, usage) => {
         await sendStreamExit(session, sid, code, signal, usage);
@@ -242,7 +240,8 @@ async function handleStreamClose(
 async function sendStreamData(
   session: MultiSession,
   sid: string,
-  data: Uint8Array
+  data: Uint8Array,
+  channel: 'stdout' | 'stderr' = 'stdout'
 ): Promise<void> {
   const msg = {
     ctr: 0, // Will be set by sendEncrypted
@@ -251,6 +250,7 @@ async function sendStreamData(
       kind: 'data' as const,
       sid,
       chunk: data,
+      channel,
     },
   };
 
@@ -332,38 +332,12 @@ export async function handleMultiStreamFrame(
       const preview = Array.from(frame.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
       output.debug(`Payload preview (first 32 bytes): ${preview}`);
     }
-    // Decrypt the payload (prefer stream AEAD). If that fails, attempt
-    // backward-compatible CBOR-wrapped AEAD decryption.
-    const aad = encode({ type: frame.type });
-    output.debug(`AAD for decryption: ${Array.from(aad).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
-    let message: any;
-    try {
-      const plaintext = await streamAeadDecrypt(session.keys.K_enc, frame.payload, aad);
-      message = decode(plaintext) as any;
-    } catch (primaryErr: any) {
-      output.warn(`Stream decrypt failed for type=${frame.type}, payloadLen=${frame.payload.length}: ${primaryErr instanceof Error ? primaryErr.message : String(primaryErr)}`);
-      // Secondary attempt: try minimal AAD = single-byte frame type for cross-impl compatibility
-      try {
-        const altAad = new Uint8Array([frame.type]);
-        const plaintextAlt = await streamAeadDecrypt(session.keys.K_enc, frame.payload, altAad);
-        message = decode(plaintextAlt) as any;
-        output.info(`Stream decrypt succeeded with alternate AAD for type=${frame.type}`);
-      } catch (_altErr) {
-        try {
-          // Fallback: treat payload as CBOR { nonce, cipher }
-          const enc = decode(frame.payload) as any;
-          if (enc && enc.nonce && enc.cipher) {
-            const decoded = aeadDecrypt(session.keys.K_enc, frame.type, enc.nonce, enc.cipher);
-            message = decoded as any;
-          } else {
-            throw primaryErr;
-          }
-        } catch (_fallbackErr) {
-          output.warn(`Fallback decrypt also failed for type=${frame.type}`);
-          throw primaryErr;
-        }
-      }
-    }
+    // Single canonical decryption: session key + direction-bound AAD. Frames
+    // that don't authenticate under exactly this AAD are rejected (no
+    // downgrade/alternate-AAD fallbacks).
+    const aad = frameAad(frame.type, AeadDir.ClientToServer);
+    const plaintext = await streamAeadDecrypt(session.keys.K_enc, frame.payload, aad);
+    const message: any = decode(plaintext);
 
     // For stream messages, verify per-stream counter
     if (message.msg && message.msg.sid) {

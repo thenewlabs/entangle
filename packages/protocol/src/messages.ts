@@ -71,6 +71,7 @@ export const Auth2MessageSchema = z.object({
   nonceC: z.string(),
   expiryTs: z.number(),
   policyHash: z.string(),
+  requiresPassword: z.boolean().optional(),
 });
 
 export type RunMessage = z.infer<typeof RunMessageSchema>;
@@ -176,6 +177,9 @@ export const StreamDataMessageSchema = z.object({
     kind: z.literal('data'),
     sid: z.string(),
     chunk: z.instanceof(Uint8Array),
+    // Which output channel this data belongs to. Absent/`stdout` for stdin and
+    // for merged output; `stderr` lets the invoker keep the streams separate.
+    channel: z.enum(['stdout', 'stderr']).optional(),
   }),
 });
 

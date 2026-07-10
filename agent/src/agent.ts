@@ -1,5 +1,7 @@
 import WebSocket from 'ws';
+import { randomBytes } from 'crypto';
 import { getConfig, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
+import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { loadCapabilities, createCapability } from './capability.js';
 
@@ -33,11 +35,9 @@ export async function startAgent(options: AgentOptions): Promise<void> {
   
   output.info('Starting agent');
   
-  // Hash password if provided
+  // Hash password if provided (Argon2id with a random salt).
   if (state.password) {
-    const crypto = require('crypto');
-    // Simple hash for demo - in production, use Argon2id
-    state.passwordHash = crypto.createHash('sha256').update(state.password).digest('hex');
+    state.passwordHash = await hashPassword(state.password);
     output.info('Password protection enabled');
   }
   
@@ -69,12 +69,15 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
   
   ws.on('open', () => {
     state.output.info('Connected to server');
-    
+
     const hello = {
       type: 'CLIENT_HELLO',
       machineId: getMachineId(),
+      // Shared secret gating agent registration (RELAY_AGENT_TOKEN). Undefined
+      // when the relay does not require one.
+      token: getConfig().agentToken,
     };
-    
+
     ws.send(JSON.stringify(hello));
   });
   
@@ -111,8 +114,10 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         }
         
         state.output.info(`Invoker connected: socketId=${socketId}, capId=${capId}`);
-        
-        const session = await handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash);
+
+        // Register synchronously (no await) so the session exists before this
+        // invoker's AUTH1 arrives on the next relay message.
+        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker
@@ -196,7 +201,7 @@ function sendHeartbeat(state: AgentState): void {
 }
 
 function getMachineId(): string {
-  return require('crypto').randomBytes(16).toString('hex');
+  return randomBytes(16).toString('hex');
 }
 
 function displayCapabilities(state: AgentState): void {

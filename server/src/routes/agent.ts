@@ -6,19 +6,28 @@ const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE
 
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
   let agentId: string | undefined;
-  
+  const requiredToken = getConfig().agentToken;
+
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      
+
       if (msg.type === 'CLIENT_HELLO') {
+        // Gate agent registration behind a shared token when configured, so
+        // random clients cannot register and squat capabilities.
+        if (requiredToken && msg.token !== requiredToken) {
+          output.warn('Rejected agent registration: invalid or missing token');
+          try { ws.close(1008, 'Invalid agent token'); } catch {}
+          return;
+        }
+
         agentId = routing.registerAgent(ws, msg.machineId);
-        
+
         ws.send(JSON.stringify({
           type: 'ASSIGN',
           agentId, // Provide agentId for logging/diagnostics on the agent
         }));
-        
+
         output.info(`Agent registered: ${agentId}`);
       } else if (msg.type === 'ANNOUNCE_CAP' && agentId) {
         const success = routing.announceCapability(agentId, msg.capId);
@@ -30,8 +39,13 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
         }
       } else if (msg.type === 'HEARTBEAT' && agentId) {
         routing.updateHeartbeat(agentId);
-      } else if (msg.type === 'RELAY_RESPONSE') {
-        // Route the message to the appropriate invoker
+      } else if (msg.type === 'RELAY_RESPONSE' && agentId) {
+        // Route the message to the appropriate invoker — but only if that
+        // invoker belongs to a capability THIS agent owns.
+        if (!routing.invokerBelongsToAgent(msg.socketId, agentId)) {
+          output.warn(`Dropping RELAY_RESPONSE to non-owned invoker: ${msg.socketId}`);
+          return;
+        }
         const invoker = routing.findInvoker(msg.socketId);
         if (invoker && invoker.ws.readyState === ws.OPEN) {
           const buf = Buffer.from(msg.frame, 'base64');

@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
-import { deriveKeys, extractSaltFromCapId, aeadEncrypt, aeadDecrypt, computeHmac, sha256Hex } from '@thenewlabs/entangle-crypto';
-import { FrameType, FrameReader, encodeFrame } from '@thenewlabs/entangle-protocol';
-import { BidirectionalCounters } from '@thenewlabs/entangle-utils/browser';
-import { encode, decode } from 'cborg';
 import 'xterm/css/xterm.css';
 
 interface TerminalViewProps {
@@ -14,330 +10,102 @@ interface TerminalViewProps {
   };
 }
 
-export function TerminalView({ capability }: TerminalViewProps) {
+// Pure UI over the window.entangle PTY client; all crypto/protocol lives in
+// window-entangle-spawn.ts.
+export function TerminalView(_props: TerminalViewProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<'connecting' | 'authenticating' | 'password' | 'ready' | 'error'>('connecting');
-  const [error, setError] = useState<string | null>(null);
-  const [cwd, setCwd] = useState<string>('');
-  const [showPasswordDialog, setShowPasswordDialog] = useState(false);
-  const [password, setPassword] = useState<string>('');
-  const [showCwdDialog, setShowCwdDialog] = useState(false);
-  
-  const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const sessionIdRef = useRef<string>(Math.random().toString(36).substr(2, 9));
-  const keysRef = useRef<any>(null);
-  const countersRef = useRef<any>(null);
-  const cwdRef = useRef<string | undefined>(undefined);
+  const childRef = useRef<any>(null);
+  const startedRef = useRef(false);
 
-  // Initialize xterm and send TTY_OPEN once status is ready and DOM is mounted
-  const initializeTerminal = (workingDir?: string) => {
-    if (!terminalRef.current || termRef.current || !wsRef.current || !keysRef.current || !countersRef.current) return;
-    const term = new Terminal({
-      cursorBlink: true,
-      fontSize: 14,
-      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-      theme: { background: '#1e1e1e', foreground: '#d4d4d4' },
-    });
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(terminalRef.current);
-    fitAddon.fit();
-    termRef.current = term;
-    fitAddonRef.current = fitAddon;
+  const [status, setStatus] = useState<'connecting' | 'ready' | 'error'>('connecting');
+  const [error, setError] = useState<string | null>(null);
+  const [needPassword, setNeedPassword] = useState(false);
+  const [password, setPassword] = useState('');
 
-    // Send TTY_OPEN
-    const ttyOpen = {
-      sessionId: sessionIdRef.current,
-      cwd: workingDir,
-      cols: term.cols,
-      rows: term.rows,
-    };
-    const encrypted = aeadEncrypt(keysRef.current.K_enc, FrameType.TTY_OPEN, countersRef.current.outgoing.next(), ttyOpen);
-    const frame = encodeFrame(FrameType.TTY_OPEN, encode(encrypted));
-    wsRef.current.send(frame);
-
-    // Handle terminal input
-    term.onData((data) => {
-      const ttyData = { sessionId: sessionIdRef.current, chunk: new TextEncoder().encode(data) };
-      const enc = aeadEncrypt(keysRef.current.K_enc, FrameType.TTY_DATA, countersRef.current.outgoing.next(), ttyData);
-      wsRef.current!.send(encodeFrame(FrameType.TTY_DATA, encode(enc)));
-    });
-
-    // Handle resize
-    const handleResize = () => {
-      if (!fitAddonRef.current || !termRef.current) return;
-      fitAddonRef.current.fit();
-      const resize = { sessionId: sessionIdRef.current, cols: termRef.current.cols, rows: termRef.current.rows };
-      const enc = aeadEncrypt(keysRef.current.K_enc, FrameType.TTY_RESIZE, countersRef.current.outgoing.next(), resize);
-      wsRef.current!.send(encodeFrame(FrameType.TTY_RESIZE, encode(enc)));
-    };
-    window.addEventListener('resize', handleResize);
-
-    // Cleanup on close
-    const cleanup = () => window.removeEventListener('resize', handleResize);
-    wsRef.current.onclose = () => {
-      cleanup();
-      if (termRef.current) termRef.current.write('\r\n[Disconnected]\r\n');
-    };
-  };
-  
-  const connect = async (workingDir?: string) => {
-    setShowCwdDialog(false);
-    setStatus('connecting');
-    cwdRef.current = workingDir;
-    
-    try {
-      // Derive keys
-      const saltCap = extractSaltFromCapId(capability.capId);
-      const keys = await deriveKeys(capability.S, saltCap);
-      keysRef.current = keys;
-      
-      // Connect to WebSocket
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/relay/${capability.capId}`;
-      
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      
-      const reader = new FrameReader();
-      const counters = new BidirectionalCounters();
-      countersRef.current = counters;
-      let authenticated = false;
-      let passwordVerified = false;
-      let nonceC: string | undefined;
-      
-      ws.onopen = async () => {
-        setStatus('authenticating');
-        
-        // Send AUTH1
-        const nonceB = Math.random().toString(36);
-        const nonceBHex = Array.from(new TextEncoder().encode(nonceB)).map(b => b.toString(16).padStart(2, '0')).join('');
-        const auth1Data = new TextEncoder().encode('hello' + capability.capId + nonceBHex);
-        const auth1Hmac = computeHmac(keys.K_auth, auth1Data);
-        
-        // console.log('[TerminalView] AUTH1 details:', {
-        //   capId: capability.capId,
-        //   nonceB: nonceBHex,
-        //   auth1DataString: 'hello' + capability.capId + nonceBHex,
-        //   hmacHex: Array.from(auth1Hmac).map(b => b.toString(16).padStart(2, '0')).join('')
-        // });
-        
-        // Combine HMAC and nonceB for AUTH1 payload
-        // Important: send the same representation used in HMAC (hex)
-        const nonceBBytes = new TextEncoder().encode(nonceBHex);
-        const auth1Payload = new Uint8Array(32 + nonceBBytes.length);
-        auth1Payload.set(auth1Hmac, 0);
-        auth1Payload.set(nonceBBytes, 32);
-        
-        const auth1Frame = encodeFrame(FrameType.AUTH1, auth1Payload);
-        ws.send(auth1Frame);
-      };
-      
-      ws.onmessage = async (event) => {
-        const data = await event.data.arrayBuffer();
-        const frames = reader.push(new Uint8Array(data));
-        
-        for (const frame of frames) {
-          try {
-            if (frame.type === FrameType.AUTH2 && !authenticated) {
-              // Handle AUTH2
-              const encrypted = decode(frame.payload) as any;
-              const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH2, encrypted.nonce, encrypted.cipher);
-              const auth2 = decrypted.msg;
-              
-              nonceC = auth2.nonceC;
-              const requiresPassword = auth2.requiresPassword || false;
-              
-              // Send AUTH3
-              const auth3Data = new TextEncoder().encode('ready' + nonceC);
-              const auth3Hmac = computeHmac(keys.K_auth, auth3Data);
-              const auth3Frame = encodeFrame(FrameType.AUTH3, auth3Hmac);
-              ws.send(auth3Frame);
-              
-              authenticated = true;
-              
-              // Check if password is required
-              if (requiresPassword) {
-                setStatus('password');
-                
-                // Check if password is in URL fragment
-                const hashParams = new URLSearchParams(window.location.hash.slice(1));
-                const urlPassword = hashParams.get('PW');
-                
-                if (urlPassword) {
-                  // Send password automatically
-                  const pwMsg = {
-                    ctr: counters.outgoing.next(),
-                    msg: { passwordHash: sha256Hex(urlPassword) }
-                  };
-                  
-                  const pwEncrypted = aeadEncrypt(keys.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
-                  const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
-                  ws.send(pwFrame);
-                  // Share hashed password with window helper
-                  (window as any).entangle = (window as any).entangle || {};
-                  (window as any).entangle.passwordHash = pwMsg.msg.passwordHash;
-                } else {
-                  // Show password dialog; init after verification via effect
-                  setShowPasswordDialog(true);
-                  return;
-                }
-              } else {
-                passwordVerified = true;
-                setStatus('ready');
-              }
-
-              // Initialize terminal
-              initializeTerminal(workingDir);
-              
-            } else if (frame.type === FrameType.AUTH_PW && authenticated && !passwordVerified) {
-              // Handle password response
-              const encrypted = decode(frame.payload) as any;
-              const decrypted = aeadDecrypt(keys.K_enc, FrameType.AUTH_PW, encrypted.nonce, encrypted.cipher);
-              counters.incoming.validate(decrypted.ctr);
-              
-              const pwResponse = decrypted.msg as { ok: boolean };
-              if (pwResponse.ok) {
-                passwordVerified = true;
-                setStatus('ready');
-                setShowPasswordDialog(false);
-                // Initialize terminal after React updates DOM via effect
-              } else {
-                setError('Invalid password');
-                setStatus('error');
-                ws.close();
-              }
-            } else if (frame.type === FrameType.TTY_DATA && authenticated && passwordVerified) {
-              // Handle TTY data
-              const encrypted = decode(frame.payload) as any;
-              const decrypted = aeadDecrypt(keys.K_enc, FrameType.TTY_DATA, encrypted.nonce, encrypted.cipher);
-              counters.incoming.validate(decrypted.ctr);
-              
-              const msg = decrypted.msg as any;
-              if (msg.sessionId === sessionIdRef.current && termRef.current) {
-                termRef.current.write(new Uint8Array(msg.chunk));
-              }
-              
-            } else if (frame.type === FrameType.TTY_EXIT && authenticated && passwordVerified) {
-              // Handle TTY exit
-              const encrypted = decode(frame.payload) as any;
-              const decrypted = aeadDecrypt(keys.K_enc, FrameType.TTY_EXIT, encrypted.nonce, encrypted.cipher);
-              counters.incoming.validate(decrypted.ctr);
-              
-              const msg = decrypted.msg as any;
-              if (msg.sessionId === sessionIdRef.current) {
-                if (termRef.current) {
-                  termRef.current.write('\r\n[Process exited with code ' + (msg.code ?? 'null') + ']\r\n');
-                }
-                ws.close();
-              }
-              
-            } else if (frame.type === FrameType.ERROR) {
-              // Handle error
-              const encrypted = decode(frame.payload) as any;
-              const decrypted = aeadDecrypt(keys.K_enc, FrameType.ERROR, encrypted.nonce, encrypted.cipher);
-              const error = decrypted.msg;
-              setError(`${error.code}: ${error.detail || 'Unknown error'}`);
-              setStatus('error');
-            }
-          } catch (err) {
-            console.error('Frame handling error:', err);
-          }
-        }
-      };
-      
-      ws.onerror = (event) => {
-        console.error('WebSocket error:', event);
-        setError('Connection error');
-        setStatus('error');
-      };
-      
-      ws.onclose = () => {
-        if (termRef.current) {
-          termRef.current.write('\r\n[Disconnected]\r\n');
-        }
-      };
-      
-    } catch (err: any) {
-      setError(err.message || 'Failed to connect');
+  const start = () => {
+    if (!terminalRef.current) return;
+    const entangle = (window as any).entangle;
+    if (!entangle?.openTerminal) {
+      setError('Entangle client not ready (missing capability in URL)');
       setStatus('error');
+      return;
     }
+
+    if (!termRef.current) {
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        theme: { background: '#1e1e1e', foreground: '#d4d4d4' },
+      });
+      const fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(terminalRef.current);
+      fitAddon.fit();
+      termRef.current = term;
+      fitAddonRef.current = fitAddon;
+    }
+
+    const term = termRef.current;
+    const child = entangle.openTerminal({ cols: term.cols, rows: term.rows });
+    childRef.current = child;
+
+    child.on('opened', () => {
+      setStatus('ready');
+      setNeedPassword(false);
+
+      term.onData((data: string) => child.stdin.write(data));
+
+      const handleResize = () => {
+        fitAddonRef.current?.fit();
+        child.resize(term.cols, term.rows);
+      };
+      window.addEventListener('resize', handleResize);
+      (child as any).__onResize = handleResize;
+    });
+
+    child.on('data', (chunk: Uint8Array) => term.write(chunk));
+
+    child.on('exit', (code: number | null) => {
+      term.write(`\r\n[Process exited with code ${code ?? 'null'}]\r\n`);
+    });
+
+    child.on('error', (message: string) => {
+      if (/password/i.test(message)) {
+        setNeedPassword(true);
+        setStatus('connecting');
+      } else {
+        setError(message);
+        setStatus('error');
+      }
+    });
   };
-  
+
+  const submitPassword = () => {
+    if (!password) return;
+    // The client reads window.entangle.password during (re)auth.
+    (window as any).entangle = (window as any).entangle || {};
+    (window as any).entangle.password = password;
+    start();
+  };
+
   useEffect(() => {
+    if (!startedRef.current) {
+      startedRef.current = true;
+      start();
+    }
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-      if (termRef.current) {
-        termRef.current.dispose();
-      }
+      const child = childRef.current;
+      if (child?.__onResize) window.removeEventListener('resize', child.__onResize);
+      childRef.current?.kill?.('SIGHUP');
+      termRef.current?.dispose();
     };
-  }, []);
-
-  // Initialize terminal after becoming ready (ensures DOM is mounted)
-  useEffect(() => {
-    if (status === 'ready') {
-      initializeTerminal(cwdRef.current);
-    }
-  }, [status]);
-
-  // Auto-connect on mount if the CWD dialog is hidden
-  useEffect(() => {
-    if (!showCwdDialog) {
-      // No working directory prompt; start session immediately
-      // Intentionally not passing a cwd so server uses default
-      connect();
-    }
-    // Run only on initial mount to avoid double-connects
-    // when the dialog toggles from true -> false via user action
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  
-  const sendPassword = () => {
-    if (!wsRef.current || !password || !keysRef.current || !countersRef.current) return;
-    
-    const pwMsg = {
-      ctr: countersRef.current.outgoing.next(),
-      msg: { passwordHash: sha256Hex(password) }
-    };
-    
-    const pwEncrypted = aeadEncrypt(keysRef.current.K_enc, FrameType.AUTH_PW, pwMsg.ctr, pwMsg.msg);
-    const pwFrame = encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted));
-    wsRef.current.send(pwFrame);
-    // Share hashed password with window helper so entangle.spawn/exec can reuse
-    (window as any).entangle = (window as any).entangle || {};
-    (window as any).entangle.passwordHash = sha256Hex(password);
-  };
-  
-  if (showCwdDialog) {
-    return (
-      <div className="terminal-view">
-        <div className="cwd-dialog">
-          <h2>Terminal Session</h2>
-          <p>Working Directory (optional):</p>
-          <input
-            type="text"
-            value={cwd}
-            onChange={(e) => setCwd(e.target.value)}
-            placeholder="/home/user"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                connect(cwd || undefined);
-              }
-            }}
-          />
-          <div className="buttons">
-            <button onClick={() => connect(cwd || undefined)}>Connect</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-  
-  if (showPasswordDialog) {
+
+  if (needPassword) {
     return (
       <div className="terminal-view">
         <div className="cwd-dialog">
@@ -350,31 +118,21 @@ export function TerminalView({ capability }: TerminalViewProps) {
             placeholder="Enter password"
             autoFocus
             onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                sendPassword();
-              }
+              if (e.key === 'Enter') submitPassword();
             }}
           />
           <div className="buttons">
-            <button onClick={sendPassword}>Submit</button>
+            <button onClick={submitPassword}>Submit</button>
           </div>
         </div>
       </div>
     );
   }
-  
+
   return (
     <div className="terminal-view">
-      {status === 'error' && (
-        <div className="error-banner">
-          Error: {error}
-        </div>
-      )}
-      {(status === 'connecting' || status === 'authenticating') && (
-        <div className="status-banner">
-          {status === 'connecting' ? 'Connecting...' : 'Authenticating...'}
-        </div>
-      )}
+      {status === 'error' && <div className="error-banner">Error: {error}</div>}
+      {status === 'connecting' && <div className="status-banner">Connecting...</div>}
       <div ref={terminalRef} className="terminal-container" />
     </div>
   );

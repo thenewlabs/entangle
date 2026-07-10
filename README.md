@@ -76,17 +76,22 @@ Tip: All CLIs support `--output-mode text|stream-json`.
 - Agent: `npm run dev --workspace=@thenewlabs/entangle-agent`
 
 ## Security Highlights
-- AEAD (XChaCha20‑Poly1305) with counters prevents replay and reordering.
-- HMAC handshake (AUTH1/2/3) proves knowledge of secret `S`.
-- Relay enforces max frame sizes and rate limits; stays blind to plaintext.
+- AEAD (XChaCha20‑Poly1305) with per‑message counters prevents replay and reordering.
+- **Per‑session keys**: after the AUTH1/2/3 handshake, `K_enc`/`K_auth` are derived from the fresh handshake nonces (`nonceB`‖`nonceC`), so ciphertext captured from one session can't be replayed into another. The client verifies the echoed `nonceB` and session `expiryTs`, so a hostile/replaying relay can't spoof the agent or inject stale output.
+- AAD binds each frame to its type **and direction** (no reflection of a frame back to its sender).
+- HMAC handshake (AUTH1/2/3) proves knowledge of secret `S`; the optional password second factor is stored with Argon2id and verified in constant time.
+- Command execution uses a **minimal environment** and an enforced **CWD allow‑list** on every exec path (command and PTY streams alike).
+- Relay enforces max frame sizes, per‑IP rate limits (bounded memory), a strict CSP on the web UI, and an optional agent‑registration token; it stays blind to plaintext.
 
 ## Concurrency
 - Multiple concurrent invoker sessions per capability are supported (bounded by `RELAY_BURST`).
-- `singleRun` policy restricts multiple `RUN` commands within a single session only.
+- Each command/terminal runs as an independent multiplexed stream within a session.
 
 ## Key Env Vars
-- Server: `PORT`, `HOST`, `MAX_FRAME_BYTES`, `RELAY_RATE_RPS`, `RELAY_BURST`
-- Agent: `RELAY_URL`, `AGENT_ALLOWED_CWD`, `AGENT_DEFAULT_CWD`, `MAX_OUT_BYTES`
+- Server: `PORT`, `HOST`, `MAX_FRAME_BYTES`, `RELAY_RATE_RPS`, `RELAY_BURST`, `CORS_ORIGINS`, `TRUST_PROXY`, `RELAY_AGENT_TOKEN`
+- Agent: `RELAY_URL`, `AGENT_ALLOWED_CWD`, `AGENT_DEFAULT_CWD`, `AGENT_ENV_PASSTHROUGH`, `RELAY_AGENT_TOKEN`, `MAX_OUT_BYTES`
+
+> Note: this is protocol **v2** and is not wire‑compatible with 1.0.0 — upgrade agent, relay, and connect together. Existing capabilities (`~/.entangle/capabilities.json`, shared `#S=` URLs) stay valid; password‑protected capabilities must have their password re‑set. Put the relay behind TLS and set `TRUST_PROXY=1` only when it sits behind a proxy you control.
 
 ## Repo Layout
 - `agent/` Agent CLI + runner + PTY

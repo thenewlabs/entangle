@@ -10,6 +10,16 @@ export interface DerivedKeys {
   K_auth: Uint8Array;
 }
 
+/**
+ * AEAD direction discriminator. Bound into the AAD of every frame so a
+ * ciphertext produced for one direction can never be reflected back and
+ * accepted in the other direction (both peers share the same K_enc).
+ */
+export enum AeadDir {
+  ServerToClient = 1, // agent -> invoker
+  ClientToServer = 2, // invoker -> agent
+}
+
 let sodiumReady = false;
 
 export async function initCrypto(): Promise<void> {
@@ -50,12 +60,17 @@ export function generateSecret(): string {
   return base64UrlEncode(secret);
 }
 
-export async function deriveKeys(S: Uint8Array | string, saltCap: Uint8Array): Promise<DerivedKeys> {
+/**
+ * Derive the root key material from the capability secret. This is the
+ * expensive Argon2id step; callers should run it once per connection and
+ * reuse the returned `K_raw` for both bootstrap and session key derivation.
+ */
+export async function deriveKeyMaterial(S: Uint8Array | string, saltCap: Uint8Array): Promise<Uint8Array> {
   await initCrypto();
-  
+
   const secretBytes = typeof S === 'string' ? base64UrlDecode(S) : S;
-  
-  const K_raw = sodium.crypto_pwhash(
+
+  return sodium.crypto_pwhash(
     32,
     secretBytes,
     saltCap,
@@ -63,19 +78,46 @@ export async function deriveKeys(S: Uint8Array | string, saltCap: Uint8Array): P
     sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE,
     sodium.crypto_pwhash_ALG_ARGON2ID13
   );
-  
-  const derived = hkdf(
-    sha256,
-    K_raw,
-    new Uint8Array(0),
-    new TextEncoder().encode('entangle-capability'),
-    64
-  );
-  
+}
+
+function hkdfKeys(K_raw: Uint8Array, salt: Uint8Array, info: string): DerivedKeys {
+  const derived = hkdf(sha256, K_raw, salt, new TextEncoder().encode(info), 64);
   return {
     K_enc: derived.slice(0, 32),
     K_auth: derived.slice(32, 64),
   };
+}
+
+/**
+ * Bootstrap keys — derived purely from the capability secret, identical for
+ * every session. Used ONLY to authenticate AUTH1 and to protect the AUTH2
+ * handshake message that carries the fresh session nonces. Never used for
+ * command data.
+ */
+export function deriveBootstrapKeys(K_raw: Uint8Array): DerivedKeys {
+  return hkdfKeys(K_raw, new Uint8Array(0), 'entangle-capability');
+}
+
+/**
+ * Per-session keys — bound to the fresh handshake nonces (nonceB from the
+ * client, nonceC from the agent). Because both nonces are random per
+ * connection, every session gets distinct K_enc/K_auth, so ciphertext
+ * captured from one session cannot be replayed into another (each side's
+ * counters also reset per session). This is what actually defeats the
+ * cross-session replay / stale-output-injection attack.
+ */
+export function deriveSessionKeys(K_raw: Uint8Array, nonceB: string, nonceC: string): DerivedKeys {
+  const salt = new TextEncoder().encode(`${nonceB}|${nonceC}`);
+  return hkdfKeys(K_raw, salt, 'entangle-session-v2');
+}
+
+/**
+ * Convenience: bootstrap keys directly from the secret. Kept for callers that
+ * only need the capability-static keys (e.g. AUTH1 HMAC before nonces exist).
+ */
+export async function deriveKeys(S: Uint8Array | string, saltCap: Uint8Array): Promise<DerivedKeys> {
+  const K_raw = await deriveKeyMaterial(S, saltCap);
+  return deriveBootstrapKeys(K_raw);
 }
 
 export interface AeadEncResult {
@@ -83,16 +125,25 @@ export interface AeadEncResult {
   cipher: Uint8Array;
 }
 
+/**
+ * Canonical AAD for a frame: binds both the frame type and the direction so
+ * a peer can never accept its own ciphertext reflected back.
+ */
+export function frameAad(type: number, dir: AeadDir): Uint8Array {
+  return encode({ type, dir });
+}
+
 export function aeadEncrypt(
   K_enc: Uint8Array,
   type: number,
   ctr: number,
-  plaintext: any
+  plaintext: any,
+  dir: AeadDir
 ): AeadEncResult {
   const nonce = sodium.randombytes_buf(CRYPTO_PARAMS.NONCE_BYTES);
-  const aad = encode({ type });
+  const aad = frameAad(type, dir);
   const pt = encode({ ctr, msg: plaintext });
-  
+
   const cipher = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
     pt,
     aad,
@@ -100,7 +151,7 @@ export function aeadEncrypt(
     nonce,
     K_enc
   );
-  
+
   return { nonce, cipher };
 }
 
@@ -108,10 +159,11 @@ export function aeadDecrypt(
   K_enc: Uint8Array,
   type: number,
   nonce: Uint8Array,
-  cipher: Uint8Array
+  cipher: Uint8Array,
+  dir: AeadDir
 ): { ctr: number; msg: any } {
-  const aad = encode({ type });
-  
+  const aad = frameAad(type, dir);
+
   const pt = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
     null,
     cipher,
@@ -119,9 +171,33 @@ export function aeadDecrypt(
     nonce,
     K_enc
   );
-  
+
   const decoded = decode(pt) as { ctr: number; msg: any };
   return decoded;
+}
+
+/**
+ * Password hashing for the optional second-factor. Uses Argon2id with a
+ * random salt (via libsodium's crypto_pwhash_str), so the stored value is not
+ * a password-equivalent secret and cracking a leaked value is expensive.
+ */
+export async function hashPassword(password: string): Promise<string> {
+  await initCrypto();
+  return sodium.crypto_pwhash_str(
+    password,
+    sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE,
+    sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE
+  );
+}
+
+/** Constant-time verification of a password against a stored Argon2id hash. */
+export async function verifyPassword(storedHash: string, password: string): Promise<boolean> {
+  await initCrypto();
+  try {
+    return sodium.crypto_pwhash_str_verify(storedHash, password);
+  } catch {
+    return false;
+  }
 }
 
 export function computeHmac(K_auth: Uint8Array, data: Uint8Array): Uint8Array {

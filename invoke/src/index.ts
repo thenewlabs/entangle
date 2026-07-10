@@ -35,6 +35,12 @@ const program = new Command();
 
 program
   .name('entangle-connect')
+  // Everything after <cap-url> is the remote command verbatim, so flags like
+  // `ls -la` or `sh -c '...'` are passed through instead of being parsed as
+  // entangle-connect options. entangle-connect's own options go before the URL
+  // (e.g. `entangle-connect --cwd /srv <url> ls -la`); `--` also works.
+  .enablePositionalOptions()
+  .passThroughOptions()
   .description('Invoke commands or terminal sessions on remote capabilities')
   .version(getVersionInfo())
   .argument('<cap-url>', 'Capability URL (e.g., https://suncoder.dev/cap/capId#S=secret)')

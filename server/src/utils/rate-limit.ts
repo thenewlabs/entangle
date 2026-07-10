@@ -15,12 +15,19 @@ export interface RateDecision {
   retryAfterMs?: number;
 }
 
+// Hard cap on tracked IPs so a flood of distinct source IPs can't grow the map
+// without bound. When exceeded, the oldest-touched buckets are evicted.
+const MAX_BUCKETS = 50_000;
+
 export class PerIpRateLimiter {
   private buckets = new Map<string, Bucket>();
 
   check(ip: string): RateDecision {
     const { relayRateRps, relayBurst } = getConfig();
     const now = Date.now();
+
+    this.evictIfNeeded(now);
+
     const bucket = this.buckets.get(ip) || {
       tokens: relayBurst,
       lastRefill: now,
@@ -62,6 +69,25 @@ export class PerIpRateLimiter {
 
     output.warn(`WS upgrade rate-limited for IP ${ip}: strikes=${bucket.strikes}, backoff=${backoffMs}ms`);
     return { allowed: false, retryAfterMs: backoffMs };
+  }
+
+  /**
+   * Keep the bucket map bounded. Only acts once the map reaches the hard cap,
+   * then evicts oldest-inserted, non-cooldown buckets down to a low-water mark.
+   * A Map iterates in insertion order, so this is amortized O(1) per check
+   * (each bucket is created once and evicted at most once) — no per-call scan.
+   * Buckets in active cooldown are retained so eviction can't reset a
+   * misbehaving IP's backoff.
+   */
+  private evictIfNeeded(now: number): void {
+    if (this.buckets.size < MAX_BUCKETS) return;
+
+    const target = Math.floor(MAX_BUCKETS * 0.9);
+    for (const [ip, b] of this.buckets) {
+      if (this.buckets.size <= target) break;
+      const inCooldown = b.cooldownUntil && now < b.cooldownUntil;
+      if (!inCooldown && now - b.lastRefill > 0) this.buckets.delete(ip);
+    }
   }
 }
 

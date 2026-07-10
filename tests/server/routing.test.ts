@@ -31,7 +31,7 @@ describe('Server Routing', () => {
       const agentId = routing.registerAgent(ws, machineId);
       
       expect(agentId).toBeTruthy();
-      expect(agentId).toMatch(/^[a-z0-9]{9}$/);
+      expect(agentId).toMatch(/^[A-Za-z0-9_-]{16}$/);
       expect(routing.getAgentCount()).toBe(1);
     });
 
@@ -130,7 +130,7 @@ describe('Server Routing', () => {
       const invokerId = routing.registerInvoker(ws, capId);
       
       expect(invokerId).toBeTruthy();
-      expect(invokerId).toMatch(/^[a-z0-9]{9}$/);
+      expect(invokerId).toMatch(/^[A-Za-z0-9_-]{16}$/);
     });
 
     it('should generate unique invoker IDs', () => {
