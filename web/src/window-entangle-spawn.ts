@@ -57,6 +57,11 @@ class EntangleConnection {
   private streamCounters = new StreamCounters();
   private children = new Map<string, BrowserChildProcess>();
   private pendingOpens: BrowserChildProcess[] = [];
+  // In-flight password verification: sent once, awaited by every stream open so
+  // no STREAM_OPEN races ahead of the agent's AUTH_PW verification.
+  private pwVerifyPromise: Promise<void> | null = null;
+  private pwResolve: (() => void) | null = null;
+  private pwReject: ((err: Error) => void) | null = null;
 
   constructor(private capId: string, private S: string) {}
 
@@ -69,6 +74,40 @@ class EntangleConnection {
     // The password is supplied interactively (the UI stores it here); it is
     // never read from the URL, so a second factor can't travel with S.
     return (window as any).entangle?.password || undefined;
+  }
+
+  // Resolve/reject the in-flight password verification and clear its state.
+  private _settlePassword(err?: Error): void {
+    const resolve = this.pwResolve;
+    const reject = this.pwReject;
+    this.pwVerifyPromise = null;
+    this.pwResolve = null;
+    this.pwReject = null;
+    if (err) reject?.(err);
+    else resolve?.();
+  }
+
+  /**
+   * Send AUTH_PW (once) and resolve only when the agent confirms it, so callers
+   * can await verification before opening a stream. Throws if no password is
+   * available yet (the UI then prompts for one).
+   */
+  private verifyPasswordIfNeeded(): Promise<void> {
+    if (!this.requiresPassword || this.passwordVerified) return Promise.resolve();
+    if (this.pwVerifyPromise) return this.pwVerifyPromise;
+    if (!this.ws || !this.keys) return Promise.reject(new Error('Not connected'));
+
+    const password = this.getPassword();
+    if (!password) return Promise.reject(new Error('Password verification required'));
+
+    this.pwVerifyPromise = new Promise<void>((resolve, reject) => {
+      this.pwResolve = resolve;
+      this.pwReject = reject;
+    });
+    const ctr = this.counters.outgoing.next();
+    const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
+    this.ws.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
+    return this.pwVerifyPromise;
   }
 
   private async connect(): Promise<void> {
@@ -119,14 +158,9 @@ class EntangleConnection {
             this.ws!.send(encodeFrame(FrameType.AUTH3, auth3Hmac));
             this.authenticated = true;
 
-            if (this.requiresPassword) {
-              const password = this.getPassword();
-              if (password) {
-                const ctr = this.counters.outgoing.next();
-                const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
-                this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
-              }
-            }
+            // Password (if required) is verified lazily and awaited in
+            // _openChild before any stream opens, so a STREAM_OPEN can't race
+            // ahead of the agent's AUTH_PW verification.
             resolve();
             continue;
           }
@@ -138,9 +172,27 @@ class EntangleConnection {
             this.counters.incoming.validate(decrypted.ctr);
             if (decrypted.msg && decrypted.msg.ok) {
               this.passwordVerified = true;
+              this._settlePassword();
             } else {
-              // Surface an error to all pending children
-              for (const child of this.pendingOpens.splice(0)) child._onError('Invalid password');
+              this._settlePassword(new Error('Invalid password'));
+            }
+            continue;
+          }
+          if (frame.type === FrameType.ERROR) {
+            // The agent reports a rejected password (and other faults) as an
+            // ERROR frame, not an AUTH_PW ok:false. Surface it so a bad password
+            // rejects the pending verification (and re-prompts) instead of
+            // hanging, and dead pending opens don't wait forever.
+            let detail = 'error';
+            try {
+              const encrypted = decode(frame.payload) as any;
+              const decrypted = aeadDecrypt(this.keys.K_enc, FrameType.ERROR, encrypted.nonce, encrypted.cipher, AeadDir.ServerToClient);
+              detail = decrypted.msg?.detail || decrypted.msg?.code || 'error';
+            } catch {}
+            if (this.pwReject) {
+              this._settlePassword(new Error(detail));
+            } else {
+              for (const child of this.pendingOpens.splice(0)) child._onError(detail);
             }
             continue;
           }
@@ -152,6 +204,7 @@ class EntangleConnection {
       this.ws!.onerror = () => reject(new Error('WebSocket error'));
       this.ws!.onclose = () => {
         this.authenticated = false;
+        if (this.pwReject) this._settlePassword(new Error('disconnect'));
         // Inform children of disconnect
         for (const child of this.children.values()) child._onError('disconnect');
         this.children.clear();
@@ -247,14 +300,14 @@ class EntangleConnection {
   async _openChild(child: BrowserChildProcess): Promise<void> {
     await this.ensureConnected();
     if (!this.ws || !this.keys) throw new Error('Not connected');
+    // Complete password verification BEFORE opening the stream, otherwise the
+    // STREAM_OPEN races the agent's AUTH_PW check and is rejected with
+    // "Password verification required".
     if (this.requiresPassword && !this.passwordVerified) {
-      const password = this.getPassword();
-      if (password) {
-        const ctr = this.counters.outgoing.next();
-        const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
-        this.ws!.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
-      } else {
-        child._onError('Password verification required');
+      try {
+        await this.verifyPasswordIfNeeded();
+      } catch (err: any) {
+        child._onError(err?.message || 'Password verification required');
         return;
       }
     }

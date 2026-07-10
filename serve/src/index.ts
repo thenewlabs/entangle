@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { startAgent } from './agent.js';
 import { createCapability, resolveServeTarget } from './capability.js';
+import { promptHidden } from './prompt.js';
 
 const program = new Command();
 
@@ -22,7 +23,7 @@ program
   .description('Start the agent (mint a fresh capability or serve a pinned one) and register with the relay')
   .argument('[url]', 'Relay origin (https://relay) to mint a fresh capability on, or a full capability URL (https://relay/cap/<capId>#S=<secret>) to serve that exact capability')
   .option('--server <url>', 'Relay server URL (overrides the origin of the positional URL)')
-  .option('--password <password>', 'Optional password for agent authentication')
+  .option('--password [password]', 'Require a password to connect; pass the flag alone to be prompted, or set AGENT_PASSWORD')
   .option('--capability <url>', 'Serve a specific capability URL (https://relay/cap/<capId>#S=<secret>) instead of minting a fresh ephemeral one; its host is also used as the relay server')
   .action(async (url: string | undefined, options) => {
     try {
@@ -42,10 +43,22 @@ program
         configRelayUrl: config.relayUrl,
       });
 
+      // `--password` with no value (commander yields `true`) prompts interactively
+      // so the secret never appears in argv; a string value or AGENT_PASSWORD is
+      // used verbatim.
+      let password: string | undefined;
+      if (options.password === true) {
+        password = await promptHidden('Agent password: ');
+      } else if (typeof options.password === 'string') {
+        password = options.password;
+      } else {
+        password = process.env.AGENT_PASSWORD;
+      }
+
       await startAgent({
         serverUrl,
         outputMode: program.opts().outputMode,
-        password: options.password || process.env.AGENT_PASSWORD,
+        ...(password ? { password } : {}),
         ...(pinnedCapability && { pinnedCapability }),
       });
     } catch (error) {
