@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-utils",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,11 +16,11 @@
   },
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@thenewlabs/entangle-protocol": "^2.0.0",
+    "@thenewlabs/entangle-protocol": "^2.0.1",
     "dotenv": "^17.4.2",
     "pino": "^10.3.1"
   },
