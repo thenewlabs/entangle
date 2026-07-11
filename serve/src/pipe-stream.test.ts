@@ -12,9 +12,9 @@ interface Collected {
   error: string[];
 }
 
-function makeManager(c: Collected, pipeEndpoints: Map<string, PipeEndpoint>): StreamManager {
+function makeManager(c: Collected, pipeEndpoints: Map<string, PipeEndpoint>, maxStreams = 4): StreamManager {
   return new StreamManager({
-    policy: { singleRun: false, maxStreams: 4 } as any,
+    policy: { singleRun: false, maxStreams } as any,
     output: new OutputHandler({ mode: parseOutputMode('text') }),
     pipeEndpoints,
     onStreamData: (_sid, data) => c.data.push(Buffer.from(data).toString()),
@@ -113,6 +113,61 @@ describe('StreamManager pipe (tcp)', () => {
       await waitFor(() => c.data.join('').includes('tcp:hi'));
     } finally {
       try { server.close(); } catch {}
+    }
+  });
+});
+
+describe('StreamManager pipe concurrency (maxStreams)', () => {
+  it('rejects a second concurrent pipe when maxStreams is 1', async () => {
+    const sockPath = join(tmpdir(), `entangle-pipe-${randomBytes(6).toString('hex')}.sock`);
+    const server = net.createServer((conn) => { conn.write('hi'); });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+    try {
+      const c: Collected = { data: [], exit: [], error: [] };
+      // maxStreams: 1 is entangle's backward-compatible default — the blocker Locus hit.
+      const sm = makeManager(c, new Map([['glass', { kind: 'unix', path: sockPath }]]), 1);
+      const sid1 = await sm.openPipeStream({ name: 'glass' });
+      expect(typeof sid1).toBe('string');
+      await expect(sm.openPipeStream({ name: 'glass' })).rejects.toThrow(/Maximum streams \(1\) reached/);
+    } finally {
+      try { server.close(); } catch {}
+    }
+  });
+
+  it('opens glass + preview + a terminal-style pipe concurrently when maxStreams is raised', async () => {
+    // Mirrors Locus's real fan-out over ONE capability: a glass protocol channel,
+    // a preview tunnel, and a terminal PTY pipe — all live at once.
+    const mkServer = async (): Promise<string> => {
+      const p = join(tmpdir(), `entangle-pipe-${randomBytes(6).toString('hex')}.sock`);
+      const s = net.createServer((conn) => { conn.write('ready'); });
+      await new Promise<void>((resolve) => s.listen(p, resolve));
+      servers.push(s);
+      return p;
+    };
+    const servers: net.Server[] = [];
+    try {
+      const glass = await mkServer();
+      const preview = await mkServer();
+      const term = await mkServer();
+      const c: Collected = { data: [], exit: [], error: [] };
+      // 32 = LOCUS_MAX_STREAMS; here any value >= 3 proves the fix.
+      const sm = makeManager(c, new Map<string, PipeEndpoint>([
+        ['glass', { kind: 'unix', path: glass }],
+        ['preview', { kind: 'unix', path: preview }],
+        ['terminal', { kind: 'unix', path: term }],
+      ]), 32);
+
+      const sids = await Promise.all([
+        sm.openPipeStream({ name: 'glass' }),
+        sm.openPipeStream({ name: 'preview' }),
+        sm.openPipeStream({ name: 'terminal' }),
+      ]);
+
+      expect(new Set(sids).size).toBe(3); // three distinct live streams
+      expect(c.error).toHaveLength(0);    // none rejected with "Maximum streams"
+      await waitFor(() => c.data.filter((d) => d.includes('ready')).length >= 3);
+    } finally {
+      for (const s of servers) { try { s.close(); } catch {} }
     }
   });
 });

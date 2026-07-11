@@ -10,6 +10,11 @@ export interface CapabilityInfo {
 export async function createCapability(options: {
   singleRun?: boolean;
   outputMode?: string;
+  // Maximum number of concurrent streams this capability permits. Defaults to 1
+  // for backward compatibility; multi-pipe clients (e.g. Locus, which opens a
+  // glass pipe + a preview tunnel + one or more terminal PTYs over a single
+  // capability) pass a higher value so their streams can coexist.
+  maxStreams?: number;
 }): Promise<CapabilityInfo> {
   await initCrypto();
 
@@ -18,7 +23,7 @@ export async function createCapability(options: {
 
   const policy: Policy = {
     singleRun: options.singleRun ?? false,
-    maxStreams: 1, // Default to single stream for backward compatibility
+    maxStreams: options.maxStreams ?? 1, // Default to single stream for backward compatibility
   };
 
   return {
