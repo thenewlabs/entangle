@@ -114,11 +114,13 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
 
     const st = ws.windowState();
     expect(st.windows).toHaveLength(2);
-    expect(st.activeIndex).toBe(1); // the new window is active
+    expect(st.activeIndex).toBe(1); // the new window is the HOST's active
 
-    // Host + the viewport both received the new window-state.
+    // The list changed, so everyone gets a window-state — but each with its OWN
+    // active index: the host follows its new window (1); the viewport, which did
+    // not move, stays on its own active window (0).
     expect(hostStates.at(-1)).toMatchObject({ windows: st.windows, activeIndex: 1 });
-    expect(vp.states.at(-1)).toMatchObject({ windows: st.windows, activeIndex: 1 });
+    expect(vp.states.at(-1)).toMatchObject({ windows: st.windows, activeIndex: 0 });
 
     // A window create does not touch the viewer count / callback.
     expect(viewerChanges).toBe(1);
@@ -176,19 +178,19 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     expect(hostStates.at(-1)!.windows.map((w) => w.title)).toEqual(['build', 'logs']);
   });
 
-  it('runs an independent shell per window (distinct PIDs; input routed to active)', async () => {
+  it('runs an independent shell per window (distinct PIDs; input routed to viewport active)', async () => {
     const ws = makeWorkspace();
     const vp = makeViewport('v1');
     ws.attachViewport(vp);
 
-    // Window 0 is active: its output taps onto the viewport. Echo its PID.
-    ws.write('echo P0=$$\n');
+    // Viewport starts on window 0: its output taps onto the viewport. Echo PID.
+    ws.writeFromViewport('v1', 'echo P0=$$\n');
     await waitFor(() => /P0=\d+/.test(vp.data), { message: 'window-0 marker never reached viewport' });
     const pid0 = /P0=(\d+)/.exec(vp.data)![1];
 
-    // New window becomes active; input now routes to it (via writeFromViewport).
-    ws.newWindow();
-    expect(ws.windowState().activeIndex).toBe(1);
+    // The viewport creates a new window and moves onto it; input now routes there.
+    ws.newWindowForViewport('v1');
+    expect(ws.windowStateForViewport('v1').activeIndex).toBe(1);
     ws.writeFromViewport('v1', 'echo P1=$$\n');
     await waitFor(() => /P1=\d+/.test(vp.data), { message: 'window-1 marker never reached viewport' });
     const pid1 = /P1=(\d+)/.exec(vp.data)![1];
@@ -212,15 +214,15 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     expect(replay).toBeInstanceOf(Uint8Array);
     expect(vp.states).toHaveLength(0);
 
-    ws.newWindow(); // create -> update
+    ws.newWindowForViewport('v1'); // create + move this viewport -> update (own active 1)
     expect(vp.states.at(-1)).toMatchObject({ activeIndex: 1 });
     expect(vp.states.at(-1)!.windows).toHaveLength(2);
 
-    ws.selectWindow(0); // select -> update
+    ws.selectWindowForViewport('v1', 0); // select -> update (own active 0)
     expect(vp.states.at(-1)).toMatchObject({ activeIndex: 0 });
 
     const beforeClose = vp.states.length;
-    ws.closeWindow(1); // close -> update (async: PTY exit drives the broadcast)
+    ws.closeWindowFromViewport('v1', 1); // close -> update (async: PTY exit drives the broadcast)
     await waitFor(() => vp.states.length > beforeClose, { message: 'no window-state after close' });
     expect(vp.states.at(-1)!.windows).toHaveLength(1);
     expect(vp.states.at(-1)!.activeIndex).toBe(0);
@@ -232,17 +234,17 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     ws.attachViewport(vp);
 
     // Window 0 produces a distinctive marker.
-    ws.write('echo ALPHA_REPAINT\n');
+    ws.writeFromViewport('v1', 'echo ALPHA_REPAINT\n');
     await waitFor(() => vp.data.includes('ALPHA_REPAINT'), { message: 'ALPHA never seen' });
 
-    // Second window, produce its own marker.
-    ws.newWindow();
-    ws.write('echo BETA_REPAINT\n');
+    // Second window (this viewport moves onto it), produce its own marker.
+    ws.newWindowForViewport('v1');
+    ws.writeFromViewport('v1', 'echo BETA_REPAINT\n');
     await waitFor(() => vp.data.includes('BETA_REPAINT'), { message: 'BETA never seen' });
 
     // Isolate the switch: reset the collector, then switch back to window 0.
     vp.data = '';
-    ws.selectWindow(0);
+    ws.selectWindowForViewport('v1', 0);
 
     // The switch writes a clear + window-0's replay onto the viewport in one go.
     await waitFor(() => vp.data.includes(CLEAR_ERASE) && vp.data.includes('ALPHA_REPAINT'), {
@@ -339,4 +341,115 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     ws.newWindow(); // ignored — cap reached
     expect(ws.windowState().windows).toHaveLength(2);
   });
+
+  // --- per-viewport independence -------------------------------------------
+
+  it('delivers each window output only to the consumers viewing that window', async () => {
+    const ws = makeWorkspace();
+    const a = makeViewport('a');
+    const b = makeViewport('b');
+    ws.attachViewport(a); // starts on window 0
+    ws.attachViewport(b); // starts on window 0
+
+    // b creates a second window and moves onto it; a stays on window 0.
+    ws.newWindowForViewport('b');
+    expect(ws.windowStateForViewport('a').activeIndex).toBe(0);
+    expect(ws.windowStateForViewport('b').activeIndex).toBe(1);
+
+    // Ignore the create-time repaint payloads.
+    a.data = '';
+    b.data = '';
+
+    // Window 0 output (a's active) reaches only a.
+    ws.writeFromViewport('a', 'echo ONLY_A\n');
+    await waitFor(() => a.data.includes('ONLY_A'), { message: 'A never saw its own window output' });
+
+    // Window 1 output (b's active) reaches only b.
+    ws.writeFromViewport('b', 'echo ONLY_B\n');
+    await waitFor(() => b.data.includes('ONLY_B'), { message: 'B never saw its own window output' });
+
+    // Give any stray cross-delivery a chance to land, then assert isolation.
+    await delay(200);
+    expect(a.data).not.toContain('ONLY_B');
+    expect(b.data).not.toContain('ONLY_A');
+  }, 15000);
+
+  it('a viewport switching windows does not move any other consumer', () => {
+    const ws = makeWorkspace();
+    ws.newWindow(); // host creates window 1 and switches the HOST to it
+    expect(ws.windowState().activeIndex).toBe(1);
+
+    const a = makeViewport('a');
+    const b = makeViewport('b');
+    ws.attachViewport(a); // window 0
+    ws.attachViewport(b); // window 0
+
+    ws.selectWindowForViewport('a', 1); // only a moves
+
+    expect(ws.windowStateForViewport('a').activeIndex).toBe(1); // a moved
+    expect(ws.windowStateForViewport('b').activeIndex).toBe(0); // b untouched
+    expect(ws.windowState().activeIndex).toBe(1);               // host untouched
+
+    // next/prev for a viewport wrap over its OWN active, independently.
+    ws.nextWindowForViewport('b'); // b: 0 -> 1
+    expect(ws.windowStateForViewport('b').activeIndex).toBe(1);
+    ws.prevWindowForViewport('b'); // b: 1 -> 0
+    expect(ws.windowStateForViewport('b').activeIndex).toBe(0);
+    expect(ws.windowStateForViewport('a').activeIndex).toBe(1); // still a's own
+  });
+
+  it('newWindowForViewport switches only that viewport but tells everyone the list grew', () => {
+    const ws = makeWorkspace();
+    const a = makeViewport('a');
+    const b = makeViewport('b');
+    ws.attachViewport(a);
+    ws.attachViewport(b);
+
+    const hostStates: WindowStateBody[] = [];
+    ws.onWindowState((s) => { hostStates.push(s); });
+
+    ws.newWindowForViewport('a'); // creates window 1, moves a onto it
+
+    expect(ws.windowState().windows).toHaveLength(2);
+    expect(ws.windowStateForViewport('a').activeIndex).toBe(1); // a moved
+    expect(ws.windowStateForViewport('b').activeIndex).toBe(0); // b stayed
+    expect(ws.windowState().activeIndex).toBe(0);               // host stayed
+
+    // Every consumer was told the list changed, each with its OWN active index.
+    expect(hostStates.at(-1)).toMatchObject({ activeIndex: 0 });
+    expect(hostStates.at(-1)!.windows).toHaveLength(2);
+    expect(a.states.at(-1)).toMatchObject({ activeIndex: 1 });
+    expect(b.states.at(-1)).toMatchObject({ activeIndex: 0 });
+  });
+
+  it('re-homes the host and each viewport independently when a window closes', async () => {
+    const ws = makeWorkspace({ maxWindows: 8 });
+    ws.newWindow(); // window 1, host active 1
+    ws.newWindow(); // window 2, host active 2  (windows: 0,1,2)
+    expect(ws.windowState().activeIndex).toBe(2);
+
+    const a = makeViewport('a');
+    const b = makeViewport('b');
+    const c = makeViewport('c');
+    ws.attachViewport(a);
+    ws.attachViewport(b);
+    ws.attachViewport(c);
+    ws.selectWindowForViewport('a', 1); // a EXACTLY on the window we'll close
+    ws.selectWindowForViewport('b', 2); // b after the closed window
+    // c stays on window 0 (before the closed window)
+
+    // Close window 1. Post-removal the surviving windows are [orig-0, orig-2].
+    //  - a (== closed idx) re-homes onto neighbor min(1, len-1)=1 -> orig-2
+    //  - b (> idx) decrements 2 -> 1  (still orig-2)
+    //  - c (< idx) unchanged at 0
+    //  - host (> idx) decrements 2 -> 1
+    ws.closeWindow(1);
+    await waitFor(() => ws.windowState().windows.length === 2, { message: 'window 1 never closed' });
+
+    expect(ws.windowState().activeIndex).toBe(1);               // host decremented
+    expect(ws.windowStateForViewport('a').activeIndex).toBe(1); // a re-homed onto neighbor
+    expect(ws.windowStateForViewport('b').activeIndex).toBe(1); // b decremented
+    expect(ws.windowStateForViewport('c').activeIndex).toBe(0); // c unchanged
+    expect(ws.hasExited).toBe(false);
+  }, 15000);
 });
