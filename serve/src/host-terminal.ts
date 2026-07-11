@@ -16,6 +16,9 @@ const MIN_ROWS = 6;
 /** Repaint cadence for the status bar: coalesce shell output into ~30ms frames. */
 const FRAME_MS = 30;
 
+/** Cap on the host's captured-log ring buffer backing the debug tab. */
+const DEBUG_MAX_LINES = 1000;
+
 /** Host window-management prefix (Ctrl-B), tmux-style. */
 const PREFIX = 0x02;
 
@@ -86,6 +89,27 @@ function attachBarTerminal(
   let viewers = shared.viewerCount();
   let barDirty = false;
 
+  // Which surface fills the shell area (rows 1..rows-1). 'shell' is the normal
+  // raw pass-through; 'debug' shows the captured agent-log tail (Ctrl-B d).
+  let viewMode: 'shell' | 'debug' = 'shell';
+  // Capped ring of captured agent logs. While the host owns stdout, agent logs
+  // are redirected here (via the OutputHandler sink) instead of trampling the
+  // terminal; the debug tab renders the tail of this buffer.
+  const debugBuf: string[] = [];
+  let debugDirty = false;
+  const pushLog = (level: string, message: string, data?: unknown) => {
+    let line = `[${level}] ${message}`;
+    if (data !== undefined && data !== null) {
+      let extra: string;
+      try { extra = typeof data === 'string' ? data : JSON.stringify(data); }
+      catch { extra = String(data); }
+      if (extra) line += ` ${extra}`;
+    }
+    debugBuf.push(line);
+    if (debugBuf.length > DEBUG_MAX_LINES) debugBuf.splice(0, debugBuf.length - DEBUG_MAX_LINES);
+    if (viewMode === 'debug') debugDirty = true;
+  };
+
   // Local mirror of the workspace's window set, kept in sync via onWindowState
   // and rendered as the tab row of the bar. Seeded with the current state.
   const initialState = shared.windowState();
@@ -103,8 +127,10 @@ function attachBarTerminal(
     ];
     for (let i = 0; i < windows.length; i++) {
       const title = (windows[i]!.title || '').replace(/[\x00-\x1f\x7f]/g, '');
-      segs.push({ text: ` ${i + 1}:${title} `, active: i === activeIndex });
+      segs.push({ text: ` ${i + 1}:${title} `, active: viewMode === 'shell' && i === activeIndex });
     }
+    // A distinct debug tab after the window tabs; active while in debug view.
+    segs.push({ text: ' debug ', active: viewMode === 'debug' });
     const viewerSeg = ` ${viewers} viewer${viewers === 1 ? '' : 's'} `;
 
     // Reserve room on the right for the viewer count when it fits.
@@ -137,13 +163,61 @@ function attachBarTerminal(
     write(`\x1b7\x1b[${rows};1H\x1b[2K${buildBar()}\x1b8`);
   };
 
+  // Render the debug tab: clear the shell area and print the tail of the log
+  // buffer that fits, then repaint the bar. No scrollback — just the last rows.
+  const renderDebug = () => {
+    if (!live) return;
+    debugDirty = false;
+    const shellRows = Math.max(1, rows - 1);
+    const lines = debugBuf.slice(-shellRows);
+    let out = '';
+    for (let r = 0; r < shellRows; r++) {
+      out += `\x1b[${r + 1};1H\x1b[2K`; // move to row, clear it
+      const line = lines[r];
+      if (line !== undefined) out += line.length > cols ? line.slice(0, cols) : line;
+    }
+    write(out);
+    drawBar();
+  };
+
+  // Repaint the live shell area from the workspace replay (used when leaving the
+  // debug view). Clears rows 1..rows-1, re-writes the active window's screen.
+  const repaintShell = () => {
+    if (!live) return;
+    const shellRows = Math.max(1, rows - 1);
+    let out = '';
+    for (let r = 1; r <= shellRows; r++) out += `\x1b[${r};1H\x1b[2K`;
+    out += '\x1b[H';
+    write(out);
+    const replay = shared.getReplay();
+    if (replay.length > 0) writeRaw(replay);
+    drawBar();
+  };
+
+  const enterDebug = () => {
+    if (viewMode === 'debug') return;
+    viewMode = 'debug';
+    renderDebug();
+  };
+  // Leave the debug view for the shell, repainting the live screen. A no-op
+  // (beyond the repaint) when already in shell view.
+  const enterShell = () => {
+    const wasDebug = viewMode === 'debug';
+    viewMode = 'shell';
+    if (wasDebug) repaintShell();
+  };
+
   // Coalesce shell output into throttled bar redraws so a full-screen app or a
-  // `clear` can't leave the bar blank.
-  const timer = setInterval(() => { if (barDirty) drawBar(); }, FRAME_MS);
+  // `clear` can't leave the bar blank; in debug view, coalesce log-tail repaints.
+  const timer = setInterval(() => {
+    if (viewMode === 'debug') { if (debugDirty) renderDebug(); }
+    else if (barDirty) drawBar();
+  }, FRAME_MS);
   timer.unref?.();
 
   shared.onHostData((chunk) => {
     if (!live) return; // pre-live output is captured in the replay; painted on go-live
+    if (viewMode === 'debug') return; // still buffered in replay; not shown while in debug
     writeRaw(chunk);
     barDirty = true;
   });
@@ -154,20 +228,29 @@ function attachBarTerminal(
     drawBar();
   });
 
+  // Redirect all agent text-mode logs into the debug ring buffer instead of
+  // stdout (which this bar UI owns). This both stops the logs from trampling
+  // the terminal / scrolling the banner away and feeds the debug tab.
+  OutputHandler.setLogSink(pushLog);
+
   const wasRaw = !!stdin.isRaw;
   stdin.setRawMode(true);
   stdin.resume();
 
   // Window-management commands after a Ctrl-B prefix. Unknown keys are swallowed.
+  // `d` opens the debug view; every workspace op returns to (and repaints) the
+  // shell view before running, so acting on a window always shows its output.
   const runCommand = (byte: number) => {
     const ch = String.fromCharCode(byte);
-    if (ch === 'c') shared.newWindow();
-    else if (ch === 'n') shared.nextWindow();
-    else if (ch === 'p') shared.prevWindow();
-    else if (ch === 'x') shared.closeWindow(activeIndex);
+    if (ch === 'd') { enterDebug(); return; }
+    if (ch === 'c') { enterShell(); shared.newWindow(); }
+    else if (ch === 'n') { enterShell(); shared.nextWindow(); }
+    else if (ch === 'p') { enterShell(); shared.prevWindow(); }
+    else if (ch === 'x') { enterShell(); shared.closeWindow(activeIndex); }
     else if (ch >= '0' && ch <= '9') {
       // Tabs are labelled 1-based ("1:shell" = index 0), so digit 1..9 selects
       // window 0..8 and 0 selects window 9 (ignored if out of range).
+      enterShell();
       const digit = byte - 0x30;
       shared.selectWindow(digit === 0 ? 9 : digit - 1);
     }
@@ -211,7 +294,10 @@ function attachBarTerminal(
     write('\x1b[2J\x1b[H');
     write(`\x1b[1;${shellRows}r`);
     shared.resize(cols, shellRows);
-    drawBar();
+    // In debug view the shell won't redraw itself, so re-render the tail for the
+    // new size; in shell view the shell's own SIGWINCH redraw fills the screen.
+    if (viewMode === 'debug') renderDebug();
+    else drawBar();
   };
   stdout.on('resize', onResize);
 
@@ -220,6 +306,7 @@ function attachBarTerminal(
     if (restored) return;
     restored = true;
     clearInterval(timer);
+    OutputHandler.setLogSink(null); // let any final logs print to stdout normally
     stdin.removeListener('data', onInput);
     stdout.removeListener('resize', onResize);
     write('\x1b[r'); // reset scroll region
@@ -245,7 +332,7 @@ function attachBarTerminal(
       `${BAR_FG}⧉ entangle${RESET} — live shared session\r\n` +
       `Share this live session:\r\n` +
       `  ${BAR_FG}${link}${RESET}\r\n` +
-      `Windows: Ctrl-B then c=new  n/p=prev/next  1-9=select  x=close\r\n`,
+      `Windows: Ctrl-B then c=new  n/p=prev/next  1-9=select  x=close  d=debug\r\n`,
     );
   };
 

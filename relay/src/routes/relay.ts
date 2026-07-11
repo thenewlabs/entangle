@@ -60,18 +60,6 @@ export function setupRelayRoute(
       return;
     }
 
-    try {
-      // Minimal frame header parse for diagnostics
-      if (data.length >= 9) {
-        const type = data[0];
-        const len = Number(data.readBigUInt64BE(1));
-        const payloadLen = data.length - 9;
-        if (type === 0x30 /* STREAM_OPEN */) {
-          output.info(`Relay forwarding STREAM_OPEN: headerLen=${len}, actualPayload=${payloadLen}, invokerId=${invokerId}`);
-        }
-      }
-    } catch {}
-
     if (agentWs.readyState === invokerWs.OPEN) {
       // Wrap the frame with metadata so agent knows which invoker it's from
       agentWs.send(JSON.stringify({

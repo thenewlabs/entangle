@@ -8,9 +8,23 @@ export interface OutputOptions {
   timestamp?: boolean;
 }
 
+export type LogSink = (level: string, message: string, data?: unknown) => void;
+
 export class OutputHandler {
   private mode: OutputMode;
   private timestamp: boolean;
+
+  // Process-global TEXT-mode log sink. When set, TEXT-mode log/version output is
+  // redirected to the sink instead of stdout — the host blue-bar UI owns stdout
+  // and installs a sink so agent logs are captured (for its debug tab) rather
+  // than trampling the terminal. Exactly one host owns stdout at a time, so a
+  // single static field is sufficient. STREAM_JSON mode is never affected.
+  private static logSink: LogSink | null = null;
+
+  /** Redirect TEXT-mode log/version output to `sink`, or restore stdout with `null`. */
+  static setLogSink(sink: LogSink | null): void {
+    OutputHandler.logSink = sink;
+  }
 
   constructor(options: OutputOptions = { mode: OutputMode.TEXT }) {
     this.mode = options.mode;
@@ -68,6 +82,10 @@ export class OutputHandler {
   // Version output
   version(name: string, version: string): void {
     if (this.mode === OutputMode.TEXT) {
+      if (OutputHandler.logSink) {
+        OutputHandler.logSink('info', `${name} ${version}`);
+        return;
+      }
       console.log(`${name} ${version}`);
     } else {
       const output = {
@@ -81,6 +99,13 @@ export class OutputHandler {
   }
 
   private textOutput(level: string, message: string, data?: any): void {
+    // Redirect to the installed sink (host debug tab) instead of stdout, so
+    // agent logs don't corrupt a terminal the host UI owns.
+    if (OutputHandler.logSink) {
+      OutputHandler.logSink(level, message, data);
+      return;
+    }
+
     // Format level with consistent width and color codes (if terminal supports)
     const levelFormatted = this.formatLevel(level);
 
