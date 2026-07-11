@@ -1,13 +1,14 @@
 import { OutputHandler } from '@thenewlabs/entangle-utils';
-// The host binds to the shared WORKSPACE via the same host-facing surface it
-// used on a single SharedSession (onHostData/onViewersChange/onExit/resize/
-// write/getReplay/viewerCount), so it renders the ACTIVE window and repaints
-// automatically on a remote window switch (the workspace pushes a clear+replay
-// through onHostData). The host also renders its own tmux-style status bar by
-// subscribing to the workspace's onWindowState and drives window ops via a
-// Ctrl-B prefix keymap.
+// The host binds to a HostSession via the same host-facing surface it used on a
+// single SharedSession (onHostData/onViewersChange/onExit/resize/write/getReplay/
+// viewerCount), so it renders the ACTIVE window and repaints automatically on a
+// remote window switch (the session pushes a clear+replay through onHostData).
+// The host also renders its own tmux-style status bar by subscribing to the
+// session's onWindowState and drives window ops via a Ctrl-B prefix keymap. The
+// debug tab, captured-log buffer and session URL all come from the HostSession,
+// so this UI is decoupled from the concrete in-process workspace.
 import type { WindowInfo } from '@thenewlabs/entangle-protocol';
-import type { SharedWorkspace } from './shared-workspace.js';
+import type { HostSession } from './host-session.js';
 
 /** Minimum terminal size that can hold the shell plus a bottom status bar. */
 const MIN_COLS = 20;
@@ -15,9 +16,6 @@ const MIN_ROWS = 6;
 
 /** Repaint cadence for the status bar: coalesce shell output into ~30ms frames. */
 const FRAME_MS = 30;
-
-/** Cap on the host's captured-log ring buffer backing the debug tab. */
-const DEBUG_MAX_LINES = 1000;
 
 /** Host window-management prefix (Ctrl-B), tmux-style. */
 const PREFIX = 0x02;
@@ -29,17 +27,7 @@ const BAR_FG = '\x1b[97m'; // bright white text
 const RESET = '\x1b[0m';
 
 /**
- * Handle returned by {@link attachHostTerminal}. The session URL is only known
- * once the relay assigns the capability, so index.ts feeds it in later via
- * {@link HostTerminalHandle.setUrl}; until then the host shows a brief
- * "connecting…" screen and only goes live once the URL arrives.
- */
-export interface HostTerminalHandle {
-  setUrl(link: string): void;
-}
-
-/**
- * Wire the host's own terminal to the shared workspace.
+ * Wire the host's own terminal to the {@link HostSession}.
  *
  * On a real, big-enough terminal the host sees their shell rendered RAW at full
  * width, using rows 1..(rows-1), with a blue tmux-style status bar pinned to the
@@ -47,8 +35,12 @@ export interface HostTerminalHandle {
  * region keeps its scrolling clear of the bar; because output is passed through
  * byte-for-byte (no VtGrid), resizes stay clean. Elsewhere (too small, or not a
  * TTY) it falls back to raw pass-through.
+ *
+ * The session URL is only known once the relay assigns the capability, so the
+ * host subscribes to {@link HostSession.onUrl} and shows a brief "connecting…"
+ * screen until it arrives (index.ts sets it on the session).
  */
-export function attachHostTerminal(shared: SharedWorkspace, output: OutputHandler): HostTerminalHandle {
+export function attachHostTerminal(session: HostSession, output: OutputHandler): void {
   const stdout = process.stdout;
   const stdin = process.stdin;
 
@@ -57,25 +49,24 @@ export function attachHostTerminal(shared: SharedWorkspace, output: OutputHandle
   const barCapable =
     !!stdout.isTTY && !!stdin.isTTY && cols >= MIN_COLS && rows >= MIN_ROWS;
 
-  return barCapable
-    ? attachBarTerminal(shared, output, cols, rows)
-    : attachRawTerminal(shared, output);
+  if (barCapable) attachBarTerminal(session, output, cols, rows);
+  else attachRawTerminal(session, output);
 }
 
 /**
  * Blue-bottom-bar UI (the normal interactive host experience).
  *
- * Launch sequence: clear + "connecting…" on attach; then on setUrl clear again,
- * print an info banner (brand, share URL, key hint) at the top, set the scroll
- * region, size the shell to rows-1, paint its current screen from the replay,
- * draw the bar, and go live (raw pass-through + status bar).
+ * Launch sequence: clear + "connecting…" on attach; then on the URL arriving
+ * clear again, print an info banner (brand, share URL, key hint) at the top, set
+ * the scroll region, size the shell to rows-1, paint its current screen from the
+ * replay, draw the bar, and go live (raw pass-through + status bar).
  */
 function attachBarTerminal(
-  shared: SharedWorkspace,
+  session: HostSession,
   output: OutputHandler,
   initialCols: number,
   initialRows: number,
-): HostTerminalHandle {
+): void {
   const stdout = process.stdout;
   const stdin = process.stdin;
 
@@ -86,36 +77,20 @@ function attachBarTerminal(
   let rows = initialRows;
 
   let live = false; // true once the URL is known and we're in pass-through
-  let viewers = shared.viewerCount();
+  let viewers = session.viewerCount();
   let barDirty = false;
-  // The capability URL, once the relay assigns it. Stored so the debug view's
-  // pinned header can always show it (and refresh on a later setUrl).
-  let url: string | null = null;
 
   // Which surface fills the shell area (rows 1..rows-1). 'shell' is the normal
-  // raw pass-through; 'debug' shows the captured agent-log tail (Ctrl-B d).
+  // raw pass-through; 'debug' shows the captured agent-log tail (Ctrl-B l).
   let viewMode: 'shell' | 'debug' = 'shell';
-  // Capped ring of captured agent logs. While the host owns stdout, agent logs
-  // are redirected here (via the OutputHandler sink) instead of trampling the
-  // terminal; the debug tab renders the tail of this buffer.
-  const debugBuf: string[] = [];
+  // The captured agent logs live in the session's ring buffer (the session owns
+  // the OutputHandler sink); the debug tab renders the tail of that buffer and
+  // marks itself dirty when a new line arrives while it's showing.
   let debugDirty = false;
-  const pushLog = (level: string, message: string, data?: unknown) => {
-    let line = `[${level}] ${message}`;
-    if (data !== undefined && data !== null) {
-      let extra: string;
-      try { extra = typeof data === 'string' ? data : JSON.stringify(data); }
-      catch { extra = String(data); }
-      if (extra) line += ` ${extra}`;
-    }
-    debugBuf.push(line);
-    if (debugBuf.length > DEBUG_MAX_LINES) debugBuf.splice(0, debugBuf.length - DEBUG_MAX_LINES);
-    if (viewMode === 'debug') debugDirty = true;
-  };
 
-  // Local mirror of the workspace's window set, kept in sync via onWindowState
+  // Local mirror of the session's window set, kept in sync via onWindowState
   // and rendered as the tab row of the bar. Seeded with the current state.
-  const initialState = shared.windowState();
+  const initialState = session.windowState();
   let windows: readonly WindowInfo[] = initialState.windows;
   let activeIndex = initialState.activeIndex;
 
@@ -132,8 +107,8 @@ function attachBarTerminal(
       const title = (windows[i]!.title || '').replace(/[\x00-\x1f\x7f]/g, '');
       segs.push({ text: ` ${i + 1}:${title} `, active: viewMode === 'shell' && i === activeIndex });
     }
-    // A distinct debug tab after the window tabs; active while in debug view.
-    segs.push({ text: ' debug ', active: viewMode === 'debug' });
+    // A distinct logs tab after the window tabs; active while in the log view.
+    segs.push({ text: ' logs ', active: viewMode === 'debug' });
     const viewerSeg = ` ${viewers} viewer${viewers === 1 ? '' : 's'} `;
 
     // Reserve room on the right for the viewer count when it fits.
@@ -173,7 +148,7 @@ function attachBarTerminal(
     `${BAR_FG}⧉ entangle${RESET} — live shared session`,
     `Share this live session:`,
     `  ${BAR_FG}${link ?? 'connecting…'}${RESET}`,
-    `Windows: Ctrl-B then c=new  n/p=prev/next  1-9=select  x=close  d=debug`,
+    `Ctrl-B  d=detach  l=logs  c=new  n/p=win  1-9=select  x=close`,
   ];
 
   // Render the debug tab: a PINNED HEADER (the info banner: brand, share URL,
@@ -184,10 +159,10 @@ function attachBarTerminal(
     if (!live) return;
     debugDirty = false;
     const shellRows = Math.max(1, rows - 1);
-    const header = bannerLines(url);
+    const header = bannerLines(session.getUrl());
     const headerRows = header.length + 1; // banner lines + one blank separator
     const tailRows = Math.max(0, shellRows - headerRows);
-    const lines = tailRows > 0 ? debugBuf.slice(-tailRows) : [];
+    const lines = tailRows > 0 ? session.getLogBuffer().slice(-tailRows) : [];
     let out = '';
     let r = 0;
     for (; r < header.length && r < shellRows; r++) {
@@ -212,7 +187,7 @@ function attachBarTerminal(
     for (let r = 1; r <= shellRows; r++) out += `\x1b[${r};1H\x1b[2K`;
     out += '\x1b[H';
     write(out);
-    const replay = shared.getReplay();
+    const replay = session.getReplay();
     if (replay.length > 0) writeRaw(replay);
     drawBar();
   };
@@ -238,44 +213,49 @@ function attachBarTerminal(
   }, FRAME_MS);
   timer.unref?.();
 
-  shared.onHostData((chunk) => {
+  session.onHostData((chunk) => {
     if (!live) return; // pre-live output is captured in the replay; painted on go-live
     if (viewMode === 'debug') return; // still buffered in replay; not shown while in debug
     writeRaw(chunk);
     barDirty = true;
   });
-  shared.onViewersChange((n) => { viewers = n; drawBar(); });
-  shared.onWindowState((state) => {
+  session.onViewersChange((n) => { viewers = n; drawBar(); });
+  session.onWindowState((state) => {
     windows = state.windows;
     activeIndex = state.activeIndex;
     drawBar();
   });
 
-  // Redirect all agent text-mode logs into the debug ring buffer instead of
-  // stdout (which this bar UI owns). This both stops the logs from trampling
-  // the terminal / scrolling the banner away and feeds the debug tab.
-  OutputHandler.setLogSink(pushLog);
+  // The session captures agent logs into its ring buffer (it owns the
+  // OutputHandler sink); we only need to know when a new line arrives so the
+  // debug tab repaints its tail while it's the visible surface.
+  session.onLog(() => { if (viewMode === 'debug') debugDirty = true; });
 
   const wasRaw = !!stdin.isRaw;
   stdin.setRawMode(true);
   stdin.resume();
 
   // Window-management commands after a Ctrl-B prefix. Unknown keys are swallowed.
-  // `d` opens the debug view; every workspace op returns to (and repaints) the
-  // shell view before running, so acting on a window always shows its output.
+  // `d` detaches (leaving the daemon session running; a no-op for an in-process
+  // session that has no detach), `l` opens the logs view; every workspace op
+  // returns to (and repaints) the shell view before running, so acting on a
+  // window always shows its output.
   const runCommand = (byte: number) => {
     const ch = String.fromCharCode(byte);
-    if (ch === 'd') { enterDebug(); return; }
-    if (ch === 'c') { enterShell(); shared.newWindow(); }
-    else if (ch === 'n') { enterShell(); shared.nextWindow(); }
-    else if (ch === 'p') { enterShell(); shared.prevWindow(); }
-    else if (ch === 'x') { enterShell(); shared.closeWindow(activeIndex); }
+    // Detach fires the session's onExit path, which runs restore()+exit below;
+    // don't force an exit here that would race it.
+    if (ch === 'd') { session.detach?.(); return; }
+    if (ch === 'l') { enterDebug(); return; }
+    if (ch === 'c') { enterShell(); session.newWindow(); }
+    else if (ch === 'n') { enterShell(); session.nextWindow(); }
+    else if (ch === 'p') { enterShell(); session.prevWindow(); }
+    else if (ch === 'x') { enterShell(); session.closeWindow(activeIndex); }
     else if (ch >= '0' && ch <= '9') {
       // Tabs are labelled 1-based ("1:shell" = index 0), so digit 1..9 selects
       // window 0..8 and 0 selects window 9 (ignored if out of range).
       enterShell();
       const digit = byte - 0x30;
-      shared.selectWindow(digit === 0 ? 9 : digit - 1);
+      session.selectWindow(digit === 0 ? 9 : digit - 1);
     }
   };
 
@@ -290,18 +270,18 @@ function attachBarTerminal(
       const byte = d[i]!;
       if (pendingPrefix) {
         pendingPrefix = false;
-        if (byte === PREFIX) shared.write(new Uint8Array([PREFIX]));
+        if (byte === PREFIX) session.write(new Uint8Array([PREFIX]));
         else runCommand(byte);
         start = i + 1;
         continue;
       }
       if (byte === PREFIX) {
-        if (i > start) shared.write(new Uint8Array(d.subarray(start, i)));
+        if (i > start) session.write(new Uint8Array(d.subarray(start, i)));
         pendingPrefix = true;
         start = i + 1;
       }
     }
-    if (d.length > start) shared.write(new Uint8Array(d.subarray(start)));
+    if (d.length > start) session.write(new Uint8Array(d.subarray(start)));
   };
   stdin.on('data', onInput);
 
@@ -316,7 +296,7 @@ function attachBarTerminal(
     write('\x1b[r');
     write('\x1b[2J\x1b[H');
     write(`\x1b[1;${shellRows}r`);
-    shared.resize(cols, shellRows);
+    session.resize(cols, shellRows);
     // In debug view the shell won't redraw itself, so re-render the tail for the
     // new size; in shell view the shell's own SIGWINCH redraw fills the screen.
     if (viewMode === 'debug') renderDebug();
@@ -329,7 +309,7 @@ function attachBarTerminal(
     if (restored) return;
     restored = true;
     clearInterval(timer);
-    OutputHandler.setLogSink(null); // let any final logs print to stdout normally
+    session.dispose(); // release the log sink so any final logs print to stdout normally
     stdin.removeListener('data', onInput);
     stdout.removeListener('resize', onResize);
     write('\x1b[r'); // reset scroll region
@@ -339,7 +319,7 @@ function attachBarTerminal(
     stdin.pause();
   };
 
-  shared.onExit((code) => {
+  session.onExit((code) => {
     restore();
     write('\n');
     output.info('Shared session ended.');
@@ -356,67 +336,73 @@ function attachBarTerminal(
     write(bannerLines(link).map((l) => `${l}\r\n`).join(''));
   };
 
+  // The session URL is stored on the session (its pinned-header/getUrl source);
+  // we react to it arriving. The first URL drives the go-live launch sequence; a
+  // later refresh just marks the bar/pinned-header dirty.
+  session.onUrl((link) => {
+    if (live) { // URL refresh after we're already live
+      barDirty = true;
+      if (viewMode === 'debug') debugDirty = true; // repaint the pinned header
+      return;
+    }
+    cols = stdout.columns || cols;
+    rows = stdout.rows || rows;
+    const shellRows = Math.max(1, rows - 1);
+    write('\x1b[2J\x1b[H');
+    writeBanner(link);
+    write(`\x1b[1;${shellRows}r`); // reserve the bottom row for the bar
+    session.resize(cols, shellRows); // shell is authoritative-sized to rows-1
+    const replay = session.getReplay(); // paint the shell's current screen below the banner
+    if (replay.length > 0) writeRaw(replay);
+    live = true;
+    drawBar();
+  });
+
   // Connecting screen until the relay hands us the capability URL.
   write('\x1b[2J\x1b[H');
   write(`${BAR_FG}⧉ entangle — connecting…${RESET}`);
-
-  return {
-    setUrl(link: string) {
-      url = link; // stored so the debug view's pinned header can always show it
-      if (live) { // URL refresh after we're already live
-        barDirty = true;
-        if (viewMode === 'debug') debugDirty = true; // repaint the pinned header
-        return;
-      }
-      cols = stdout.columns || cols;
-      rows = stdout.rows || rows;
-      const shellRows = Math.max(1, rows - 1);
-      write('\x1b[2J\x1b[H');
-      writeBanner(link);
-      write(`\x1b[1;${shellRows}r`); // reserve the bottom row for the bar
-      shared.resize(cols, shellRows); // shell is authoritative-sized to rows-1
-      const replay = shared.getReplay(); // paint the shell's current screen below the banner
-      if (replay.length > 0) writeRaw(replay);
-      live = true;
-      drawBar();
-    },
-  };
 }
 
 /**
  * Raw pass-through: mirror the shell byte-for-byte and forward keystrokes, with
  * no status bar. Used when the terminal is too small for a bar (or not a TTY).
  */
-function attachRawTerminal(shared: SharedWorkspace, output: OutputHandler): HostTerminalHandle {
+function attachRawTerminal(session: HostSession, output: OutputHandler): void {
   const stdin = process.stdin;
   const stdout = process.stdout;
 
-  const initial = shared.getReplay();
+  // No status bar and no debug tab here, so there's nowhere to surface captured
+  // logs — release the session's log sink so agent logs print to stdout as they
+  // did before this UI existed (the bar path keeps the sink for its debug tab).
+  session.dispose();
+
+  const initial = session.getReplay();
   if (initial.length > 0) { try { stdout.write(Buffer.from(initial)); } catch {} }
 
-  shared.onHostData((chunk) => { try { stdout.write(chunk); } catch {} });
+  session.onHostData((chunk) => { try { stdout.write(chunk); } catch {} });
 
   const wasRaw = !!stdin.isRaw;
   if (stdin.isTTY) stdin.setRawMode(true);
   stdin.resume();
 
-  const onInput = (d: Buffer) => shared.write(new Uint8Array(d));
+  const onInput = (d: Buffer) => session.write(new Uint8Array(d));
   stdin.on('data', onInput);
 
-  const onResize = () => shared.resize(stdout.columns || 80, stdout.rows || 24);
+  const onResize = () => session.resize(stdout.columns || 80, stdout.rows || 24);
   stdout.on('resize', onResize);
 
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
+    session.dispose(); // release the log sink so any final logs print to stdout normally
     stdin.removeListener('data', onInput);
     stdout.removeListener('resize', onResize);
     if (stdin.isTTY) { try { stdin.setRawMode(wasRaw); } catch {} }
     stdin.pause();
   };
 
-  shared.onExit((code) => {
+  session.onExit((code) => {
     restore();
     output.info(`Shared session ended (code=${code ?? 0}).`);
     process.exit(code ?? 0);
@@ -424,9 +410,8 @@ function attachRawTerminal(shared: SharedWorkspace, output: OutputHandler): Host
 
   process.on('exit', restore);
 
-  return {
-    setUrl(link: string) {
-      output.info(`⧉ entangle session shared — open to collaborate:\n  ${link}\n`);
-    },
-  };
+  // The relay hands us the capability URL after attach; print it once it arrives.
+  session.onUrl((link) => {
+    output.info(`⧉ entangle session shared — open to collaborate:\n  ${link}\n`);
+  });
 }
