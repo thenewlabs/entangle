@@ -278,9 +278,14 @@ async function handleStreamResize(
   session: MultiSession,
   message: StreamResizeMessage
 ): Promise<void> {
-  // The host terminal owns the shared shell's size; ignore viewer resizes so
-  // participants don't fight over the dimensions.
-  if (session.sharedViewers?.has(message.msg.sid)) return;
+  // The host terminal owns the shared shell's size, so a viewer resize must NOT
+  // resize the shared PTY (participants would fight over dimensions). Instead,
+  // repaint just this viewport with the active window's screen so its locally
+  // reflowed/corrupted display is redrawn clean at its new size.
+  if (session.sharedViewers?.has(message.msg.sid)) {
+    session.sharedWorkspace?.repaintViewport(message.msg.sid);
+    return;
+  }
 
   if (!session.streamManager) {
     await sendStreamError(session, message.msg.sid, 'No active streams');
@@ -476,21 +481,6 @@ export async function handleMultiStreamFrame(
   }
 
   try {
-    // Log diagnostics for STREAM frames
-    if (
-      frame.type === FrameType.STREAM_OPEN ||
-      frame.type === FrameType.STREAM_DATA ||
-      frame.type === FrameType.STREAM_CLOSE ||
-      frame.type === FrameType.STREAM_SIGNAL ||
-      frame.type === FrameType.STREAM_RESIZE ||
-      frame.type === FrameType.STREAM_ERROR ||
-      frame.type === FrameType.STREAM_EXIT
-    ) {
-      output.info(`MultiStream frame received: type=${frame.type} payloadLen=${frame.payload.length}`);
-      // Debug: log first few bytes of payload
-      const preview = Array.from(frame.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-      output.debug(`Payload preview (first 32 bytes): ${preview}`);
-    }
     // Single canonical decryption: session key + direction-bound AAD. Frames
     // that don't authenticate under exactly this AAD are rejected (no
     // downgrade/alternate-AAD fallbacks).

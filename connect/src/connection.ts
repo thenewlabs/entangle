@@ -292,12 +292,11 @@ export class InvokeConnection {
   closeWindow(index: number): void { void this.sendWindowCtl({ v: 1, kind: 'op', op: 'close-window', index }); }
 
   private async sendStream(type: FrameType, sid: string, msgBody: any): Promise<void> {
-    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const ctr = this.streamCounters.increment(sid, 'outgoing');
     const plaintext = encode({ ctr, msg: { v: 1, sid, ...msgBody } });
     const aad = frameAad(type, AeadDir.ClientToServer);
     const ct = await streamAeadEncrypt(this.sessionKeys.K_enc, plaintext, aad);
     this.ws.send(encodeFrame(type, ct));
-    this.streamCounters.increment(sid, 'outgoing');
   }
 
   /** Open a command stream. */

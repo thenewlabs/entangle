@@ -350,7 +350,7 @@ class EntangleConnection {
     }
     const sid = child._sid;
     // Start counters for this stream
-    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const ctr = this.streamCounters.increment(sid, 'outgoing');
 
     let openMsg: any;
     if (child._mode === 'pty') {
@@ -397,45 +397,41 @@ class EntangleConnection {
     this.ws.send(frame);
     // Track pending open to bind when 'opened' arrives with actual sid
     this.pendingOpens.push(child);
-    this.streamCounters.increment(sid, 'outgoing');
   }
 
   _sendData(sid: string, chunk: Uint8Array): void {
     if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const ctr = this.streamCounters.increment(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'data' as const, sid, chunk } };
     const aad = frameAad(FrameType.STREAM_DATA, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_DATA, ct));
-      this.streamCounters.increment(sid, 'outgoing');
     })();
   }
 
   _sendSignal(sid: string, signal: SignalName): void {
     if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const ctr = this.streamCounters.increment(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'signal' as const, sid, signal } };
     const aad = frameAad(FrameType.STREAM_SIGNAL, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_SIGNAL, ct));
-      this.streamCounters.increment(sid, 'outgoing');
     })();
   }
 
   _sendResize(sid: string, cols: number, rows: number): void {
     if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const ctr = this.streamCounters.increment(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'pty-resize' as const, sid, cols, rows } };
     const aad = frameAad(FrameType.STREAM_RESIZE, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_RESIZE, ct));
-      this.streamCounters.increment(sid, 'outgoing');
     })();
   }
 
@@ -445,14 +441,13 @@ class EntangleConnection {
 
   _sendClose(sid: string): void {
     if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.getNext(sid, 'outgoing');
+    const ctr = this.streamCounters.increment(sid, 'outgoing');
     const msg = { ctr, msg: { v: 1 as const, kind: 'close' as const, sid } };
     const aad = frameAad(FrameType.STREAM_CLOSE, AeadDir.ClientToServer);
     const plaintext = encode(msg);
     (async () => {
       const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_CLOSE, ct));
-      this.streamCounters.increment(sid, 'outgoing');
     })();
   }
 

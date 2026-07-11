@@ -56,7 +56,7 @@ For how `capId`, `S`, and the password fit into key derivation and the auth hand
 
 **Internals**
 - Shared PTY and replay buffer: `serve/src/shared-session.ts` (`SharedSession`).
-- Host terminal wiring (box vs. raw fallback, keystrokes, resize, throttled repaint): `serve/src/host-terminal.ts`.
-- Session frame rendering (rails, title bar, URL bar): `serve/src/box-renderer.ts`; VT emulation of the interior: `serve/src/vt-grid.ts`.
+- Host terminal wiring (status-bar vs. raw fallback, keystrokes, resize, throttled repaint): `serve/src/host-terminal.ts`.
+- Session frame rendering (tmux-style blue bottom status bar with window tabs and viewer count): `serve/src/host-terminal.ts`.
 - Attach path (PTY opens attach to the shared shell; cmd opens spawn normally; collaborative input, ignored viewer resizes/signals): `serve/src/multi-session.ts`.
 - Shared-mode detection and flags: `serve/src/index.ts` (`start` command).
