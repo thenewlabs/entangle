@@ -4,6 +4,7 @@ import { getConfig, OutputHandler, parseOutputMode, type PipeEndpoint } from '@t
 import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { createCapability, type CapabilityInfo } from './capability.js';
+import type { SharedSession } from './shared-session.js';
 
 interface AgentOptions {
   serverUrl: string;
@@ -13,6 +14,12 @@ interface AgentOptions {
   // Registered forwarded-channel endpoints (allow-list). Merged with any parsed
   // from the ENTANGLE_PIPES env; explicit entries here win on name collision.
   pipeEndpoints?: Map<string, PipeEndpoint>;
+  // When set, serve a single shared terminal: every viewer attaches to this PTY
+  // instead of spawning its own shell.
+  sharedSession?: SharedSession;
+  // Called once the served capability's URL is known (used by the host UI to
+  // show it). When provided, the verbose capability block is suppressed.
+  onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
 }
 
 interface AgentState {
@@ -26,6 +33,8 @@ interface AgentState {
   passwordHash?: string;
   pinned?: boolean;
   pipeEndpoints: Map<string, PipeEndpoint>;
+  sharedSession?: SharedSession;
+  onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
@@ -44,6 +53,8 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     pipeEndpoints,
     ...(options.outputMode && { outputMode: options.outputMode }),
     ...(options.password && { password: options.password }),
+    ...(options.sharedSession && { sharedSession: options.sharedSession }),
+    ...(options.onCapabilityReady && { onCapabilityReady: options.onCapabilityReady }),
   };
 
   output.info('Starting agent');
@@ -137,7 +148,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
 
         // Register synchronously (no await) so the session exists before this
         // invoker's AUTH1 arrives on the next relay message.
-        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints);
+        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.sharedSession);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker
@@ -185,6 +196,13 @@ function displayCapability(state: AgentState): void {
   if (!cap) return;
 
   const link = `${relayUrl}/cap/${cap.capId}#S=${cap.S}`;
+
+  // In shared-terminal mode the host UI owns the display (it shows the URL in
+  // the session frame), so hand it the link instead of printing the block.
+  if (state.onCapabilityReady) {
+    state.onCapabilityReady({ link, capId: cap.capId, S: cap.S });
+    return;
+  }
 
   state.output.info('');
   state.output.info('=====================================');

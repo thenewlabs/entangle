@@ -5,6 +5,8 @@ import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@then
 import { startAgent } from './agent.js';
 import { createCapability, resolveServeTarget } from './capability.js';
 import { promptHidden } from './prompt.js';
+import { SharedSession } from './shared-session.js';
+import { attachHostTerminal, type HostTerminalHandle } from './host-terminal.js';
 
 const program = new Command();
 
@@ -25,6 +27,8 @@ program
   .option('--server <url>', 'Relay server URL (overrides the origin of the positional URL)')
   .option('--password [password]', 'Require a password to connect; pass the flag alone to be prompted, or set AGENT_PASSWORD')
   .option('--capability <url>', 'Serve a specific capability URL (https://relay/cap/<capId>#S=<secret>) instead of minting a fresh ephemeral one; its host is also used as the relay server')
+  .option('--shared', 'Serve one shared terminal that everyone with the URL attaches to (default when run in a terminal)')
+  .option('--headless', 'Run headless: each connection gets its own shell instead of a shared terminal')
   .action(async (url: string | undefined, options) => {
     try {
       // Propagate output mode to all loggers in this process
@@ -55,11 +59,38 @@ program
         password = process.env.AGENT_PASSWORD;
       }
 
+      // Shared-terminal mode: on by default when attached to a real terminal,
+      // forced by --shared, disabled by --headless/--no-shared. Only meaningful
+      // in text mode (stream-json is for programmatic invokers).
+      const isTty = !!process.stdout.isTTY && !!process.stdin.isTTY;
+      const shared =
+        options.headless === true ? false
+        : options.shared === true ? true
+        : isTty && outputMode === 'text';
+
+      let sharedSession: SharedSession | undefined;
+      // The host UI (when attached) sizes the shared PTY to the box interior and
+      // takes the session URL for its bottom bar once the relay assigns it.
+      let hostHandle: HostTerminalHandle | undefined;
+      if (shared) {
+        const cols = process.stdout.columns || 80;
+        const rows = process.stdout.rows || 24;
+        sharedSession = new SharedSession(output, { cols, rows });
+        if (isTty) hostHandle = attachHostTerminal(sharedSession, output);
+      }
+
       await startAgent({
         serverUrl,
         outputMode: program.opts().outputMode,
         ...(password ? { password } : {}),
         ...(pinnedCapability && { pinnedCapability }),
+        ...(sharedSession && {
+          sharedSession,
+          onCapabilityReady: ({ link }) => {
+            if (hostHandle) hostHandle.setUrl(link);
+            else output.info(`⧉ entangle session shared — open to collaborate:\n  ${link}\n`);
+          },
+        }),
       });
     } catch (error) {
       const outputMode = parseOutputMode(program.opts().outputMode);

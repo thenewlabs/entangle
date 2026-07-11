@@ -133,7 +133,18 @@ export function TerminalView(_props: TerminalViewProps) {
     <div className="terminal-view">
       {status === 'error' && <div className="error-banner">Error: {error}</div>}
       {status === 'connecting' && <div className="status-banner">Connecting...</div>}
-      <div ref={terminalRef} className="terminal-container" />
+      <div className="terminal-stage">
+        {status === 'ready' && (
+          <span
+            className="shared-badge"
+            title="This is a shared terminal. Others may be watching and typing along with you."
+          >
+            <span className="shared-badge-glyph" aria-hidden="true">⧉</span>
+            Shared session
+          </span>
+        )}
+        <div ref={terminalRef} className="terminal-container" />
+      </div>
     </div>
   );
 }

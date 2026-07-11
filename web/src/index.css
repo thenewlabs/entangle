@@ -100,10 +100,42 @@ body {
   cursor: not-allowed;
 }
 
+.terminal-stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
 .terminal-container {
   flex: 1;
   background: #1e1e1e;
   overflow: hidden;
+}
+
+.shared-badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.6rem;
+  background: #2d2d30;
+  border: 1px solid #3e3e42;
+  border-radius: 999px;
+  color: #4ec9b0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.4;
+  pointer-events: auto;
+  cursor: default;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.shared-badge-glyph {
+  font-size: 0.85rem;
 }
 
 .status-banner, .error-banner {

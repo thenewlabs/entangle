@@ -28,6 +28,7 @@ import {
 import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
 import type { CapabilityInfo } from './capability.js';
+import type { SharedSession } from './shared-session.js';
 import { handleMultiStreamFrame, cleanupMultiSession } from './multi-session.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
@@ -53,6 +54,7 @@ export interface Session {
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
   // Registered forwarded-channel endpoints (allow-list) for `mode: 'pipe'`.
   pipeEndpoints?: Map<string, PipeEndpoint>;
+  sharedSession?: SharedSession | undefined; // set when serving a shared terminal
 }
 
 // Helper to send wrapped relay responses
@@ -73,7 +75,8 @@ export function handleInvokerConnection(
   socketId: string,
   cap: CapabilityInfo,
   passwordHash?: string,
-  pipeEndpoints?: Map<string, PipeEndpoint>
+  pipeEndpoints?: Map<string, PipeEndpoint>,
+  sharedSession?: SharedSession
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -85,6 +88,7 @@ export function handleInvokerConnection(
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
     ...(pipeEndpoints && { pipeEndpoints }),
+    sharedSession,
   };
 
   const reader = new FrameReader();
@@ -145,6 +149,8 @@ async function handleFrame(
         requiresPassword: session.requiresPassword,
         passwordVerified: session.passwordVerified,
         ...(session.pipeEndpoints && { pipeEndpoints: session.pipeEndpoints }),
+        sharedSession: session.sharedSession,
+        sharedViewers: new Set<string>(),
       };
     }
     // Keep dynamic gating fields fresh (password may be verified after streams open attempts)
