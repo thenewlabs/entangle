@@ -28,7 +28,7 @@ import {
 import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
 import type { CapabilityInfo } from './capability.js';
-import type { SharedSession } from './shared-session.js';
+import type { SharedWorkspace } from './shared-workspace.js';
 import { handleMultiStreamFrame, cleanupMultiSession } from './multi-session.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
@@ -54,7 +54,7 @@ export interface Session {
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
   // Registered forwarded-channel endpoints (allow-list) for `mode: 'pipe'`.
   pipeEndpoints?: Map<string, PipeEndpoint>;
-  sharedSession?: SharedSession | undefined; // set when serving a shared terminal
+  sharedWorkspace?: SharedWorkspace | undefined; // set when serving a shared workspace
 }
 
 // Helper to send wrapped relay responses
@@ -76,7 +76,7 @@ export function handleInvokerConnection(
   cap: CapabilityInfo,
   passwordHash?: string,
   pipeEndpoints?: Map<string, PipeEndpoint>,
-  sharedSession?: SharedSession
+  sharedWorkspace?: SharedWorkspace
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -88,7 +88,7 @@ export function handleInvokerConnection(
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
     ...(pipeEndpoints && { pipeEndpoints }),
-    sharedSession,
+    sharedWorkspace,
   };
 
   const reader = new FrameReader();
@@ -124,6 +124,8 @@ const STREAM_FRAME_TYPES = new Set<FrameType>([
   FrameType.STREAM_CLOSE,
   FrameType.STREAM_ERROR,
   FrameType.STREAM_EXIT,
+  // Shared-workspace window control rides the same multi-session handler.
+  FrameType.WINDOW_CTL,
 ]);
 
 async function handleFrame(
@@ -149,7 +151,7 @@ async function handleFrame(
         requiresPassword: session.requiresPassword,
         passwordVerified: session.passwordVerified,
         ...(session.pipeEndpoints && { pipeEndpoints: session.pipeEndpoints }),
-        sharedSession: session.sharedSession,
+        sharedWorkspace: session.sharedWorkspace,
         sharedViewers: new Set<string>(),
       };
     }

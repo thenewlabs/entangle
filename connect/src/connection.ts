@@ -4,6 +4,8 @@ import {
   FrameType,
   FrameReader,
   encodeFrame,
+  type WindowOp,
+  type WindowStateBody,
 } from '@thenewlabs/entangle-protocol';
 import {
   deriveKeyMaterial,
@@ -70,6 +72,7 @@ export class InvokeConnection {
   private streams = new Map<string, StreamHandlers>();
   private pendingOpens: PendingStream[] = [];
   private onCloseCb?: () => void;
+  private onWindowStateCb?: (state: WindowStateBody) => void;
 
   constructor(
     private capId: string,
@@ -185,6 +188,14 @@ export class InvokeConnection {
       return;
     }
 
+    // Window control (tab bar state) is not stream-scoped, so it must be handled
+    // before dispatchStreamFrame (which keys off `msg.sid`). It rides the session
+    // GLOBAL counter, mirroring AUTH_PW / ERROR — not a per-stream counter.
+    if (frame.type === FrameType.WINDOW_CTL) {
+      await this.handleWindowCtl(frame);
+      return;
+    }
+
     // Post-handshake stream frames.
     await this.dispatchStreamFrame(frame);
   }
@@ -237,6 +248,48 @@ export class InvokeConnection {
       }
     }
   }
+
+  // Decode an incoming WINDOW_CTL frame. Framing matches STREAM_* (CBOR
+  // `{ ctr, msg }` under `streamAead` + `frameAad(WINDOW_CTL, dir)`), but the
+  // counter is the SESSION GLOBAL incoming counter, not a per-stream one. A
+  // counter hiccup drops just this frame rather than tearing down the terminal.
+  private async handleWindowCtl(frame: { type: FrameType; payload: Uint8Array }): Promise<void> {
+    if (!this.sessionKeys) return;
+    const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ServerToClient);
+    const plaintext = await streamAeadDecrypt(this.sessionKeys.K_enc, frame.payload, aad);
+    const message: any = decode(plaintext);
+    if (!message || typeof message.ctr !== 'number') return;
+    try {
+      this.counters.incoming.validate(message.ctr);
+    } catch {
+      return; // out-of-order / replayed control frame: ignore
+    }
+    if (message.msg?.kind === 'window-state') {
+      this.onWindowStateCb?.(message.msg as WindowStateBody);
+    }
+  }
+
+  // Send a client->server window op on the WINDOW_CTL channel. Uses the session
+  // GLOBAL outgoing counter (like AUTH_PW), streamAead + ClientToServer AAD.
+  private async sendWindowCtl(op: WindowOp): Promise<void> {
+    if (!this.sessionKeys) return;
+    const ctr = this.counters.outgoing.next();
+    const plaintext = encode({ ctr, msg: op });
+    const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ClientToServer);
+    const ct = await streamAeadEncrypt(this.sessionKeys.K_enc, plaintext, aad);
+    this.ws.send(encodeFrame(FrameType.WINDOW_CTL, ct));
+  }
+
+  /** Register a callback invoked whenever the server broadcasts window-state. */
+  onWindowState(cb: (state: WindowStateBody) => void): void {
+    this.onWindowStateCb = cb;
+  }
+
+  newWindow(): void { void this.sendWindowCtl({ v: 1, kind: 'op', op: 'new-window' }); }
+  nextWindow(): void { void this.sendWindowCtl({ v: 1, kind: 'op', op: 'next-window' }); }
+  prevWindow(): void { void this.sendWindowCtl({ v: 1, kind: 'op', op: 'prev-window' }); }
+  selectWindow(index: number): void { void this.sendWindowCtl({ v: 1, kind: 'op', op: 'select-window', index }); }
+  closeWindow(index: number): void { void this.sendWindowCtl({ v: 1, kind: 'op', op: 'close-window', index }); }
 
   private async sendStream(type: FrameType, sid: string, msgBody: any): Promise<void> {
     const ctr = this.streamCounters.getNext(sid, 'outgoing');

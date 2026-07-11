@@ -1,4 +1,4 @@
-import { FrameType, FrameReader, encodeFrame } from '@thenewlabs/entangle-protocol';
+import { FrameType, FrameReader, encodeFrame, type WindowStateBody } from '@thenewlabs/entangle-protocol';
 import {
   deriveKeyMaterial,
   deriveBootstrapKeys,
@@ -62,6 +62,9 @@ class EntangleConnection {
   private pwVerifyPromise: Promise<void> | null = null;
   private pwResolve: (() => void) | null = null;
   private pwReject: ((err: Error) => void) | null = null;
+  // Subscribers to shared-workspace window-state broadcasts (drive the tab bar).
+  private windowStateHandlers = new Set<(state: WindowStateBody) => void>();
+  private lastWindowState: WindowStateBody | null = null;
 
   constructor(private capId: string, private S: string) {}
 
@@ -193,6 +196,28 @@ class EntangleConnection {
               this._settlePassword(new Error(detail));
             } else {
               for (const child of this.pendingOpens.splice(0)) child._onError(detail);
+            }
+            continue;
+          }
+          // WINDOW_CTL is a session-scoped control channel (no per-stream sid),
+          // so intercept it here BEFORE the per-stream dispatch. It rides the
+          // SESSION GLOBAL counter (like AUTH_PW), not a per-stream counter.
+          if (frame.type === FrameType.WINDOW_CTL) {
+            try {
+              const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ServerToClient);
+              const plaintext = await streamAeadDecrypt(this.keys.K_enc, frame.payload, aad);
+              const decrypted = decode(plaintext) as any;
+              this.counters.incoming.validate(decrypted.ctr);
+              const msg = decrypted.msg;
+              if (msg && msg.kind === 'window-state') {
+                this.lastWindowState = msg as WindowStateBody;
+                for (const cb of this.windowStateHandlers) {
+                  try { cb(msg as WindowStateBody); } catch {}
+                }
+              }
+            } catch {
+              // Ignore malformed/out-of-order window-state; the next broadcast
+              // resyncs the tab bar.
             }
             continue;
           }
@@ -430,6 +455,32 @@ class EntangleConnection {
       this.streamCounters.increment(sid, 'outgoing');
     })();
   }
+
+  // Register a tab-bar subscriber. Immediately replays the last known state (if
+  // any) so a late-mounting React component doesn't miss the initial broadcast.
+  // Returns an unsubscribe function.
+  onWindowState(cb: (state: WindowStateBody) => void): () => void {
+    this.windowStateHandlers.add(cb);
+    if (this.lastWindowState) {
+      try { cb(this.lastWindowState); } catch {}
+    }
+    return () => { this.windowStateHandlers.delete(cb); };
+  }
+
+  // Send a client->server window operation on the WINDOW_CTL channel. Framed
+  // like STREAM_* (stream AEAD + CBOR `{ ctr, msg }`) but on the SESSION GLOBAL
+  // counter (like AUTH_PW), since window ops are not stream-scoped.
+  async sendWindowOp(op: string, extra: Record<string, unknown> = {}): Promise<void> {
+    await this.ensureConnected();
+    if (!this.ws || !this.keys) return;
+    const plaintext = encode({
+      ctr: this.counters.outgoing.next(),
+      msg: { v: 1 as const, kind: 'op' as const, op, ...extra },
+    });
+    const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ClientToServer);
+    const ct = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
+    this.ws.send(encodeFrame(FrameType.WINDOW_CTL, ct));
+  }
 }
 
 class BrowserChildProcess {
@@ -552,6 +603,16 @@ declare global {
   entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string }) => conn.spawnPty(options);
   // Forwarded channel: open a named agent-side pipe as a byte duplex.
   entangle.openPipe = (name: string) => conn.openPipe(name);
+
+  // Shared-workspace window controls (tmux-style tab bar). These drive the
+  // server SharedWorkspace over the WINDOW_CTL channel; window-state broadcasts
+  // flow back through onWindowState so every client's tab bar stays in sync.
+  entangle.newWindow = () => conn.sendWindowOp('new-window');
+  entangle.nextWindow = () => conn.sendWindowOp('next-window');
+  entangle.prevWindow = () => conn.sendWindowOp('prev-window');
+  entangle.selectWindow = (index: number) => conn.sendWindowOp('select-window', { index });
+  entangle.closeWindow = (index: number) => conn.sendWindowOp('close-window', { index });
+  entangle.onWindowState = (cb: (state: WindowStateBody) => void) => conn.onWindowState(cb);
 
   // Helper: execute a command line via shell and await completion
   entangle.execCommand = async (

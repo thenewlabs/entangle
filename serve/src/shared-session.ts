@@ -1,4 +1,5 @@
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
+import { randomBytes } from 'crypto';
 import { getConfig, buildChildEnv, OutputHandler } from '@thenewlabs/entangle-utils';
 
 /**
@@ -12,7 +13,7 @@ export interface Viewer {
 }
 
 /**
- * A single PTY shared by the host and every attached viewer.
+ * A single shared PTY — the per-window unit of a {@link SharedWorkspace}.
  *
  * Unlike the per-stream shells the StreamManager spawns, there is exactly ONE
  * shell here: its output fans out to the host renderer and all viewers, and its
@@ -21,6 +22,10 @@ export interface Viewer {
  *
  * The host terminal size is authoritative — the shell is sized to the host's
  * (inner) region and viewers render that stream in their own terminals.
+ *
+ * In the multi-window model a SharedWorkspace owns N of these (one per window)
+ * and taps the ACTIVE one via {@link onHostData} + {@link getReplay}; `id` and
+ * `title` identify the window in the WINDOW_CTL window-state broadcast.
  */
 export class SharedSession {
   private ptyProcess: pty.IPty;
@@ -37,14 +42,21 @@ export class SharedSession {
   public cols: number;
   public rows: number;
 
+  /** Stable identifier for this window (used in window-state broadcasts). */
+  public readonly id: string;
+  /** Human-readable window title (shown in client tab bars; renamable). */
+  public title: string;
+
   constructor(
     private output: OutputHandler,
-    opts: { cols: number; rows: number; cwd?: string; maxReplayBytes?: number }
+    opts: { cols: number; rows: number; cwd?: string; maxReplayBytes?: number; id?: string; title?: string }
   ) {
     const config = getConfig();
     this.cols = Math.max(1, opts.cols);
     this.rows = Math.max(1, opts.rows);
     this.maxReplayBytes = opts.maxReplayBytes ?? 256 * 1024;
+    this.id = opts.id ?? randomBytes(6).toString('base64url');
+    this.title = opts.title ?? 'shell';
 
     const env = buildChildEnv(config.agentEnvPassthrough, {});
     env.TERM = 'xterm-256color';

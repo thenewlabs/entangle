@@ -17,6 +17,16 @@ const BOTTOM_LEFT = '╚';
 const BOTTOM_RIGHT = '╝';
 const HORIZONTAL = '═';
 const VERTICAL = '║';
+const SEP = '│';
+
+/** Reverse-video wrap used to highlight the active window's tab. */
+const REVERSE_ON = '\x1b[7m';
+const REVERSE_OFF = '\x1b[27m';
+
+/** A window as the tab bar needs to see it (index is positional). */
+export interface TabInfo {
+  title: string;
+}
 
 export class BoxRenderer {
   constructor(
@@ -42,11 +52,16 @@ export class BoxRenderer {
    * interior row from the grid, then re-places and shows the real cursor at the
    * grid's cursor position (offset into the box).
    */
-  frame(state: { viewers: number; url: string | undefined }): string {
+  frame(state: {
+    viewers: number;
+    url: string | undefined;
+    windows: readonly TabInfo[];
+    activeIndex: number;
+  }): string {
     const parts: string[] = ['\x1b[?25l\x1b[0m'];
 
-    // Title bar.
-    parts.push('\x1b[1;1H', this.topBorder(state.viewers));
+    // Title/tab bar.
+    parts.push('\x1b[1;1H', this.topBorder(state.windows, state.activeIndex, state.viewers));
 
     // Interior rows: rail + shell row + rail.
     const gridRows = this.grid.renderRows();
@@ -66,11 +81,68 @@ export class BoxRenderer {
     return parts.join('');
   }
 
-  private topBorder(viewers: number): string {
-    const label =
-      `${TOP_LEFT}${HORIZONTAL} ⧉ entangle · shared · ` +
-      `${viewers} viewer${viewers === 1 ? '' : 's'} `;
-    return this.padBorder(label, TOP_RIGHT);
+  /**
+   * Top border doubling as the tab bar:
+   *
+   *   ╔═ ⧉ entangle │ ‹1:shell› 2:logs 3:build │ N viewers ═══╗
+   *
+   * The active tab is drawn in reverse video. Tabs take priority over the
+   * viewer count: the count is only appended if it fits after the brand and
+   * tabs, and the tab list itself is truncated with `…` at the terminal width.
+   */
+  private topBorder(windows: readonly TabInfo[], activeIndex: number, viewers: number): string {
+    const budget = Math.max(0, this.cols - 1); // reserve the end corner
+    const brand = `${TOP_LEFT}${HORIZONTAL} ⧉ entangle `;
+    const viewerSeg = `${SEP} ${viewers} viewer${viewers === 1 ? '' : 's'} `;
+
+    let styled = brand;
+    let vis = brand.length;
+
+    // Keep the viewer count only if the tabs still get a usable slice.
+    const showViewers = budget - vis - viewerSeg.length >= 6;
+    const tabsBudget = Math.max(0, budget - vis - (showViewers ? viewerSeg.length : 0));
+
+    const tabs = this.renderTabs(windows, activeIndex, tabsBudget);
+    styled += tabs.styled;
+    vis += tabs.vis;
+
+    if (showViewers) { styled += viewerSeg; vis += viewerSeg.length; }
+    if (vis < budget) styled += HORIZONTAL.repeat(budget - vis);
+    return styled + TOP_RIGHT;
+  }
+
+  /**
+   * Render `│ 1:shell 2:logs …` into at most `maxVis` visible columns, the
+   * active tab in reverse video, appending `…` if the list is truncated.
+   * Returns the styled string and its visible width (SGR bytes excluded).
+   */
+  private renderTabs(
+    windows: readonly TabInfo[],
+    activeIndex: number,
+    maxVis: number,
+  ): { styled: string; vis: number } {
+    if (maxVis <= 2 || windows.length === 0) return { styled: '', vis: 0 };
+    let styled = `${SEP}`;
+    let vis = 1;
+    for (let i = 0; i < windows.length; i++) {
+      const title = windows[i]!.title.replace(/[\x00-\x1f\x7f]/g, '');
+      const token = ` ${i + 1}:${title} `;
+      if (vis + token.length > maxVis) {
+        // Not enough room: fit what we can, then an ellipsis, and stop.
+        const remain = maxVis - vis - 1;
+        if (remain > 0) {
+          const slice = token.slice(0, remain);
+          styled += i === activeIndex ? `${REVERSE_ON}${slice}${REVERSE_OFF}` : slice;
+          vis += remain;
+        }
+        styled += '…';
+        vis += 1;
+        break;
+      }
+      styled += i === activeIndex ? `${REVERSE_ON}${token}${REVERSE_OFF}` : token;
+      vis += token.length;
+    }
+    return { styled, vis };
   }
 
   private bottomBorder(url: string | undefined): string {

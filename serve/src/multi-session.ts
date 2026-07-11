@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
-import { 
-  FrameType, 
+import {
+  FrameType,
   encodeFrame,
   StreamOpenMessage,
   StreamDataMessage,
@@ -11,6 +11,9 @@ import {
   StreamExitMessage,
   StreamClosedMessage,
   StreamErrorMessage,
+  WindowCtlOpMessageSchema,
+  type WindowCtlOpMessage,
+  type WindowStateBody,
 } from '@thenewlabs/entangle-protocol';
 import {
   deriveKeys,
@@ -30,7 +33,7 @@ import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
 import { StreamManager } from './stream-manager.js';
 import type { CapabilityInfo } from './capability.js';
-import type { SharedSession } from './shared-session.js';
+import type { SharedWorkspace } from './shared-workspace.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -52,10 +55,12 @@ export interface MultiSession {
   // state; passed to the StreamManager for `mode: 'pipe'` opens.
   pipeEndpoints?: Map<string, PipeEndpoint>;
   terminated?: boolean;
-  // Shared-terminal mode: a single PTY that every viewer attaches to. When set,
-  // a `pty` STREAM_OPEN attaches to it instead of spawning a fresh shell, and
-  // `sharedViewers` tracks the sids bound to it so their data/close route there.
-  sharedSession?: SharedSession | undefined;
+  // Shared-workspace mode: a tmux-style set of windows that every client's
+  // viewport binds to. When set, a `pty` STREAM_OPEN binds a viewport to the
+  // workspace (multiplexing the active window) instead of spawning a fresh
+  // shell, `sharedViewers` tracks this session's viewport sids so their
+  // data/close route there, and WINDOW_CTL frames drive window operations.
+  sharedWorkspace?: SharedWorkspace | undefined;
   sharedViewers?: Set<string>;
 }
 
@@ -108,7 +113,10 @@ async function sendEncrypted(
   }
 }
 
-// Attach a viewer to the shared terminal instead of spawning a new shell.
+// Bind a client viewport to the shared workspace instead of spawning a new
+// shell. The workspace multiplexes the ACTIVE window's output onto this sid and
+// repaints it on a window switch; window-state is pushed via WINDOW_CTL.
+//
 // Ordering matters: the 'opened' confirmation and the replay snapshot must be
 // the first frames the client sees for this sid, so any live output produced
 // during setup is buffered and flushed only after they are sent.
@@ -116,7 +124,7 @@ async function handleSharedAttach(
   session: MultiSession,
   _message: StreamOpenMessage
 ): Promise<void> {
-  const shared = session.sharedSession!;
+  const workspace = session.sharedWorkspace!;
   const sid = randomBytes(8).toString('base64url');
   if (!session.sharedViewers) session.sharedViewers = new Set<string>();
   session.sharedViewers.add(sid);
@@ -124,7 +132,7 @@ async function handleSharedAttach(
   let live = false;
   const pending: Uint8Array[] = [];
 
-  const { replay } = shared.attach({
+  const { replay } = workspace.attachViewport({
     sid,
     onData: (chunk) => {
       if (!live) { pending.push(chunk); return; }
@@ -134,6 +142,7 @@ async function handleSharedAttach(
       session.sharedViewers?.delete(sid);
       void sendStreamExit(session, sid, code, signal);
     },
+    onWindowState: (state) => { void sendWindowState(session, state); },
   });
 
   // Confirm the open with the agent-assigned sid (first frame for this sid).
@@ -143,7 +152,7 @@ async function handleSharedAttach(
   };
   await sendEncrypted(session, FrameType.STREAM_OPEN, openedMsg, sid);
 
-  // Sync the late joiner's screen with the recent scrollback.
+  // Sync the late joiner's screen with the active window's recent scrollback.
   if (replay.length > 0) {
     await sendStreamData(session, sid, replay, 'stdout');
   }
@@ -153,6 +162,9 @@ async function handleSharedAttach(
   for (const chunk of pending) {
     await sendStreamData(session, sid, chunk, 'stdout');
   }
+
+  // Populate the client's tab bar with the current window state.
+  await sendWindowState(session, workspace.windowState());
 }
 
 // Handle stream open request
@@ -160,9 +172,9 @@ async function handleStreamOpen(
   session: MultiSession,
   message: StreamOpenMessage
 ): Promise<void> {
-  // In shared-terminal mode a PTY open attaches to the one shared shell; a
+  // In shared-workspace mode a PTY open binds a viewport to the workspace; a
   // 'cmd' open still spawns normally so one-off `connect <url> ls` keeps working.
-  if (session.sharedSession && message.msg?.mode === 'pty') {
+  if (session.sharedWorkspace && message.msg?.mode === 'pty') {
     await handleSharedAttach(session, message);
     return;
   }
@@ -243,9 +255,9 @@ async function handleStreamData(
   session: MultiSession,
   message: StreamDataMessage
 ): Promise<void> {
-  // Collaborative input: a viewer's keystrokes merge into the shared shell.
+  // Collaborative input: a viewport's keystrokes merge into the ACTIVE window.
   if (session.sharedViewers?.has(message.msg.sid)) {
-    session.sharedSession?.write(message.msg.chunk);
+    session.sharedWorkspace?.writeFromViewport(message.msg.sid, message.msg.chunk);
     return;
   }
 
@@ -313,11 +325,11 @@ async function handleStreamClose(
   session: MultiSession,
   message: StreamCloseMessage
 ): Promise<void> {
-  // A viewer leaving the shared shell just detaches — the shell keeps running
-  // for everyone else.
+  // A viewport leaving the shared workspace just detaches — the windows keep
+  // running for everyone else.
   if (session.sharedViewers?.has(message.msg.sid)) {
     session.sharedViewers.delete(message.msg.sid);
-    session.sharedSession?.detach(message.msg.sid);
+    session.sharedWorkspace?.detachViewport(message.msg.sid);
     const closedMsg: StreamClosedMessage = {
       ctr: 0,
       msg: { v: 1, kind: 'closed', sid: message.msg.sid },
@@ -411,6 +423,40 @@ async function sendStreamError(
   };
 
   await sendEncrypted(session, FrameType.STREAM_ERROR, msg, sid);
+}
+
+// Send a window-state broadcast to this client's viewport(s). WINDOW_CTL frames
+// are not stream-scoped, so they ride the session GLOBAL counter (the same
+// sequence AUTH_PW / ERROR use), not a per-stream counter.
+async function sendWindowState(
+  session: MultiSession,
+  state: WindowStateBody
+): Promise<void> {
+  const msg = {
+    ctr: session.counters.outgoing.next(),
+    msg: state,
+  };
+  await sendEncrypted(session, FrameType.WINDOW_CTL, msg);
+}
+
+// Handle a client->server window operation (WINDOW_CTL). The workspace applies
+// the op and drives its own window-state broadcast + viewport repaints, so all
+// attached clients (across every session) stay in sync.
+async function handleWindowCtl(
+  session: MultiSession,
+  message: WindowCtlOpMessage
+): Promise<void> {
+  const workspace = session.sharedWorkspace;
+  if (!workspace) return;
+  const op = message.msg;
+  switch (op.op) {
+    case 'new-window': workspace.newWindow(); break;
+    case 'next-window': workspace.nextWindow(); break;
+    case 'prev-window': workspace.prevWindow(); break;
+    case 'select-window': workspace.selectWindow(op.index); break;
+    case 'close-window': workspace.closeWindow(op.index); break;
+    case 'rename-window': workspace.renameWindow(op.index, op.title); break;
+  }
 }
 
 // Main frame handler for multi-stream protocol
@@ -539,6 +585,20 @@ export async function handleMultiStreamFrame(
         await handleStreamClose(session, message as StreamCloseMessage);
         break;
 
+      case FrameType.WINDOW_CTL: {
+        if (pwRequiredButMissing) return;
+        // Window ops are not stream-scoped; validate the op envelope with zod
+        // and ignore anything malformed/unknown (forward-compatible with newer
+        // clients) rather than tearing down the session.
+        const parsed = WindowCtlOpMessageSchema.safeParse(message);
+        if (!parsed.success) {
+          output.warn(`Ignoring malformed WINDOW_CTL op: ${parsed.error.message}`);
+          return;
+        }
+        await handleWindowCtl(session, parsed.data);
+        break;
+      }
+
       case FrameType.KEEPALIVE:
         // Echo keepalive back
         await sendEncrypted(session, FrameType.KEEPALIVE, message);
@@ -555,10 +615,10 @@ export async function handleMultiStreamFrame(
 
 // Clean up session
 export function cleanupMultiSession(session: MultiSession): void {
-  // Detach this invoker's viewers from the shared shell without killing it.
-  if (session.sharedViewers && session.sharedSession) {
+  // Detach this invoker's viewports from the workspace without killing windows.
+  if (session.sharedViewers && session.sharedWorkspace) {
     for (const sid of session.sharedViewers) {
-      session.sharedSession.detach(sid);
+      session.sharedWorkspace.detachViewport(sid);
     }
     session.sharedViewers.clear();
   }

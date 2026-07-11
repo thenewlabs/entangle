@@ -5,7 +5,7 @@ import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@then
 import { startAgent } from './agent.js';
 import { createCapability, resolveServeTarget } from './capability.js';
 import { promptHidden } from './prompt.js';
-import { SharedSession } from './shared-session.js';
+import { SharedWorkspace } from './shared-workspace.js';
 import { attachHostTerminal, type HostTerminalHandle } from './host-terminal.js';
 
 const program = new Command();
@@ -68,15 +68,15 @@ program
         : options.shared === true ? true
         : isTty && outputMode === 'text';
 
-      let sharedSession: SharedSession | undefined;
-      // The host UI (when attached) sizes the shared PTY to the box interior and
-      // takes the session URL for its bottom bar once the relay assigns it.
+      let sharedWorkspace: SharedWorkspace | undefined;
+      // The host UI (when attached) sizes the active window to the box interior
+      // and takes the session URL for its bottom bar once the relay assigns it.
       let hostHandle: HostTerminalHandle | undefined;
       if (shared) {
         const cols = process.stdout.columns || 80;
         const rows = process.stdout.rows || 24;
-        sharedSession = new SharedSession(output, { cols, rows });
-        if (isTty) hostHandle = attachHostTerminal(sharedSession, output);
+        sharedWorkspace = new SharedWorkspace(output, { cols, rows });
+        if (isTty) hostHandle = attachHostTerminal(sharedWorkspace, output);
       }
 
       await startAgent({
@@ -84,8 +84,8 @@ program
         outputMode: program.opts().outputMode,
         ...(password ? { password } : {}),
         ...(pinnedCapability && { pinnedCapability }),
-        ...(sharedSession && {
-          sharedSession,
+        ...(sharedWorkspace && {
+          sharedWorkspace,
           onCapabilityReady: ({ link }) => {
             if (hostHandle) hostHandle.setUrl(link);
             else output.info(`⧉ entangle session shared — open to collaborate:\n  ${link}\n`);

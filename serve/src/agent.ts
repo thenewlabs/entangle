@@ -4,7 +4,7 @@ import { getConfig, OutputHandler, parseOutputMode, type PipeEndpoint } from '@t
 import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { createCapability, type CapabilityInfo } from './capability.js';
-import type { SharedSession } from './shared-session.js';
+import type { SharedWorkspace } from './shared-workspace.js';
 
 interface AgentOptions {
   serverUrl: string;
@@ -14,9 +14,9 @@ interface AgentOptions {
   // Registered forwarded-channel endpoints (allow-list). Merged with any parsed
   // from the ENTANGLE_PIPES env; explicit entries here win on name collision.
   pipeEndpoints?: Map<string, PipeEndpoint>;
-  // When set, serve a single shared terminal: every viewer attaches to this PTY
-  // instead of spawning its own shell.
-  sharedSession?: SharedSession;
+  // When set, serve a shared workspace: every client's viewport binds to it (and
+  // sees the active window) instead of spawning its own shell.
+  sharedWorkspace?: SharedWorkspace;
   // Called once the served capability's URL is known (used by the host UI to
   // show it). When provided, the verbose capability block is suppressed.
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
@@ -33,7 +33,7 @@ interface AgentState {
   passwordHash?: string;
   pinned?: boolean;
   pipeEndpoints: Map<string, PipeEndpoint>;
-  sharedSession?: SharedSession;
+  sharedWorkspace?: SharedWorkspace;
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
 }
 
@@ -53,7 +53,7 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     pipeEndpoints,
     ...(options.outputMode && { outputMode: options.outputMode }),
     ...(options.password && { password: options.password }),
-    ...(options.sharedSession && { sharedSession: options.sharedSession }),
+    ...(options.sharedWorkspace && { sharedWorkspace: options.sharedWorkspace }),
     ...(options.onCapabilityReady && { onCapabilityReady: options.onCapabilityReady }),
   };
 
@@ -148,7 +148,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
 
         // Register synchronously (no await) so the session exists before this
         // invoker's AUTH1 arrives on the next relay message.
-        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.sharedSession);
+        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.sharedWorkspace);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker
