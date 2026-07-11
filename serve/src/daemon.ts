@@ -97,9 +97,10 @@ export async function runDaemon(): Promise<void> {
   process.on('SIGTERM', () => shutdown(0));
   process.on('SIGINT', () => shutdown(0));
 
-  // Subscribe ONCE to the session and fan each event out to every client.
-  localSession.onHostData((chunk) => broadcast({ t: 'data', chunk: encodeChunk(chunk) }));
-  localSession.onWindowState((state) => broadcast({ t: 'window-state', state }));
+  // Subscribe ONCE to the SESSION-GLOBAL streams and fan each out to every
+  // client. Terminal output and window-state are NOT global anymore: each client
+  // gets its own workspace viewport (see onConnection) so it can sit on its own
+  // active window, so we deliberately do NOT broadcast onHostData/onWindowState.
   localSession.onViewersChange((n) => broadcast({ t: 'viewers', n }));
   localSession.onLog((line) => broadcast({ t: 'log', line }));
   localSession.onUrl((url) => broadcast({ t: 'url', url }));
@@ -108,59 +109,83 @@ export async function runDaemon(): Promise<void> {
 
   // --- inbound client handling ---------------------------------------------
 
-  const handleClientMessage = (msg: ClientToDaemon, socket: net.Socket): void => {
+  // A client's messages drive ITS OWN workspace viewport (keyed by `vpId`), so
+  // input/window ops only move that client's active window. Sizing stays global
+  // (the host/workspace size is authoritative), so hello/resize resize the whole
+  // workspace as before.
+  const handleClientMessage = (msg: ClientToDaemon, socket: net.Socket, vpId: string): void => {
     switch (msg.t) {
       case 'hello':
-        localSession.resize(msg.cols, msg.rows);
+        workspace.resize(msg.cols, msg.rows);
         break;
       case 'input':
-        localSession.write(decodeChunk(msg.data));
+        workspace.writeFromViewport(vpId, decodeChunk(msg.data));
         break;
       case 'resize':
-        localSession.resize(msg.cols, msg.rows);
+        workspace.resize(msg.cols, msg.rows);
         break;
       case 'win':
         switch (msg.op) {
-          case 'new': localSession.newWindow(); break;
-          case 'next': localSession.nextWindow(); break;
-          case 'prev': localSession.prevWindow(); break;
-          case 'select': if (msg.index !== undefined) localSession.selectWindow(msg.index); break;
-          case 'close': if (msg.index !== undefined) localSession.closeWindow(msg.index); break;
+          case 'new': workspace.newWindowForViewport(vpId); break;
+          case 'next': workspace.nextWindowForViewport(vpId); break;
+          case 'prev': workspace.prevWindowForViewport(vpId); break;
+          case 'select': if (msg.index !== undefined) workspace.selectWindowForViewport(vpId, msg.index); break;
+          case 'close': if (msg.index !== undefined) workspace.closeWindowFromViewport(vpId, msg.index); break;
         }
         break;
       case 'detach':
-        // Drop just this client; the daemon (and session) keep running.
+        // Drop just this client's viewport; the daemon (and session) keep running.
         clients.delete(socket);
+        workspace.detachViewport(vpId);
         try { socket.end(); } catch { /* already ending */ }
         break;
     }
   };
 
+  let nextVpId = 0;
+
   const onConnection = (socket: net.Socket): void => {
+    // Each connection is its own workspace viewport with an independent active
+    // window; reuse the connection counter as the viewport key.
+    const vpId = `client-${nextVpId++}`;
     clients.add(socket);
-    const remove = (): void => { clients.delete(socket); };
+    const remove = (): void => {
+      clients.delete(socket);
+      workspace.detachViewport(vpId);
+    };
     socket.on('close', remove);
     socket.on('error', remove);
+
+    // Attach this client's viewport: the workspace multiplexes ITS active
+    // window's output onto this socket and pushes ITS own window-state.
+    const { replay } = workspace.attachViewport({
+      sid: vpId,
+      onData: (chunk) => { try { writeMessage(socket, { t: 'data', chunk: encodeChunk(chunk) }); } catch { /* dropped */ } },
+      onWindowState: (state) => { try { writeMessage(socket, { t: 'window-state', state }); } catch { /* dropped */ } },
+      onExit: (code) => { try { writeMessage(socket, { t: 'exit', code }); } catch { /* dropped */ } },
+    });
 
     createMessageReader(
       socket,
       (msg) => {
         // Only ClientToDaemon frames are expected inbound; a single bad message
         // must not take down the daemon.
-        try { handleClientMessage(msg as ClientToDaemon, socket); }
+        try { handleClientMessage(msg as ClientToDaemon, socket, vpId); }
         catch (err) { output.warn('Client message failed', err instanceof Error ? err.message : String(err)); }
       },
       () => { remove(); try { socket.destroy(); } catch { /* already gone */ } },
     );
 
-    // Push the current state immediately so the client's UI populates fast.
+    // Push this viewport's current state immediately so the client's UI
+    // populates fast. Sent synchronously (no await) right after attach, so live
+    // onData frames can't slip in before the replay.
     try {
       const url = localSession.getUrl();
       if (url) writeMessage(socket, { t: 'url', url });
-      writeMessage(socket, { t: 'window-state', state: localSession.windowState() });
-      writeMessage(socket, { t: 'viewers', n: localSession.viewerCount() });
+      writeMessage(socket, { t: 'window-state', state: workspace.windowStateForViewport(vpId) });
+      writeMessage(socket, { t: 'viewers', n: workspace.viewerCount() });
       for (const line of localSession.getLogBuffer()) writeMessage(socket, { t: 'log', line });
-      writeMessage(socket, { t: 'replay', chunk: encodeChunk(localSession.getReplay()) });
+      writeMessage(socket, { t: 'replay', chunk: encodeChunk(replay) });
     } catch {
       remove();
     }

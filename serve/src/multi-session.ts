@@ -163,8 +163,18 @@ async function handleSharedAttach(
     await sendStreamData(session, sid, chunk, 'stdout');
   }
 
-  // Populate the client's tab bar with the current window state.
-  await sendWindowState(session, workspace.windowState());
+  // Populate the client's tab bar with THIS viewport's own window state (its
+  // active index), not the host's global view.
+  await sendWindowState(session, workspace.windowStateForViewport(sid));
+}
+
+// This viewer's pty viewport sid — the key its per-viewport window ops apply to.
+// A session's `sharedViewers` holds only pty-viewport sids (they are added only
+// in handleSharedAttach), so the first one is the pty viewport.
+function ptyViewportSid(session: MultiSession): string | undefined {
+  if (!session.sharedViewers) return undefined;
+  for (const sid of session.sharedViewers) return sid;
+  return undefined;
 }
 
 // Handle stream open request
@@ -444,22 +454,25 @@ async function sendWindowState(
   await sendEncrypted(session, FrameType.WINDOW_CTL, msg);
 }
 
-// Handle a client->server window operation (WINDOW_CTL). The workspace applies
-// the op and drives its own window-state broadcast + viewport repaints, so all
-// attached clients (across every session) stay in sync.
+// Handle a client->server window operation (WINDOW_CTL). Window ops drive THIS
+// viewer's OWN active window (keyed by its pty-viewport sid), so viewers can sit
+// on different windows independently; the workspace pushes each affected
+// viewport its own window-state and repaints. Rename mutates the shared window
+// list, so it stays global and re-broadcasts to everyone.
 async function handleWindowCtl(
   session: MultiSession,
   message: WindowCtlOpMessage
 ): Promise<void> {
   const workspace = session.sharedWorkspace;
   if (!workspace) return;
+  const sid = ptyViewportSid(session);
   const op = message.msg;
   switch (op.op) {
-    case 'new-window': workspace.newWindow(); break;
-    case 'next-window': workspace.nextWindow(); break;
-    case 'prev-window': workspace.prevWindow(); break;
-    case 'select-window': workspace.selectWindow(op.index); break;
-    case 'close-window': workspace.closeWindow(op.index); break;
+    case 'new-window': if (sid) workspace.newWindowForViewport(sid); break;
+    case 'next-window': if (sid) workspace.nextWindowForViewport(sid); break;
+    case 'prev-window': if (sid) workspace.prevWindowForViewport(sid); break;
+    case 'select-window': if (sid) workspace.selectWindowForViewport(sid, op.index); break;
+    case 'close-window': if (sid) workspace.closeWindowFromViewport(sid, op.index); break;
     case 'rename-window': workspace.renameWindow(op.index, op.title); break;
   }
 }
