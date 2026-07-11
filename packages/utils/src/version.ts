@@ -1,4 +1,4 @@
-export const VERSION = '2.6.1';
+export const VERSION = '2.6.2';
 export const BUILD_TIME = new Date().toISOString();
 
 export function getVersionInfo(): string {
