@@ -27,6 +27,10 @@ export enum FrameType {
   STREAM_EXIT = 0x34,
   STREAM_SIGNAL = 0x35,
   STREAM_RESIZE = 0x36,
+  // Shared-workspace window control (tmux-style multi-window). Carries small
+  // control messages (window ops client->server, window-state server->clients)
+  // over the same AEAD/AAD path as the stream frames. See messages.ts.
+  WINDOW_CTL = 0x40,
 }
 
 export const CapabilitySchema = z.object({

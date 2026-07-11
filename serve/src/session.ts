@@ -27,7 +27,7 @@ import {
 import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
 import type { CapabilityInfo } from './capability.js';
-import type { SharedSession } from './shared-session.js';
+import type { SharedWorkspace } from './shared-workspace.js';
 import { handleMultiStreamFrame, cleanupMultiSession } from './multi-session.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
@@ -51,7 +51,7 @@ export interface Session {
   nonceB?: string;
   nonceC?: string;
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
-  sharedSession?: SharedSession | undefined; // set when serving a shared terminal
+  sharedWorkspace?: SharedWorkspace | undefined; // set when serving a shared workspace
 }
 
 // Helper to send wrapped relay responses
@@ -72,7 +72,7 @@ export function handleInvokerConnection(
   socketId: string,
   cap: CapabilityInfo,
   passwordHash?: string,
-  sharedSession?: SharedSession
+  sharedWorkspace?: SharedWorkspace
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -83,7 +83,7 @@ export function handleInvokerConnection(
     passwordVerified: !passwordHash, // If no password, consider it verified
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
-    sharedSession,
+    sharedWorkspace,
   };
 
   const reader = new FrameReader();
@@ -119,6 +119,8 @@ const STREAM_FRAME_TYPES = new Set<FrameType>([
   FrameType.STREAM_CLOSE,
   FrameType.STREAM_ERROR,
   FrameType.STREAM_EXIT,
+  // Shared-workspace window control rides the same multi-session handler.
+  FrameType.WINDOW_CTL,
 ]);
 
 async function handleFrame(
@@ -143,7 +145,7 @@ async function handleFrame(
         authenticated: true,
         requiresPassword: session.requiresPassword,
         passwordVerified: session.passwordVerified,
-        sharedSession: session.sharedSession,
+        sharedWorkspace: session.sharedWorkspace,
         sharedViewers: new Set<string>(),
       };
     }

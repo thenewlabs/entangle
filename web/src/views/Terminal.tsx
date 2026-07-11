@@ -23,6 +23,11 @@ export function TerminalView(_props: TerminalViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [needPassword, setNeedPassword] = useState(false);
   const [password, setPassword] = useState('');
+  // Shared-workspace window state that drives the tmux-style tab bar. The server
+  // broadcasts window-state over WINDOW_CTL; the single xterm below is repainted
+  // by the server on a switch, so we only mirror the tabs here.
+  const [windows, setWindows] = useState<{ id: string; title: string }[]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
 
   const start = () => {
     if (!terminalRef.current) return;
@@ -96,7 +101,18 @@ export function TerminalView(_props: TerminalViewProps) {
       startedRef.current = true;
       start();
     }
+    // Subscribe to window-state broadcasts to drive the tab bar. onWindowState
+    // replays the last known state immediately, so a late mount still populates.
+    const entangle = (window as any).entangle;
+    const unsub: (() => void) | undefined = entangle?.onWindowState?.((state: {
+      windows: { id: string; title: string }[];
+      activeIndex: number;
+    }) => {
+      setWindows(state.windows ?? []);
+      setActiveIndex(state.activeIndex ?? 0);
+    });
     return () => {
+      unsub?.();
       const child = childRef.current;
       if (child?.__onResize) window.removeEventListener('resize', child.__onResize);
       childRef.current?.kill?.('SIGHUP');
@@ -133,6 +149,45 @@ export function TerminalView(_props: TerminalViewProps) {
     <div className="terminal-view">
       {status === 'error' && <div className="error-banner">Error: {error}</div>}
       {status === 'connecting' && <div className="status-banner">Connecting...</div>}
+      {status === 'ready' && windows.length > 0 && (
+        <div className="window-tabbar" role="tablist" aria-label="Windows">
+          {windows.map((w, i) => (
+            <div
+              key={w.id}
+              className={`window-tab${i === activeIndex ? ' active' : ''}`}
+              role="tab"
+              aria-selected={i === activeIndex}
+              title={w.title || `Window ${i + 1}`}
+              onClick={() => (window as any).entangle?.selectWindow?.(i)}
+            >
+              <span className="window-tab-label">{w.title || `${i + 1}`}</span>
+              {windows.length > 1 && (
+                <button
+                  type="button"
+                  className="window-tab-close"
+                  aria-label={`Close ${w.title || `window ${i + 1}`}`}
+                  title="Close window"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    (window as any).entangle?.closeWindow?.(i);
+                  }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+          <button
+            type="button"
+            className="window-tab-new"
+            aria-label="New window"
+            title="New window"
+            onClick={() => (window as any).entangle?.newWindow?.()}
+          >
+            +
+          </button>
+        </div>
+      )}
       <div className="terminal-stage">
         {status === 'ready' && (
           <span

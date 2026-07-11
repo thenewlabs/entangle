@@ -1,5 +1,12 @@
 import { OutputHandler } from '@thenewlabs/entangle-utils';
-import type { SharedSession } from './shared-session.js';
+// The host binds to the shared WORKSPACE via the same host-facing surface it
+// used on a single SharedSession (onHostData/onViewersChange/onExit/resize/
+// write/getReplay/viewerCount), so it renders the ACTIVE window and repaints
+// automatically on a remote window switch (the workspace pushes a clear+replay
+// through onHostData). The host also renders its own tab bar by subscribing to
+// the workspace's onWindowState and drives window ops via a Ctrl-B prefix keymap.
+import type { WindowInfo } from '@thenewlabs/entangle-protocol';
+import type { SharedWorkspace } from './shared-workspace.js';
 import { VtGrid } from './vt-grid.js';
 import { BoxRenderer } from './box-renderer.js';
 
@@ -9,6 +16,9 @@ const MIN_ROWS = 6;
 
 /** Repaint cadence: coalesce shell output into ~30ms frames rather than per byte. */
 const FRAME_MS = 30;
+
+/** Host window-management prefix (Ctrl-B), tmux-style. */
+const PREFIX = 0x02;
 
 /**
  * Handle returned by {@link attachHostTerminal}. The session URL is only known
@@ -30,7 +40,7 @@ export interface HostTerminalHandle {
  * left rail is never overwritten. Elsewhere (too small, or not a TTY) it falls
  * back to raw pass-through.
  */
-export function attachHostTerminal(shared: SharedSession, output: OutputHandler): HostTerminalHandle {
+export function attachHostTerminal(shared: SharedWorkspace, output: OutputHandler): HostTerminalHandle {
   const stdout = process.stdout;
   const stdin = process.stdin;
 
@@ -46,7 +56,7 @@ export function attachHostTerminal(shared: SharedSession, output: OutputHandler)
 
 /** Bordered session-frame UI (the normal interactive host experience). */
 function attachBoxTerminal(
-  shared: SharedSession,
+  shared: SharedWorkspace,
   output: OutputHandler,
   cols: number,
   rows: number,
@@ -71,11 +81,17 @@ function attachBoxTerminal(
   let dirty = true;
   let clearFirst = true;
 
+  // Local mirror of the workspace's window set, kept in sync via onWindowState
+  // and rendered as the tab bar. Seeded with the current state.
+  const initialState = shared.windowState();
+  let windows: readonly WindowInfo[] = initialState.windows;
+  let activeIndex = initialState.activeIndex;
+
   const paint = () => {
     if (!dirty) return;
     dirty = false;
     if (clearFirst) { write('\x1b[2J\x1b[H'); clearFirst = false; }
-    write(renderer.frame({ viewers, url }));
+    write(renderer.frame({ viewers, url, windows, activeIndex }));
   };
 
   // Coalesce shell output and title changes into throttled frames.
@@ -84,11 +100,55 @@ function attachBoxTerminal(
 
   shared.onHostData((chunk) => { grid.write(chunk.toString('utf8')); dirty = true; });
   shared.onViewersChange((n) => { viewers = n; dirty = true; });
+  shared.onWindowState((state) => {
+    windows = state.windows;
+    activeIndex = state.activeIndex;
+    dirty = true;
+  });
 
   const wasRaw = !!stdin.isRaw;
   stdin.setRawMode(true);
   stdin.resume();
-  const onInput = (d: Buffer) => shared.write(new Uint8Array(d));
+
+  // Window-management commands after a Ctrl-B prefix. Unknown keys are swallowed.
+  const runCommand = (byte: number) => {
+    const ch = String.fromCharCode(byte);
+    if (ch === 'c') shared.newWindow();
+    else if (ch === 'n') shared.nextWindow();
+    else if (ch === 'p') shared.prevWindow();
+    else if (ch === 'x') shared.closeWindow(activeIndex);
+    else if (ch >= '0' && ch <= '9') {
+      // Tabs are labelled 1-based ("1:shell" = index 0), so digit 1..9 selects
+      // window 0..8 and 0 selects window 9 (ignored if out of range).
+      const digit = byte - 0x30;
+      shared.selectWindow(digit === 0 ? 9 : digit - 1);
+    }
+  };
+
+  // Ctrl-B prefix state machine: a lone Ctrl-B arms the prefix; the next byte is
+  // a command (Ctrl-B again = a literal Ctrl-B to the active window). All other
+  // bytes forward to the active window, flushed around each prefix boundary so
+  // ordering across a window switch is preserved.
+  let pendingPrefix = false;
+  const onInput = (d: Buffer) => {
+    let start = 0;
+    for (let i = 0; i < d.length; i++) {
+      const byte = d[i]!;
+      if (pendingPrefix) {
+        pendingPrefix = false;
+        if (byte === PREFIX) shared.write(new Uint8Array([PREFIX]));
+        else runCommand(byte);
+        start = i + 1;
+        continue;
+      }
+      if (byte === PREFIX) {
+        if (i > start) shared.write(new Uint8Array(d.subarray(start, i)));
+        pendingPrefix = true;
+        start = i + 1;
+      }
+    }
+    if (d.length > start) shared.write(new Uint8Array(d.subarray(start)));
+  };
   stdin.on('data', onInput);
 
   const onResize = () => {
@@ -134,7 +194,7 @@ function attachBoxTerminal(
  * Raw pass-through: mirror the shell byte-for-byte and forward keystrokes, with
  * no frame. Used when the terminal is too small for a box (or not a TTY).
  */
-function attachRawTerminal(shared: SharedSession, output: OutputHandler): HostTerminalHandle {
+function attachRawTerminal(shared: SharedWorkspace, output: OutputHandler): HostTerminalHandle {
   const stdin = process.stdin;
   const stdout = process.stdout;
 

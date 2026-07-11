@@ -267,3 +267,77 @@ export type StreamOpenedMessage = z.infer<typeof StreamOpenedMessageSchema>;
 export type StreamExitMessage = z.infer<typeof StreamExitMessageSchema>;
 export type StreamClosedMessage = z.infer<typeof StreamClosedMessageSchema>;
 export type StreamErrorMessage = z.infer<typeof StreamErrorMessageSchema>;
+
+// ---------------------------------------------------------------------------
+// Shared-workspace window control (FrameType.WINDOW_CTL = 0x40)
+// ---------------------------------------------------------------------------
+//
+// The shared workspace holds N windows (each its own PTY); exactly ONE is the
+// GLOBAL active window whose output is streamed to every client's viewport. The
+// WINDOW_CTL frame is the bidirectional control channel that carries window
+// operations and window state. It is encrypted/authenticated exactly like the
+// STREAM_* frames: CBOR-encoded envelope, AEAD with `frameAad(WINDOW_CTL, dir)`.
+//
+// Like the stream envelopes, every WINDOW_CTL message is `{ ctr, msg }`. These
+// messages are NOT stream-scoped (no `sid`), so the counter is the SESSION
+// GLOBAL counter (the same sequence used by AUTH_PW / ERROR), not a per-stream
+// counter.
+//
+//   Client -> server (window ops), `msg.kind === 'op'`:
+//     { v: 1, kind: 'op', op: 'new-window' }
+//     { v: 1, kind: 'op', op: 'next-window' }
+//     { v: 1, kind: 'op', op: 'prev-window' }
+//     { v: 1, kind: 'op', op: 'select-window', index: number }   // 0-based index
+//     { v: 1, kind: 'op', op: 'close-window',  index: number }   // 0-based index
+//     { v: 1, kind: 'op', op: 'rename-window', index: number, title: string }
+//
+//   Server -> all clients (broadcast), `msg.kind === 'window-state'`:
+//     { v: 1, kind: 'window-state',
+//       windows: [{ id: string, title: string }, ...],  // order == tab order
+//       activeIndex: number }                            // 0-based, index into `windows`
+//
+// The server broadcasts `window-state` to every attached client on ANY change
+// (window created / closed / switched / renamed), and sends it once to a client
+// immediately after it attaches so its tab bar can populate. On an active-window
+// switch the server ALSO repaints each client's viewport: it writes a screen
+// clear + the newly-active window's replay onto that client's existing pty
+// stream (the sid from STREAM_OPEN) — no new stream is opened per window.
+
+export const WindowInfoSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+});
+
+/** A client->server window operation (the `msg` body of a WINDOW_CTL frame). */
+export const WindowOpSchema = z.discriminatedUnion('op', [
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('new-window') }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('next-window') }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('prev-window') }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('select-window'), index: z.number().int().nonnegative() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('close-window'), index: z.number().int().nonnegative() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('rename-window'), index: z.number().int().nonnegative(), title: z.string().max(128) }),
+]);
+
+/** Client->server WINDOW_CTL envelope: a window operation. */
+export const WindowCtlOpMessageSchema = z.object({
+  ctr: z.number(),
+  msg: WindowOpSchema,
+});
+
+/** Server->client WINDOW_CTL envelope: the full window state (for tab bars). */
+export const WindowStateMessageSchema = z.object({
+  ctr: z.number(),
+  msg: z.object({
+    v: z.literal(1),
+    kind: z.literal('window-state'),
+    windows: z.array(WindowInfoSchema),
+    activeIndex: z.number().int(),
+  }),
+});
+
+export type WindowInfo = z.infer<typeof WindowInfoSchema>;
+export type WindowOp = z.infer<typeof WindowOpSchema>;
+export type WindowCtlOpMessage = z.infer<typeof WindowCtlOpMessageSchema>;
+export type WindowStateMessage = z.infer<typeof WindowStateMessageSchema>;
+/** The `msg` body of a server->client window-state frame (sans envelope). */
+export type WindowStateBody = WindowStateMessage['msg'];
