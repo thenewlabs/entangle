@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
-import { createServer } from 'http';
+import { createServer, type Server } from 'http';
 import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { setupAgentRoute } from './routes/agent.js';
 import { setupRelayRoute } from './routes/relay.js';
@@ -35,7 +35,7 @@ function isMainModule(): boolean {
   }
 }
 
-export async function startServer(outputMode: string = 'text'): Promise<void> {
+export async function startServer(outputMode: string = 'text'): Promise<Server> {
   // Ensure all loggers in this process share the same output mode
   process.env.OUTPUT_MODE = outputMode;
   const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
@@ -80,36 +80,103 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
     res.json({ status: 'ok', agents: routing.getAgentCount() });
   });
   
-  // Try multiple paths to find the web dist directory
-  const possibleWebPaths = [
-    join(__dirname, 'web'),           // When running from dist/server.js
-    join(__dirname, '../web'),        // Alternative dist structure
-    join(__dirname, '../../web/dist') // When running from server/dist/index.js
-  ];
-  
-  let webDistPath: string | undefined;
-  for (const path of possibleWebPaths) {
-    if (existsSync(path) && existsSync(join(path, 'index.html'))) {
-      webDistPath = path;
-      output.info(`Found web assets at ${webDistPath}`);
-      break;
+  // ---------------------------------------------------------------------------
+  // Optional host-based SPA-serving (Locus deployment; OFF by default).
+  //
+  // When RELAY_SPA_DIR is set, the relay ALSO becomes the origin that serves the
+  // single-page app — so the SPA dials the WS relay at its own origin (the
+  // entangle model). Two host roles are distinguished by the `Host` header:
+  //
+  //   view host    (any non-preview Host): serves the SPA. GET /cap/<id> is a
+  //                catch-all → index.html, so the client reads capId + secret
+  //                from the URL (the #S= fragment never reaches the server).
+  //   preview host (Host === RELAY_PREVIEW_HOST): serves the preview bootstrap
+  //                (RELAY_PREVIEW_DOC, default preview.html) as its catch-all,
+  //                so hard reloads heal back onto the Service-Worker bridge.
+  //
+  // Both dirs typically point at the SAME locus-web build (it ships index.html,
+  // preview.html, sw.js and assets/). This block is a no-op unless RELAY_SPA_DIR
+  // is set, so existing entangle web-serving (below) is unchanged.
+  // ---------------------------------------------------------------------------
+  const spaDir = process.env.RELAY_SPA_DIR;
+  const previewHost = (process.env.RELAY_PREVIEW_HOST || '').trim().toLowerCase();
+  const previewDoc = process.env.RELAY_PREVIEW_DOC || 'preview.html';
+
+  let spaServed = false;
+  if (spaDir) {
+    if (!existsSync(join(spaDir, 'index.html'))) {
+      output.warn(`RELAY_SPA_DIR set but no index.html at ${spaDir}; SPA-serving disabled`);
+    } else {
+      // spaDir is narrowed to string here; the preview dir defaults to it.
+      const viewDir: string = spaDir;
+      const previewDir: string = process.env.RELAY_PREVIEW_SPA_DIR || spaDir;
+      spaServed = true;
+      output.info(`Serving SPA from ${viewDir}`);
+      if (previewHost) {
+        output.info(`Preview host ${previewHost} serves ${previewDoc} from ${previewDir}`);
+      }
+
+      const isPreviewHost = (req: express.Request): boolean => {
+        if (!previewHost) return false;
+        const host = (req.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
+        return host === previewHost;
+      };
+
+      const viewStatic = express.static(viewDir);
+      const previewStatic = express.static(previewDir);
+
+      // Static assets: preview host reads from the preview dir, everyone else
+      // from the view dir (usually the same directory).
+      app.use((req, res, next) => {
+        if (isPreviewHost(req)) return previewStatic(req, res, next);
+        return viewStatic(req, res, next);
+      });
+
+      // SPA fallback for client-side routing. Express 5 / path-to-regexp v8
+      // rejects a bare '*' path, so use a terminal middleware for unmatched
+      // GETs. The document depends on the host role.
+      app.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        if (isPreviewHost(req)) return res.sendFile(join(previewDir, previewDoc));
+        return res.sendFile(join(viewDir, 'index.html'));
+      });
     }
   }
-  
-  if (webDistPath) {
-    // Serve static files first
-    app.use(express.static(webDistPath));
 
-    // SPA fallback for client-side routing (e.g. capability URLs like
-    // /cap/capId_xyz). Express 5 / path-to-regexp v8 rejects a bare '*' path,
-    // so use a terminal middleware for unmatched GETs instead.
-    const webRoot = webDistPath;
-    app.use((req, res, next) => {
-      if (req.method !== 'GET') return next();
-      res.sendFile(join(webRoot, 'index.html'));
-    });
-  } else {
-    output.warn('Web assets not found');
+  // Entangle's own bundled web UI (unchanged). Only consulted when the optional
+  // Locus SPA-serving above is not active.
+  if (!spaServed) {
+    // Try multiple paths to find the web dist directory
+    const possibleWebPaths = [
+      join(__dirname, 'web'),           // When running from dist/server.js
+      join(__dirname, '../web'),        // Alternative dist structure
+      join(__dirname, '../../web/dist') // When running from server/dist/index.js
+    ];
+
+    let webDistPath: string | undefined;
+    for (const path of possibleWebPaths) {
+      if (existsSync(path) && existsSync(join(path, 'index.html'))) {
+        webDistPath = path;
+        output.info(`Found web assets at ${webDistPath}`);
+        break;
+      }
+    }
+
+    if (webDistPath) {
+      // Serve static files first
+      app.use(express.static(webDistPath));
+
+      // SPA fallback for client-side routing (e.g. capability URLs like
+      // /cap/capId_xyz). Express 5 / path-to-regexp v8 rejects a bare '*' path,
+      // so use a terminal middleware for unmatched GETs instead.
+      const webRoot = webDistPath;
+      app.use((req, res, next) => {
+        if (req.method !== 'GET') return next();
+        res.sendFile(join(webRoot, 'index.html'));
+      });
+    } else {
+      output.warn('Web assets not found');
+    }
   }
   
   // Cap control-plane message size. Payloads are JSON envelopes wrapping a
@@ -167,15 +234,22 @@ export async function startServer(outputMode: string = 'text'): Promise<void> {
     }
   });
   
-  server.listen(config.port, config.host, () => {
-    output.info(`Server started on ${config.host}:${config.port}`);
+  await new Promise<void>((resolveListen) => {
+    server.listen(config.port, config.host, () => {
+      output.info(`Server started on ${config.host}:${config.port}`);
+      resolveListen();
+    });
   });
-  
+
   process.on('SIGINT', () => {
     output.info('Shutting down');
     server.close();
     process.exit(0);
   });
+
+  // Return the http server so callers/tests can inspect the bound address and
+  // shut it down cleanly. The CLI entry point ignores the return value.
+  return server;
 }
 
 if (isMainModule()) {
