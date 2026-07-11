@@ -88,6 +88,9 @@ function attachBarTerminal(
   let live = false; // true once the URL is known and we're in pass-through
   let viewers = shared.viewerCount();
   let barDirty = false;
+  // The capability URL, once the relay assigns it. Stored so the debug view's
+  // pinned header can always show it (and refresh on a later setUrl).
+  let url: string | null = null;
 
   // Which surface fills the shell area (rows 1..rows-1). 'shell' is the normal
   // raw pass-through; 'debug' shows the captured agent-log tail (Ctrl-B d).
@@ -163,17 +166,37 @@ function attachBarTerminal(
     write(`\x1b7\x1b[${rows};1H\x1b[2K${buildBar()}\x1b8`);
   };
 
-  // Render the debug tab: clear the shell area and print the tail of the log
-  // buffer that fits, then repaint the bar. No scrollback — just the last rows.
+  // The info banner lines (brand, share URL, key hint), shared by the launch
+  // banner printed on go-live and the debug view's pinned header so they match
+  // exactly. Shows `connecting…` for the URL until it's known.
+  const bannerLines = (link: string | null): string[] => [
+    `${BAR_FG}⧉ entangle${RESET} — live shared session`,
+    `Share this live session:`,
+    `  ${BAR_FG}${link ?? 'connecting…'}${RESET}`,
+    `Windows: Ctrl-B then c=new  n/p=prev/next  1-9=select  x=close  d=debug`,
+  ];
+
+  // Render the debug tab: a PINNED HEADER (the info banner: brand, share URL,
+  // key hint) at the top so the URL is always findable, then a blank separator,
+  // then the tail of the log buffer that fits, then repaint the bar. No
+  // scrollback — just the last rows.
   const renderDebug = () => {
     if (!live) return;
     debugDirty = false;
     const shellRows = Math.max(1, rows - 1);
-    const lines = debugBuf.slice(-shellRows);
+    const header = bannerLines(url);
+    const headerRows = header.length + 1; // banner lines + one blank separator
+    const tailRows = Math.max(0, shellRows - headerRows);
+    const lines = tailRows > 0 ? debugBuf.slice(-tailRows) : [];
     let out = '';
-    for (let r = 0; r < shellRows; r++) {
+    let r = 0;
+    for (; r < header.length && r < shellRows; r++) {
+      out += `\x1b[${r + 1};1H\x1b[2K${header[r]}`; // header lines print as-is
+    }
+    if (r < shellRows) { out += `\x1b[${r + 1};1H\x1b[2K`; r++; } // blank separator
+    for (let i = 0; r < shellRows; r++, i++) {
       out += `\x1b[${r + 1};1H\x1b[2K`; // move to row, clear it
-      const line = lines[r];
+      const line = lines[i];
       if (line !== undefined) out += line.length > cols ? line.slice(0, cols) : line;
     }
     write(out);
@@ -310,6 +333,7 @@ function attachBarTerminal(
     stdin.removeListener('data', onInput);
     stdout.removeListener('resize', onResize);
     write('\x1b[r'); // reset scroll region
+    write('\x1b[2J\x1b[H'); // clear screen + home, so no stale bar/shell is left behind
     write('\x1b[?25h'); // show cursor
     if (stdin.isTTY) { try { stdin.setRawMode(wasRaw); } catch {} }
     stdin.pause();
@@ -326,14 +350,10 @@ function attachBarTerminal(
   process.on('SIGINT', () => { restore(); process.exit(130); });
 
   // Info banner shown at the top when the session goes live. `\r\n` because raw
-  // mode does not translate a bare `\n` into a carriage return.
+  // mode does not translate a bare `\n` into a carriage return. Reuses the same
+  // `bannerLines` the debug view pins so the two always match.
   const writeBanner = (link: string) => {
-    write(
-      `${BAR_FG}⧉ entangle${RESET} — live shared session\r\n` +
-      `Share this live session:\r\n` +
-      `  ${BAR_FG}${link}${RESET}\r\n` +
-      `Windows: Ctrl-B then c=new  n/p=prev/next  1-9=select  x=close  d=debug\r\n`,
-    );
+    write(bannerLines(link).map((l) => `${l}\r\n`).join(''));
   };
 
   // Connecting screen until the relay hands us the capability URL.
@@ -342,7 +362,12 @@ function attachBarTerminal(
 
   return {
     setUrl(link: string) {
-      if (live) { barDirty = true; return; } // URL refresh after we're already live
+      url = link; // stored so the debug view's pinned header can always show it
+      if (live) { // URL refresh after we're already live
+        barDirty = true;
+        if (viewMode === 'debug') debugDirty = true; // repaint the pinned header
+        return;
+      }
       cols = stdout.columns || cols;
       rows = stdout.rows || rows;
       const shellRows = Math.max(1, rows - 1);
