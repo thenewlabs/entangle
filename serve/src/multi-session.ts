@@ -271,9 +271,14 @@ async function handleStreamResize(
   session: MultiSession,
   message: StreamResizeMessage
 ): Promise<void> {
-  // The host terminal owns the shared shell's size; ignore viewer resizes so
-  // participants don't fight over the dimensions.
-  if (session.sharedViewers?.has(message.msg.sid)) return;
+  // The host terminal owns the shared shell's size, so a viewer resize must NOT
+  // resize the shared PTY (participants would fight over dimensions). Instead,
+  // repaint just this viewport with the active window's screen so its locally
+  // reflowed/corrupted display is redrawn clean at its new size.
+  if (session.sharedViewers?.has(message.msg.sid)) {
+    session.sharedWorkspace?.repaintViewport(message.msg.sid);
+    return;
+  }
 
   if (!session.streamManager) {
     await sendStreamError(session, message.msg.sid, 'No active streams');

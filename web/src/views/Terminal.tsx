@@ -18,6 +18,7 @@ export function TerminalView(_props: TerminalViewProps) {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const childRef = useRef<any>(null);
   const startedRef = useRef(false);
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [status, setStatus] = useState<'connecting' | 'ready' | 'error'>('connecting');
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +49,10 @@ export function TerminalView(_props: TerminalViewProps) {
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(terminalRef.current);
+      // Fit synchronously so the initial openTerminal() below gets the real
+      // cols/rows. The tab bar isn't mounted yet at this point (it renders only
+      // once status is 'ready' and windows arrive), so there's no pre-layout
+      // size to correct for here; window-resize re-fits handle later changes.
       fitAddon.fit();
       termRef.current = term;
       fitAddonRef.current = fitAddon;
@@ -63,9 +68,21 @@ export function TerminalView(_props: TerminalViewProps) {
 
       term.onData((data: string) => child.stdin.write(data));
 
-      const handleResize = () => {
+      // On resize we must resync cleanly: after re-fitting xterm to the new
+      // size, drop the stale (re-wrapped) local buffer with term.reset(), then
+      // tell the server the new size. The server repaints the viewer on resize
+      // (screen clear + active-window replay), so the fresh screen is redrawn
+      // host-authoritatively instead of the re-wrapped host-sized garbage.
+      // Order matters: fit -> reset -> resize(send). Debounced so a drag-resize
+      // doesn't spam reset/resize; a single reset+resize runs once it settles.
+      const resync = () => {
         fitAddonRef.current?.fit();
+        term.reset();
         child.resize(term.cols, term.rows);
+      };
+      const handleResize = () => {
+        if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+        resizeTimerRef.current = setTimeout(resync, 120);
       };
       window.addEventListener('resize', handleResize);
       (child as any).__onResize = handleResize;
@@ -113,6 +130,7 @@ export function TerminalView(_props: TerminalViewProps) {
     });
     return () => {
       unsub?.();
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       const child = childRef.current;
       if (child?.__onResize) window.removeEventListener('resize', child.__onResize);
       childRef.current?.kill?.('SIGHUP');

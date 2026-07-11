@@ -156,6 +156,23 @@ export class SharedWorkspace {
     this.windows[this.activeIndex]?.write(data);
   }
 
+  /**
+   * Repaint a SINGLE viewport with the ACTIVE window's screen (the same
+   * clear + replay a window switch sends, scoped to one sid). The host stays
+   * authoritative over the shell size, so when a remote viewer resizes we can't
+   * resize the PTY under everyone else; instead we re-send the active window's
+   * screen to that viewer so its locally-corrupted display is redrawn clean.
+   */
+  repaintViewport(sid: string): void {
+    if (this.exited) return;
+    const v = this.viewports.get(sid);
+    if (!v) return;
+    const active = this.windows[this.activeIndex];
+    if (!active) return;
+    const payload = Buffer.concat([CLEAR, Buffer.from(active.getReplay())]);
+    try { v.onData(new Uint8Array(payload)); } catch {}
+  }
+
   // --- window operations (WINDOW_CTL client->server) -----------------------
 
   /** Create a new window and switch to it. */

@@ -8,16 +8,21 @@ const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE
 // Prefix key: Ctrl-B (like tmux). After it, a single command byte drives windows.
 const PREFIX = 0x02; // Ctrl-B
 
-// ANSI helpers for the reserved tab-bar line (row 1).
+// ANSI helpers for the reserved tmux-style bar on the BOTTOM row.
 const SAVE_CURSOR = '\x1b7'; // DECSC: cursor position + attributes
 const RESTORE_CURSOR = '\x1b8'; // DECRC
-const REVERSE = '\x1b[7m';
+// Blue tmux-style bar to match the host: dim blue bar background, brighter blue
+// for the active tab, bright white text, and a full reset at the end.
+const BAR_BG = '\x1b[48;5;25m'; // bar background (blue)
+const ACTIVE_BG = '\x1b[48;5;33m'; // active tab background (brighter blue)
+const TEXT = '\x1b[97m'; // bright white text
 const RESET = '\x1b[0m';
 
-// Build the tab bar text for row 1, e.g. ` 1:shell  2:logs  3:build `, with the
-// active window in reverse video, truncated to the terminal width.
+// Build the full-width bottom bar, e.g. ` 1:shell  2:logs  3:build ` on a blue
+// background, with the active window's tab in a brighter blue. The line is
+// padded/truncated to exactly `cols` visible columns so it fills the row.
 function renderTabBar(state: WindowStateBody, cols: number): string {
-  let out = '';
+  let out = `${BAR_BG}${TEXT}`;
   let width = 0;
   state.windows.forEach((w, i) => {
     if (width >= cols) return;
@@ -26,17 +31,18 @@ function renderTabBar(state: WindowStateBody, cols: number): string {
     const remaining = cols - width;
     if (label.length > remaining) label = label.slice(0, remaining);
     width += label.length;
-    out += i === state.activeIndex ? `${REVERSE}${label}${RESET}` : label;
+    out += i === state.activeIndex ? `${ACTIVE_BG}${label}${BAR_BG}` : label;
   });
-  return out;
+  if (width < cols) out += ' '.repeat(cols - width); // pad the rest of the bar
+  return `${out}${RESET}`;
 }
 
-// Repaint row 1 with the tab bar without disturbing the shell's cursor. The
-// scroll region keeps shell output off row 1; absolute CUP (`\x1b[1;1H`) ignores
-// the scroll region because origin mode (DECOM) is off by default.
-function drawTabBar(state: WindowStateBody, cols: number): void {
+// Repaint the bottom bar (row `rows`) without disturbing the shell's cursor. The
+// scroll region keeps shell output off row `rows`; absolute CUP (`\x1b[<rows>;1H`)
+// ignores the scroll region because origin mode (DECOM) is off by default.
+function drawTabBar(state: WindowStateBody, cols: number, rows: number): void {
   const bar = renderTabBar(state, cols);
-  process.stdout.write(`${SAVE_CURSOR}\x1b[1;1H\x1b[2K${bar}${RESTORE_CURSOR}`);
+  process.stdout.write(`${SAVE_CURSOR}\x1b[${rows};1H\x1b[2K${bar}${RESTORE_CURSOR}`);
 }
 
 export async function openTerminal(
@@ -70,30 +76,33 @@ export async function openTerminal(
       process.stdin.pause();
     };
 
+    // Physical terminal geometry, falling back to the negotiated size.
+    const termCols = () => process.stdout.columns || cols;
+    const termRows = () => process.stdout.rows || rows;
+    // Reserve the BOTTOM row for the bar: the shell area is rows 1..rows-1, so
+    // the pty gets one fewer row than the physical terminal.
+    const shellRows = () => Math.max(1, termRows() - 1);
+
     // Last window-state the server sent us; drives the tab bar and `prefix-x`.
     let lastState: WindowStateBody | undefined;
     let tabBarDirty = false;
     conn.onWindowState((state) => {
       lastState = state;
       tabBarDirty = false; // a fresh full repaint below supersedes any pending one
-      drawTabBar(state, process.stdout.columns || cols);
+      drawTabBar(state, termCols(), termRows());
     });
 
     // A shell `clear`, a full-screen app, or the server's switch repaint emits a
-    // full-screen clear that blanks the reserved row 1 until the next
+    // full-screen clear that blanks the reserved bottom row until the next
     // window-state (which may never arrive for a plain `clear`). So after any pty
     // output we mark the tab bar dirty and repaint it from the last known state
     // on a small coalescing interval (unref'd so it never keeps the process up).
     repaintTimer = setInterval(() => {
       if (!tabBarDirty || !lastState) return;
       tabBarDirty = false;
-      drawTabBar(lastState, process.stdout.columns || cols);
+      drawTabBar(lastState, termCols(), termRows());
     }, 60);
     repaintTimer.unref?.();
-
-    // Reserve row 1 for the tab bar: the shell area is rows 2..rows, so the pty
-    // gets one fewer row than the physical terminal.
-    const shellRows = () => Math.max(1, (process.stdout.rows || rows) - 1);
 
     // Ctrl-B prefix state machine over stdin. When the prefix is seen, the next
     // byte is a window command; every other byte forwards to the shell pty.
@@ -140,23 +149,28 @@ export async function openTerminal(
     const handle = conn.openPty({ cols, rows: shellRows(), ...(cwd ? { cwd } : {}) }, {
       onOpened: () => {
         if (process.stdin.isTTY) process.stdin.setRawMode(true);
-        // Reserve row 1: scroll region = rows 2..rows, so the shell can never
-        // scroll over the tab bar.
-        process.stdout.write(`\x1b[2;${process.stdout.rows || rows}r`);
+        // Reserve the bottom row: scroll region = rows 1..rows-1, so the shell
+        // can never scroll over the bar.
+        process.stdout.write(`\x1b[1;${shellRows()}r`);
         scrollRegionSet = true;
-        if (lastState) drawTabBar(lastState, process.stdout.columns || cols);
+        if (lastState) drawTabBar(lastState, termCols(), termRows());
         process.stdin.resume();
         process.stdin.on('data', onStdin);
         process.stdout.on('resize', () => {
-          handle.resize(process.stdout.columns || 80, shellRows());
-          // Re-establish the reserved region for the new size and repaint.
-          process.stdout.write(`\x1b[2;${process.stdout.rows || rows}r`);
-          if (lastState) drawTabBar(lastState, process.stdout.columns || cols);
+          // (a) Drop the scroll region so the resize can't corrupt the reserved
+          // row, (b) resize the pty — this emits a STREAM_RESIZE which the server
+          // answers with a clear + active-window replay, so we do NOT locally
+          // reconstruct the screen, (c) re-establish the reserved region for the
+          // new size, and (d) redraw the bottom bar.
+          process.stdout.write('\x1b[r');
+          handle.resize(termCols(), shellRows());
+          process.stdout.write(`\x1b[1;${shellRows()}r`);
+          if (lastState) drawTabBar(lastState, termCols(), termRows());
         });
       },
       onData: (chunk) => {
         process.stdout.write(Buffer.from(chunk));
-        // Shell output may have cleared row 1; schedule a coalesced repaint.
+        // Shell output may have cleared the bottom row; schedule a coalesced repaint.
         tabBarDirty = true;
       },
       onExit: (code, signal) => {

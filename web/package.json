@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-web",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@thenewlabs/entangle-crypto": "^2.4.0",
-    "@thenewlabs/entangle-protocol": "^2.4.0",
+    "@thenewlabs/entangle-crypto": "^2.5.0",
+    "@thenewlabs/entangle-protocol": "^2.5.0",
     "cborg": "^4.5.8",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
