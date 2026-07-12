@@ -222,16 +222,21 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
       // fragment as a module-load side effect. Inject it into the served view
       // index.html as a same-origin classic script (CSP 'self' allows it, and
       // the secret never leaves the browser) so it runs BEFORE the SPA's
-      // deferred module. The preview origin uses the Service-Worker tunnel, not
-      // window.entangle, so it is deliberately NOT injected.
+      // deferred module.
+      //
+      // The PREVIEW origin also gets the client now: its Service-Worker tunnel
+      // pumps intercepted requests over the entangle `preview` pipe, which needs
+      // `window.entangle` on the preview sub-origin. The Locus panel frames the
+      // preview at `/cap/<id>#S=<secret>` (same cap as the view), so the injected
+      // client authenticates there too and opens its own `preview` pipe. (A second
+      // connection under the same capId is fine — maxStreams is 32.)
       const entangleClientJs = await loadEntangleClient(output);
+      const injectClient = (html: string): string =>
+        entangleClientJs
+          ? html.replace('</head>', '  <script src="/__entangle-client.js"></script>\n</head>')
+          : html;
       const rawIndexHtml = readFileSync(join(viewDir, 'index.html'), 'utf8');
-      const viewIndexHtml = entangleClientJs
-        ? rawIndexHtml.replace(
-            '</head>',
-            '  <script src="/__entangle-client.js"></script>\n</head>',
-          )
-        : rawIndexHtml;
+      const viewIndexHtml = injectClient(rawIndexHtml);
       if (!entangleClientJs) {
         output.warn(
           'Entangle client bundle unavailable (no dist/entangle-client.js and esbuild fallback failed); ' +
@@ -239,19 +244,36 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
         );
       }
 
-      // Serve the entangle client bundle (view origin only; same-origin).
-      app.get('/__entangle-client.js', (req, res, next) => {
-        if (isPreviewHost(req)) return next();
+      // The preview bootstrap document, prepared once at startup: blank the
+      // `__LOCUS_TRANSPORT__` placeholder (production drives the tunnel over the
+      // entangle `preview` pipe, not the WebSocket double — a non-empty value would
+      // force the WS path) and inject the entangle client so `window.entangle` exists.
+      const previewDocPath = join(previewDir, previewDoc);
+      const previewHtml = existsSync(previewDocPath)
+        ? injectClient(readFileSync(previewDocPath, 'utf8').replaceAll('__LOCUS_TRANSPORT__', ''))
+        : null;
+      if (previewHost && !previewHtml) {
+        output.warn(`Preview host set but no ${previewDoc} at ${previewDir}; preview-serving degraded`);
+      }
+
+      // Serve the entangle client bundle on BOTH host roles (same-origin classic
+      // script; CSP 'self' allows it).
+      app.get('/__entangle-client.js', (_req, res) => {
         if (!entangleClientJs) return res.status(404).end();
         res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
         res.send(entangleClientJs);
       });
 
-      // The view document itself (/, /index.html) must carry the injected
-      // client, so intercept it BEFORE the static handler (which would
-      // otherwise serve the un-injected file). Preview host falls through.
+      // The document itself (/, /index.html) must carry the injected client, so
+      // intercept it BEFORE the static handler (which would otherwise serve the
+      // un-injected file). The preview host serves its (blanked, injected)
+      // bootstrap document; every other host serves the view SPA.
       app.get(['/', '/index.html'], (req, res, next) => {
-        if (isPreviewHost(req)) return next();
+        if (isPreviewHost(req)) {
+          if (!previewHtml) return next();
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          return res.send(previewHtml);
+        }
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.send(viewIndexHtml);
       });
@@ -259,7 +281,11 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
       // `index: false` on the view static so `/` reaches the handler above
       // instead of auto-serving the un-injected index.html.
       const viewStatic = express.static(viewDir, { index: false });
-      const previewStatic = express.static(previewDir);
+      // `index: false` so `/` on the preview host does NOT auto-serve the view's
+      // index.html (previewDir usually === viewDir and contains both index.html
+      // and preview.html); it falls through to the SPA fallback which sends
+      // preview.html — the Service-Worker preview bootstrap.
+      const previewStatic = express.static(previewDir, { index: false });
 
       // Static assets: preview host reads from the preview dir, everyone else
       // from the view dir (usually the same directory).
@@ -271,10 +297,24 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
       // SPA fallback for client-side routing. Express 5 / path-to-regexp v8
       // rejects a bare '*' path, so use a terminal middleware for unmatched
       // GETs. The document depends on the host role. The view catch-all (e.g.
-      // /cap/<id>) returns the index with the entangle client injected.
+      // /cap/<id>) returns the index with the entangle client injected; the
+      // preview catch-all returns the (transport-blanked, client-injected)
+      // bootstrap so hard reloads heal back onto the Service-Worker bridge —
+      // including its own `/cap/<id>#S=` URL, which re-auths the entangle client.
       app.use((req, res, next) => {
         if (req.method !== 'GET') return next();
-        if (isPreviewHost(req)) return res.sendFile(join(previewDir, previewDoc));
+        if (isPreviewHost(req)) {
+          // Real control/static files must serve as themselves (or 404), never as
+          // the HTML fallback — a MIME mismatch would break the SW / bootstrap
+          // module. If they reach here the file is genuinely missing.
+          const p = req.path;
+          if (p === '/sw.js' || p.startsWith('/__locus/') || p.startsWith('/assets/')) {
+            return res.status(404).end();
+          }
+          if (!previewHtml) return res.sendFile(previewDocPath);
+          res.setHeader('Content-Type', 'text/html; charset=utf-8');
+          return res.send(previewHtml);
+        }
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         return res.send(viewIndexHtml);
       });

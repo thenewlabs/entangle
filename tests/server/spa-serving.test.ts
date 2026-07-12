@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer } from 'net';
@@ -32,7 +32,7 @@ function httpGet(
   port: number,
   path: string,
   host?: string,
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; contentType: string }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {};
     if (host) headers.Host = host;
@@ -42,7 +42,13 @@ function httpGet(
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (c) => (body += c));
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            body,
+            contentType: (res.headers['content-type'] ?? '').toString(),
+          }),
+        );
       },
     );
     req.on('error', reject);
@@ -65,8 +71,15 @@ describe('relay optional SPA-serving (Locus)', () => {
     );
     writeFileSync(
       join(spaDir, 'preview.html'),
-      '<!DOCTYPE html><html><body><meta name="locus-transport" content="__LOCUS_TRANSPORT__"></body></html>',
+      '<!DOCTYPE html><html><head></head><body>' +
+        '<meta name="locus-transport" content="__LOCUS_TRANSPORT__">' +
+        '<script type="module" src="/__locus/bootstrap.js"></script></body></html>',
     );
+    // The preview origin's control/static files (the SW-tunnel bridge). The relay must serve
+    // these as their real files with a JS MIME, never as the HTML SPA fallback.
+    mkdirSync(join(spaDir, '__locus'), { recursive: true });
+    writeFileSync(join(spaDir, '__locus', 'bootstrap.js'), 'export const __locusBootstrap = 1;\n');
+    writeFileSync(join(spaDir, 'sw.js'), '/* locus preview service worker */\n');
 
     port = await getFreePort();
     for (const k of ['PORT', 'RELAY_SPA_DIR', 'RELAY_PREVIEW_SPA_DIR', 'RELAY_PREVIEW_HOST']) {
@@ -112,6 +125,45 @@ describe('relay optional SPA-serving (Locus)', () => {
     expect(res.status).toBe(200);
     expect(res.body).toContain('locus-transport');
     expect(res.body).not.toContain('<div id="root">');
+  });
+
+  it('blanks __LOCUS_TRANSPORT__ and injects the entangle client into preview.html', async () => {
+    // Both the /cap/* catch-all (hard-reload heal) and the root serve the processed doc.
+    const res = await httpGet(port, '/cap/cap_preview1', PREVIEW_HOST);
+    expect(res.status).toBe(200);
+    // Production drives the tunnel over the entangle `preview` pipe: the WS-double placeholder
+    // must be blanked so bootstrap does not take the WebSocket path.
+    expect(res.body).not.toContain('__LOCUS_TRANSPORT__');
+    expect(res.body).toContain('content=""');
+    // The preview origin needs window.entangle to open its own `preview` pipe.
+    expect(res.body).toContain('/__entangle-client.js');
+  });
+
+  it('serves /__entangle-client.js as JS on the preview host', async () => {
+    const res = await httpGet(port, '/__entangle-client.js', PREVIEW_HOST);
+    expect(res.status).toBe(200);
+    expect(res.contentType).toContain('javascript');
+  });
+
+  it('serves /__locus/bootstrap.js as JS (not the HTML fallback) on the preview host', async () => {
+    const res = await httpGet(port, '/__locus/bootstrap.js', PREVIEW_HOST);
+    expect(res.status).toBe(200);
+    expect(res.contentType).toContain('javascript');
+    expect(res.body).toContain('__locusBootstrap');
+    expect(res.body).not.toContain('locus-transport');
+  });
+
+  it('serves /sw.js as JS (not the HTML fallback) on the preview host', async () => {
+    const res = await httpGet(port, '/sw.js', PREVIEW_HOST);
+    expect(res.status).toBe(200);
+    expect(res.contentType).toContain('javascript');
+    expect(res.body).toContain('service worker');
+  });
+
+  it('404s a missing /__locus/* on the preview host instead of serving HTML', async () => {
+    const res = await httpGet(port, '/__locus/does-not-exist.js', PREVIEW_HOST);
+    expect(res.status).toBe(404);
+    expect(res.body).not.toContain('locus-transport');
   });
 
   it('serves the app (not the preview bootstrap) on a non-preview host', async () => {
