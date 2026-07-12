@@ -1,6 +1,7 @@
 import type WebSocket from 'ws';
 import { getConfig, OutputHandler, parseOutputMode, isValidCapId } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
+import { installLiveness, pingIntervalMs } from '../utils/liveness.js';
 // import { FrameReader } from '@thenewlabs/entangle-protocol';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
@@ -43,11 +44,16 @@ export function setupRelayRoute(
     socketId: invokerId,
   }));
   
-  // const invokerReader = new FrameReader();
-  // const agentReader = new FrameReader();
-  
+  // Ping/pong keepalive: reap a half-open viewer socket quickly.
+  installLiveness(invokerWs, pingIntervalMs());
+
   let lastActivity = Date.now();
-  
+  // A viewer that is only WATCHING output (a long build) sends no frames, so the
+  // idle timer must not kill it. A live socket pongs our keepalive pings, so
+  // count that as activity — only a truly dead socket (no pong, terminated by
+  // installLiveness) or a genuinely idle+silent one trips the backstop timeout.
+  invokerWs.on('pong', () => { lastActivity = Date.now(); });
+
   invokerWs.on('message', (data) => {
     if (!(data instanceof Buffer)) return;
     

@@ -35,6 +35,17 @@ interface AgentState {
   pipeEndpoints: Map<string, PipeEndpoint>;
   sharedWorkspace?: SharedWorkspace;
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
+  /** Reconnect backoff attempt counter; reset to 0 on a successful registration. */
+  reconnectAttempts?: number;
+}
+
+// Agent→relay reconnect backoff (ms): exponential with full jitter, capped.
+const AGENT_RC_BASE = 1000;
+const AGENT_RC_FACTOR = 1.8;
+const AGENT_RC_CAP = 30000;
+function agentPingIntervalMs(): number {
+  const raw = Number(process.env.AGENT_WS_PING_MS);
+  return Number.isFinite(raw) && raw >= 1000 ? raw : 20000;
 }
 
 export async function startAgent(options: AgentOptions): Promise<void> {
@@ -102,7 +113,20 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
   
   const ws = new WebSocket(wsUrl);
   state.ws = ws;
-  
+
+  // Client-side ping watchdog: if the relay silently disappears (half-open, no
+  // FIN, no server ping arriving), terminate so `close` fires and we reconnect
+  // instead of sitting on a dead socket forever.
+  let alive = true;
+  ws.on('pong', () => { alive = true; });
+  const pingTimer = setInterval(() => {
+    if (ws.readyState !== ws.OPEN) return;
+    if (!alive) { try { ws.terminate(); } catch {} return; }
+    alive = false;
+    try { ws.ping(); } catch { /* next tick terminates */ }
+  }, agentPingIntervalMs());
+  ws.on('close', () => clearInterval(pingTimer));
+
   ws.on('open', () => {
     state.output.info('Connected to server');
 
@@ -126,6 +150,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
       
       if (msg.type === 'ASSIGN') {
         state.agentId = msg.agentId;
+        state.reconnectAttempts = 0; // successful registration → reset backoff
         state.output.info(`Agent registered: ${msg.agentId}`);
         
         // Display the single served capability (pinned or ephemeral).
@@ -180,7 +205,23 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
   
   ws.on('close', () => {
     state.output.info('Disconnected from server');
-    setTimeout(() => connectToServer(state, serverUrl), 5000);
+    // Tear down this connection's relay sessions so child processes / PTYs are
+    // not orphaned. In shared-workspace mode `cleanup()` only DETACHES viewports
+    // (the shells live on in the SharedWorkspace and are replayed when a viewer
+    // re-attaches after reconnect); in per-session mode it kills the now
+    // unreachable processes. Either way, no leak.
+    for (const session of relaySessions.values()) {
+      try { session?.cleanup?.(); } catch { /* best effort */ }
+    }
+    relaySessions.clear();
+
+    // Exponential backoff + full jitter so a flapping relay / thundering herd of
+    // agents doesn't hammer reconnects in lockstep.
+    const attempt = state.reconnectAttempts ?? 0;
+    const backoff = Math.min(AGENT_RC_CAP, AGENT_RC_BASE * Math.pow(AGENT_RC_FACTOR, attempt));
+    const delay = backoff / 2 + Math.random() * (backoff / 2);
+    state.reconnectAttempts = attempt + 1;
+    setTimeout(() => connectToServer(state, serverUrl), delay);
   });
 }
 

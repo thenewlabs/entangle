@@ -66,11 +66,138 @@ class EntangleConnection {
   private windowStateHandlers = new Set<(state: WindowStateBody) => void>();
   private lastWindowState: WindowStateBody | null = null;
 
+  // --- Connection resilience: auto-reconnect (exp backoff + jitter), app-level
+  // heartbeat (KEEPALIVE round-trip, since browsers can't send WS pings), and a
+  // receive-watchdog that force-closes a half-open socket so onclose reconnects.
+  private intentionalClose = false;
+  private reconnecting = false;
+  private hadConnection = false; // true once we've authed at least once
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private connectInFlight: Promise<void> | null = null;
+  private lastRecvTs = 0;
+  private connStatus: 'connecting' | 'open' | 'reconnecting' | 'closed' = 'connecting';
+  private statusHandlers = new Set<(s: string) => void>();
+  private reconnectedHandlers = new Set<() => void>();
+  // Backoff/heartbeat tuning (ms).
+  private static readonly RC_BASE = 300;
+  private static readonly RC_FACTOR = 1.8;
+  private static readonly RC_CAP = 15000;
+  private static readonly HB_INTERVAL = 20000;
+  private static readonly HB_WATCHDOG = 45000; // > 2 missed heartbeats
+
   constructor(private capId: string, private S: string) {}
+
+  /** Subscribe to connection-status transitions; fires immediately with the current state. */
+  onStatus(cb: (s: string) => void): () => void {
+    this.statusHandlers.add(cb);
+    try { cb(this.connStatus); } catch {}
+    return () => this.statusHandlers.delete(cb);
+  }
+  /** Fires after the socket transparently re-establishes following a drop (re-open your pipes here). */
+  onReconnected(cb: () => void): () => void {
+    this.reconnectedHandlers.add(cb);
+    return () => this.reconnectedHandlers.delete(cb);
+  }
+  getStatus(): string { return this.connStatus; }
+  private setStatus(s: 'connecting' | 'open' | 'reconnecting' | 'closed'): void {
+    if (this.connStatus === s) return;
+    this.connStatus = s;
+    for (const cb of this.statusHandlers) { try { cb(s); } catch {} }
+  }
 
   async ensureConnected(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.authenticated) return;
     await this.connect();
+  }
+
+  /** Dedupe concurrent connects (reconnect timer + a lazy ensureConnected can race). */
+  private async connect(): Promise<void> {
+    if (this.connectInFlight) return this.connectInFlight;
+    this.intentionalClose = false; // any explicit connect re-enables reconnect
+    this.connectInFlight = this._doConnect().finally(() => { this.connectInFlight = null; });
+    return this.connectInFlight;
+  }
+
+  /** Called once auth completes on a fresh socket: reset backoff, start heartbeat, emit events. */
+  private _handleConnected(): void {
+    this.reconnectAttempts = 0;
+    this.reconnecting = false;
+    this.lastRecvTs = Date.now();
+    this._startHeartbeat();
+    const wasReconnect = this.hadConnection;
+    this.hadConnection = true;
+    this.setStatus('open');
+    if (wasReconnect) {
+      for (const cb of this.reconnectedHandlers) { try { cb(); } catch {} }
+    }
+  }
+
+  /** Schedule a reconnect with exponential backoff + jitter (idempotent while one is pending). */
+  private scheduleReconnect(): void {
+    if (this.intentionalClose || this.reconnecting) return;
+    this.reconnecting = true;
+    this.setStatus(this.hadConnection ? 'reconnecting' : 'connecting');
+    const backoff = Math.min(
+      EntangleConnection.RC_CAP,
+      EntangleConnection.RC_BASE * Math.pow(EntangleConnection.RC_FACTOR, this.reconnectAttempts),
+    );
+    // Full jitter over [backoff/2, backoff] to avoid reconnect stampedes.
+    const delay = backoff / 2 + Math.random() * (backoff / 2);
+    this.reconnectAttempts++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect().catch(() => {
+        // A handshake-time rejection may not fire onclose; reschedule ourselves.
+        this.reconnecting = false;
+        if (!this.intentionalClose) this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  private _startHeartbeat(): void {
+    this._stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => this._sendKeepalive(), EntangleConnection.HB_INTERVAL);
+    this.watchdogTimer = setInterval(() => {
+      if (
+        this.ws && this.ws.readyState === WebSocket.OPEN &&
+        Date.now() - this.lastRecvTs > EntangleConnection.HB_WATCHDOG
+      ) {
+        // No keepalive echo in the watchdog window → the path is half-open. Force
+        // a close so onclose kicks off reconnection.
+        try { this.ws.close(); } catch {}
+      }
+    }, 10000);
+  }
+  private _stopHeartbeat(): void {
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
+  }
+  /** Round-trip liveness: the agent echoes KEEPALIVE, so receiving it confirms the whole path. */
+  private _sendKeepalive(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys) return;
+    const ctr = this.counters.outgoing.next(); // session-global (agent validates counters.incoming)
+    const msg = { ctr, msg: { v: 1 as const, kind: 'keepalive' as const } };
+    const aad = frameAad(FrameType.KEEPALIVE, AeadDir.ClientToServer);
+    const plaintext = encode(msg);
+    (async () => {
+      try {
+        const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+        this.ws!.send(encodeFrame(FrameType.KEEPALIVE, ct));
+      } catch { /* next watchdog tick handles a dead socket */ }
+    })();
+  }
+
+  /** Intentional teardown: stop reconnecting and close. */
+  close(): void {
+    this.intentionalClose = true;
+    this.reconnecting = false;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this._stopHeartbeat();
+    this.setStatus('closed');
+    try { this.ws?.close(); } catch {}
   }
 
   private getPassword(): string | undefined {
@@ -113,7 +240,7 @@ class EntangleConnection {
     return this.pwVerifyPromise;
   }
 
-  private async connect(): Promise<void> {
+  private async _doConnect(): Promise<void> {
     const saltCap = extractSaltFromCapId(this.capId);
     this.K_raw = await deriveKeyMaterial(this.S, saltCap);
     this.bootstrapKeys = deriveBootstrapKeys(this.K_raw);
@@ -140,6 +267,7 @@ class EntangleConnection {
       };
 
       this.ws!.onmessage = async (event) => {
+        this.lastRecvTs = Date.now(); // any inbound frame (incl. KEEPALIVE echo) proves liveness
         const frames = this.reader.push(new Uint8Array(await (event.data as ArrayBuffer)));
         for (const frame of frames) {
           if (!this.authenticated && frame.type === FrameType.AUTH2) {
@@ -160,6 +288,9 @@ class EntangleConnection {
             const auth3Hmac = computeHmac(this.keys.K_auth, auth3Data);
             this.ws!.send(encodeFrame(FrameType.AUTH3, auth3Hmac));
             this.authenticated = true;
+            // Reset backoff, start the heartbeat, and fire onReconnected if this
+            // socket replaced a dropped one.
+            this._handleConnected();
 
             // Password (if required) is verified lazily and awaited in
             // _openChild before any stream opens, so a STREAM_OPEN can't race
@@ -229,10 +360,17 @@ class EntangleConnection {
       this.ws!.onerror = () => reject(new Error('WebSocket error'));
       this.ws!.onclose = () => {
         this.authenticated = false;
+        this.ws = null;
+        this._stopHeartbeat();
         if (this.pwReject) this._settlePassword(new Error('disconnect'));
-        // Inform children of disconnect
+        // Inform children of disconnect (their streams are dead; consumers re-open
+        // fresh pipes on the onReconnected event).
         for (const child of this.children.values()) child._onError('disconnect');
         this.children.clear();
+        // Fail any in-flight opens so awaiters don't hang forever.
+        for (const child of this.pendingOpens.splice(0)) child._onError('disconnect');
+        // Auto-reconnect unless this was an intentional close.
+        if (!this.intentionalClose) this.scheduleReconnect();
       };
     });
   }
@@ -598,6 +736,16 @@ declare global {
   entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string }) => conn.spawnPty(options);
   // Forwarded channel: open a named agent-side pipe as a byte duplex.
   entangle.openPipe = (name: string) => conn.openPipe(name);
+
+  // --- Connection resilience surface ---
+  // The socket now auto-reconnects (exp backoff + jitter) with an app-level
+  // heartbeat. Consumers observe transitions via onStatus and, crucially,
+  // re-open their pipes / re-attach on onReconnected (streams don't survive a
+  // reconnect — the session keys and stream ids are renegotiated).
+  entangle.onStatus = (cb: (s: string) => void) => conn.onStatus(cb);
+  entangle.onReconnected = (cb: () => void) => conn.onReconnected(cb);
+  entangle.connectionStatus = () => conn.getStatus();
+  entangle.disconnect = () => conn.close();
 
   // Shared-workspace window controls (tmux-style tab bar). These drive the
   // server SharedWorkspace over the WINDOW_CTL channel; window-state broadcasts

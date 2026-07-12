@@ -259,7 +259,10 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
       // Serve the entangle client bundle on BOTH host roles (same-origin classic
       // script; CSP 'self' allows it).
       app.get('/__entangle-client.js', (_req, res) => {
-        if (!entangleClientJs) return res.status(404).end();
+        if (!entangleClientJs) {
+          res.status(404).end();
+          return;
+        }
         res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
         res.send(entangleClientJs);
       });

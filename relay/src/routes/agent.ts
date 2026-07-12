@@ -1,6 +1,7 @@
 import type WebSocket from 'ws';
 import { getConfig, OutputHandler, parseOutputMode, isValidCapId, isBoundedString } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
+import { installLiveness, pingIntervalMs } from '../utils/liveness.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -8,6 +9,11 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
   let agentId: string | undefined;
   const cfg = getConfig();
   const requiredToken = cfg.agentToken;
+
+  // Ping/pong keepalive so a half-open agent (dead network, no FIN) is detected
+  // and terminated in ~2 intervals instead of black-holing its capId until the
+  // OS times the socket out.
+  installLiveness(ws, pingIntervalMs());
 
   ws.on('message', (data) => {
     try {
