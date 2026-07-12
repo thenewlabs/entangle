@@ -17,6 +17,14 @@ const MIN_ROWS = 6;
 /** Repaint cadence for the status bar: coalesce shell output into ~30ms frames. */
 const FRAME_MS = 30;
 
+/**
+ * How long a shell-repaint waits for a fresh `refresh` frame before falling back
+ * to the synchronous getReplay() cache. A NEW daemon answers a local-socket
+ * round-trip well under this; the fallback only fires against an OLD daemon
+ * (pre-`refresh`, surviving a `serve` upgrade) that never answers requestFrame.
+ */
+const FRAME_FALLBACK_MS = 250;
+
 /** Host window-management prefix (Ctrl-B), tmux-style. */
 const PREFIX = 0x02;
 
@@ -129,10 +137,19 @@ function attachBarTerminal(
 
   // Which surface fills the shell area (rows 1..rows-1). 'shell' is the raw
   // pass-through; 'debug' is the welcome/log view (pinned banner + event-log
-  // tail). We DEFAULT to 'debug' so the first thing the host sees on go-live is
-  // the welcome screen with the shareable URL; a window tab/Ctrl-B digit or n
-  // reveals the shell.
-  let viewMode: 'shell' | 'debug' = 'debug';
+  // tail); 'scroll' is the tmux-style copy-mode pager over the active window's
+  // emulator buffer (see enterScroll/renderScroll below). We DEFAULT to 'debug'
+  // so the first thing the host sees on go-live is the welcome screen with the
+  // shareable URL; a window tab/Ctrl-B digit or n reveals the shell.
+  let viewMode: 'shell' | 'debug' | 'scroll' = 'debug';
+
+  // Copy-mode pager state. `scrollLines` is the PLAIN-TEXT snapshot of the active
+  // window's emulator buffer (scrollback history + current screen, oldest first)
+  // fetched on entry via session.requestScrollback(); `scrollOffset` is the index
+  // of the TOP visible line. SGR/colour reconstruction is a non-goal — the pager
+  // renders history text only.
+  let scrollLines: string[] = [];
+  let scrollOffset = 0;
   // The captured agent logs live in the session's ring buffer (the session owns
   // the OutputHandler sink); the welcome/log view renders the tail of that
   // buffer and marks itself dirty when a new line arrives while it's showing.
@@ -158,6 +175,31 @@ function attachBarTerminal(
     while ((m = MOUSE_MODE_RE.exec(s)) !== null) {
       if (m[2] === 'h') appMouseModes.add(m[1]!);
       else appMouseModes.delete(m[1]!);
+    }
+  };
+
+  // Which DEC ALTERNATE-SCREEN modes (1049/1047/47) the SHELL app has enabled,
+  // scanned from its output. On a real terminal, when a full-screen app QUITS it
+  // emits the alt-off toggle (`\x1b[?1049l`), and the terminal restores its own
+  // saved PRIMARY buffer — which is stale under entangle's reserved scroll region
+  // + bar. So on a transition to alt-inactive (while we're on the shell view) we
+  // schedule a coalesced repaint from the emulator's correct primary viewport
+  // (Bug 2). Detection is per-chunk (like the mouse scan); the coalescing timer
+  // absorbs rapid/split toggles into a single repaint on the next frame.
+  const appAltModes = new Set<string>();
+  const appAltOn = (): boolean =>
+    appAltModes.has('1049') || appAltModes.has('1047') || appAltModes.has('47');
+  const ALT_MODE_RE = /\x1b\[\?(1049|1047|47)(h|l)/g;
+  let altExitDirty = false;
+  const scanAppAlt = (buf: Uint8Array): void => {
+    const s = Buffer.from(buf).toString('latin1');
+    ALT_MODE_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = ALT_MODE_RE.exec(s)) !== null) {
+      if (m[2] === 'h') appAltModes.add(m[1]!);
+      // Only a transition OUT of an alt mode we saw enter needs a forced repaint;
+      // entering alt is left to the app (it paints its own frame). Off in debug.
+      else if (appAltModes.delete(m[1]!) && viewMode === 'shell') altExitDirty = true;
     }
   };
 
@@ -220,6 +262,11 @@ function attachBarTerminal(
   // then restore (DECRC). No-op until live so the connecting screen stays clean.
   const drawBar = () => {
     if (!live) return;
+    // While the copy-mode pager is up it owns the bottom row (its own
+    // `⧉ scrollback …` bar via renderScroll); async triggers (onViewersChange /
+    // onWindowState) must not paint the blue `⧉ entangle` bar over it. The pager
+    // repaints its bar itself on the next keypress, so just suppress here.
+    if (viewMode === 'scroll') return;
     barDirty = false;
     write(`\x1b7\x1b[${rows};1H\x1b[2K${buildBar()}\x1b8`);
   };
@@ -233,7 +280,7 @@ function attachBarTerminal(
     `Share this live session:`,
     `  ${BAR_FG}${link ?? 'connecting…'}${RESET}`,
     ``,
-    `Ctrl-B  d=detach  l=logs  c=new  n/p=win  1-9=select  x=close  ·  or click the bar`,
+    `Ctrl-B  [=scroll  d=detach  l=logs  c=new  n/p=win  1-9=select  x=close`,
   ];
 
   // Render the welcome/log view: a PINNED HEADER (brand, intro, share URL, key
@@ -265,21 +312,70 @@ function attachBarTerminal(
     drawBar();
   };
 
-  // Repaint the live shell area from the workspace replay (used when leaving the
-  // debug view). Clears rows 1..rows-1, re-writes the active window's screen.
-  const repaintShell = () => {
+  // Paint the live shell area from a FRESH serialized `frame` over rows
+  // 1..rows-1, WITHOUT touching the host's scrollback (no \x1b[3J). Clears just
+  // the reserved shell rows, homes, then writes the frame; the frame may itself
+  // carry \x1b[?1049h + alt content, which correctly reproduces a full-screen
+  // app's current screen (Bug 1 / Bug 2 host repaint). The frame source is the
+  // session's onFrame callback (a fresh serialize), NOT the synchronous
+  // getReplay() cache — which is stale in daemon mode (Bug 2).
+  const paintShellFrame = (frame: Uint8Array) => {
     if (!live) return;
     const shellRows = Math.max(1, rows - 1);
     let out = '';
     for (let r = 1; r <= shellRows; r++) out += `\x1b[${r};1H\x1b[2K`;
     out += '\x1b[H';
     write(out);
-    const replay = session.getReplay();
-    if (replay.length > 0) writeRaw(replay);
+    if (frame.length > 0) writeRaw(frame);
     drawBar();
-    // The replay may have re-disabled mouse (e.g. it ends after a full-screen
-    // app quit); re-assert our bar-click reporting so the bar stays clickable.
+    // The frame may have re-disabled mouse (e.g. it serializes a primary screen
+    // after a full-screen app quit); re-assert our bar-click reporting so the bar
+    // stays clickable.
     write(MOUSE_ENABLE);
+  };
+
+  // Cross-version fallback for a shell repaint. A NEW foreground client can attach
+  // to an OLD long-lived daemon (the detach/reattach daemon survives a `serve`
+  // upgrade) that predates the `refresh` frame channel and so never answers
+  // requestFrame — leaving alt-exit / window-switch / leave-debug repaints blank.
+  // So on each repaint we arm a short timer: if onFrame delivers first it cancels
+  // the timer and paints the fresh frame; if the timer wins (old daemon silent)
+  // we paint from the synchronous getReplay() cache — stale in daemon mode but
+  // non-empty (the pre-fix behavior), which beats a blank/stale screen.
+  let pendingFrameTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearFrameFallback = () => {
+    if (pendingFrameTimer) { clearTimeout(pendingFrameTimer); pendingFrameTimer = undefined; }
+  };
+  // Ask for a fresh frame and arm the old-daemon fallback. The timer is armed
+  // BEFORE requestFrame so the in-process (synchronous) onFrame cancels it inline
+  // — no double paint. Against a NEW daemon the fresh frame arrives well under
+  // FRAME_FALLBACK_MS, cancelling the timer before it can fire (no flicker).
+  const requestFrameWithFallback = () => {
+    clearFrameFallback();
+    pendingFrameTimer = setTimeout(() => {
+      pendingFrameTimer = undefined;
+      if (!live || viewMode !== 'shell') return;
+      paintShellFrame(session.getReplay({ scrollback: 0 }));
+    }, FRAME_FALLBACK_MS);
+    pendingFrameTimer.unref?.();
+    session.requestFrame({ scrollback: 0 });
+  };
+
+  // Request a fresh frame for the alt-screen-exit repaint. The actual paint
+  // happens asynchronously in the onFrame handler with the FRESH frame (a
+  // daemon round-trip in daemon mode, synchronous in-process). `scrollback:0`
+  // keeps the host's real terminal from being flooded with window history.
+  const repaintShellFromFrame = () => {
+    if (!live) return;
+    altExitDirty = false; // any pending alt-exit repaint is subsumed by this one
+    requestFrameWithFallback();
+  };
+
+  // Repaint the live shell area when leaving the debug view or switching windows:
+  // request a fresh frame; the onFrame handler paints it.
+  const repaintShell = () => {
+    if (!live) return;
+    requestFrameWithFallback();
   };
 
   const enterDebug = () => {
@@ -295,10 +391,137 @@ function attachBarTerminal(
     if (wasDebug) repaintShell();
   };
 
+  // --- copy-mode / scrollback pager ----------------------------------------
+  // A tmux-style pager over the active window's emulator buffer. On entry we
+  // switch the host's REAL terminal to the alternate screen (so the live shell
+  // view is saved and restored verbatim on exit), drop our reserved scroll
+  // region, and render a scrollable window of PLAIN-TEXT buffer lines with a
+  // distinct bottom bar. Keystrokes drive the pager and are NOT sent to the
+  // shell; `q`/Esc returns to the live shell.
+
+  /** Largest valid top-line index: the last full page starts here. */
+  const maxScrollOffset = (): number => Math.max(0, scrollLines.length - (rows - 1));
+  const clampScrollOffset = (): void => {
+    scrollOffset = Math.max(0, Math.min(maxScrollOffset(), scrollOffset));
+  };
+
+  // The pager's bottom bar: brand + position readout + key legend, styled like
+  // the status bar (blue) and padded/truncated to exactly `cols`.
+  const buildScrollBar = (): string => {
+    const total = scrollLines.length;
+    const top = total === 0 ? 0 : scrollOffset + 1;
+    const bottom = Math.min(total, scrollOffset + Math.max(1, rows - 1));
+    let label = ` ⧉ scrollback  [${top}-${bottom}/${total}]  ↑↓ PgUp/PgDn  Home/End  q:live `;
+    if (label.length > cols) label = label.slice(0, cols);
+    const fill = ' '.repeat(Math.max(0, cols - label.length));
+    return `${BAR_BG}${BAR_FG}${label}${fill}${RESET}`;
+  };
+
+  // Draw the pager: rows 1..(rows-1) show scrollLines[scrollOffset ..], each
+  // cleared then truncated to `cols`; rows past the end are left blank; the
+  // pager bar owns the bottom row.
+  const renderScroll = (): void => {
+    if (!live || viewMode !== 'scroll') return;
+    const bodyRows = Math.max(1, rows - 1);
+    let out = '';
+    for (let r = 0; r < bodyRows; r++) {
+      out += `\x1b[${r + 1};1H\x1b[2K`;
+      const line = scrollLines[scrollOffset + r];
+      if (line) out += line.length > cols ? line.slice(0, cols) : line;
+    }
+    out += `\x1b[${rows};1H\x1b[2K${buildScrollBar()}`;
+    write(out);
+  };
+
+  // Enter the pager (only from the live shell view). Switch the real terminal to
+  // the alt screen (saves the shell view for exit), drop the scroll region, hide
+  // the cursor, then ask for a fresh scrollback snapshot; the onScrollback
+  // handler renders it starting at the bottom (newest).
+  const enterScroll = (): void => {
+    if (!live || viewMode !== 'shell') return;
+    viewMode = 'scroll';
+    write('\x1b[?1049h'); // enter alt screen on the host's REAL terminal
+    write('\x1b[r');      // drop our reserved scroll region while paging
+    write('\x1b[?25l');   // hide the cursor for a clean pager
+    // NOTE: against an OLD daemon (pre-`refresh`, surviving a `serve` upgrade)
+    // requestScrollback goes unanswered and the pager shows empty — an accepted
+    // limitation of this brand-new feature; we deliberately don't add a second
+    // fallback path for it (unlike the shell-repaint fallback above).
+    session.requestScrollback();
+  };
+
+  // Leave the pager: return the real terminal to the primary screen (which
+  // restores the saved live shell view), re-arm our scroll region, re-assert
+  // mouse reporting, then request a FRESH frame so the shell repaints its
+  // CURRENT state (it may have advanced while we were paused).
+  const exitScroll = (): void => {
+    if (viewMode !== 'scroll') return;
+    viewMode = 'shell';
+    scrollLines = [];
+    scrollOffset = 0;
+    write('\x1b[?1049l');               // leave alt screen → restores the live shell view
+    write('\x1b[?25h');                 // show the cursor again
+    write(`\x1b[1;${Math.max(1, rows - 1)}r`); // re-arm the shell's scroll region
+    write(MOUSE_ENABLE);                // keep bar-click / wheel reporting alive
+    session.requestFrame({ scrollback: 0 }); // repaint the CURRENT live shell
+  };
+
+  // Drive the pager from a raw input chunk (called only while in 'scroll'). Keys
+  // move the viewport; `q`/lone-Esc exits. Mouse wheel (SGR button 64/65) scrolls
+  // by 3. Anything unrecognized is ignored (never forwarded to the shell). A lone
+  // trailing ESC is treated as exit; a split ESC/CSI across chunks can mis-fire
+  // exit, which is an acceptable edge for a pager.
+  const handleScrollInput = (d: Buffer): void => {
+    const s = d.toString('latin1');
+    const page = Math.max(1, rows - 1);
+    let changed = false;
+    for (let i = 0; i < s.length; ) {
+      const mouse = matchMouse(d, i);
+      if (mouse) {
+        if (mouse.press && mouse.button === 64) { scrollOffset -= 3; changed = true; }
+        else if (mouse.press && mouse.button === 65) { scrollOffset += 3; changed = true; }
+        i += mouse.length;
+        continue;
+      }
+      if (s[i] === '\x1b') {
+        const rest = s.slice(i);
+        let consumed = 1;
+        if (rest.startsWith('\x1b[A')) { scrollOffset -= 1; consumed = 3; }
+        else if (rest.startsWith('\x1b[B')) { scrollOffset += 1; consumed = 3; }
+        else if (rest.startsWith('\x1b[5~')) { scrollOffset -= page; consumed = 4; }
+        else if (rest.startsWith('\x1b[6~')) { scrollOffset += page; consumed = 4; }
+        else if (rest.startsWith('\x1b[1~')) { scrollOffset = 0; consumed = 4; }
+        else if (rest.startsWith('\x1b[4~')) { scrollOffset = maxScrollOffset(); consumed = 4; }
+        else if (rest.startsWith('\x1b[H')) { scrollOffset = 0; consumed = 3; }
+        else if (rest.startsWith('\x1b[F')) { scrollOffset = maxScrollOffset(); consumed = 3; }
+        else if (i === s.length - 1) { exitScroll(); return; } // lone Esc = exit
+        // else: an unrecognized CSI — skip just the ESC and resync on the next byte.
+        i += consumed;
+        changed = true;
+        continue;
+      }
+      const ch = s[i];
+      if (ch === 'k') { scrollOffset -= 1; changed = true; }
+      else if (ch === 'j') { scrollOffset += 1; changed = true; }
+      else if (ch === 'g') { scrollOffset = 0; changed = true; }
+      else if (ch === 'G') { scrollOffset = maxScrollOffset(); changed = true; }
+      else if (ch === 'q') { exitScroll(); return; }
+      i++;
+    }
+    if (changed) { clampScrollOffset(); renderScroll(); }
+  };
+
   // Coalesce shell output into throttled bar redraws so a full-screen app or a
   // `clear` can't leave the bar blank; in debug view, coalesce log-tail repaints.
   const timer = setInterval(() => {
+    // The pager manages its own render (and owns the alt screen) — the bar/debug
+    // redraws must not fire while it's up.
+    if (viewMode === 'scroll') return;
     if (viewMode === 'debug') { if (debugDirty) renderDebug(); }
+    // A pending alt-screen-exit repaint takes priority: it repaints the shell
+    // rows from the emulator's primary viewport (and redraws the bar), so it
+    // subsumes a plain barDirty this frame.
+    else if (altExitDirty) repaintShellFromFrame();
     else if (barDirty) drawBar();
   }, FRAME_MS);
   timer.unref?.();
@@ -309,13 +532,39 @@ function attachBarTerminal(
     // off-bar mouse passthrough is correct the moment we switch back to the shell.
     const mouseWasOn = appMouseOn();
     scanAppMouse(chunk);
-    if (viewMode !== 'debug') { // in the welcome/log view the shell is still buffered in replay
+    // Watch for the shell app leaving the alt buffer so we can repair the host's
+    // real terminal (which restores its own stale primary) — see scanAppAlt.
+    scanAppAlt(chunk);
+    // Paint live output ONLY on the shell view: the debug view buffers it in the
+    // replay, and the scroll pager owns the (alt) screen — writing shell bytes
+    // over it would corrupt the pager. The app-mouse/alt scans above still run in
+    // every mode so state stays correct for when we return to the shell.
+    if (viewMode === 'shell') {
       writeRaw(chunk);
       barDirty = true;
       // A full-screen app quitting turns mouse OFF, which also kills OUR bar-click
       // reporting; re-assert it after the app's disable bytes have been written.
       if (mouseWasOn && !appMouseOn()) write(MOUSE_ENABLE);
     }
+  });
+  // A fresh frame (from requestFrame) arrived: paint it into the shell area, but
+  // only if we're live and actually on the shell view. This drops the stale/late
+  // post-attach replay frame (fired at go-live while viewMode is 'debug') and any
+  // frame that lands after the host switched back to the debug view.
+  session.onFrame((frame) => {
+    // A fresh frame arrived → the daemon answered; cancel any armed old-daemon
+    // fallback so it can't also paint from the stale getReplay() cache.
+    clearFrameFallback();
+    if (!live || viewMode !== 'shell') return;
+    paintShellFrame(frame);
+  });
+  // A scrollback snapshot arrived (from enterScroll's requestScrollback): render
+  // it starting at the BOTTOM (newest). Ignored unless we're still in the pager.
+  session.onScrollback((lines) => {
+    if (viewMode !== 'scroll') return;
+    scrollLines = lines;
+    scrollOffset = Math.max(0, lines.length - (rows - 1));
+    renderScroll();
   });
   session.onViewersChange((n) => { viewers = n; drawBar(); });
   session.onWindowState((state) => {
@@ -344,6 +593,7 @@ function attachBarTerminal(
     // don't force an exit here that would race it.
     if (ch === 'd') { session.detach?.(); return; }
     if (ch === 'l') { enterDebug(); return; }
+    if (ch === '[') { enterScroll(); return; } // tmux-style: Ctrl-B [ = copy mode
     if (ch === 'c') { enterShell(); session.newWindow(); }
     else if (ch === 'n') { enterShell(); session.nextWindow(); }
     else if (ch === 'p') { enterShell(); session.prevWindow(); }
@@ -373,6 +623,13 @@ function attachBarTerminal(
       }
       return; // never forward bar-row mouse events to the shell
     }
+    // Wheel-up on a shell row while the app isn't in mouse mode: the natural
+    // gesture to open the scrollback pager. (When the app wants mouse, the wheel
+    // still forwards to it below — existing behavior.)
+    if (viewMode === 'shell' && m.press && m.button === 64 && !appMouseOn()) {
+      enterScroll();
+      return;
+    }
     if (appMouseOn()) session.write(new Uint8Array(raw)); // shell wants mouse
     // else swallow: bash gets no garbage clicks
   };
@@ -384,6 +641,8 @@ function attachBarTerminal(
   // boundary so ordering across a window switch is preserved.
   let pendingPrefix = false;
   const onInput = (d: Buffer) => {
+    // In the pager, keystrokes drive scrolling and are never sent to the shell.
+    if (viewMode === 'scroll') { handleScrollInput(d); return; }
     let start = 0;
     for (let i = 0; i < d.length; ) {
       const byte = d[i]!;
@@ -400,6 +659,17 @@ function attachBarTerminal(
         if (i > start) session.write(new Uint8Array(d.subarray(start, i)));
         handleMouse(mouse, d.subarray(i, i + mouse.length));
         i += mouse.length;
+        start = i;
+        continue;
+      }
+      // PageUp (ESC [ 5 ~) on the live shell view enters the scrollback pager —
+      // but only when a full-screen app isn't consuming mouse/alt (it would want
+      // PageUp itself); otherwise PageUp forwards to the shell as usual.
+      if (viewMode === 'shell' && !appMouseOn() && !appAltOn() &&
+          byte === 0x1b && d[i + 1] === 0x5b /* [ */ && d[i + 2] === 0x35 /* 5 */ && d[i + 3] === 0x7e /* ~ */) {
+        if (i > start) session.write(new Uint8Array(d.subarray(start, i)));
+        enterScroll();
+        i += 4;
         start = i;
         continue;
       }
@@ -423,6 +693,15 @@ function attachBarTerminal(
     cols = stdout.columns || cols;
     rows = stdout.rows || rows;
     if (!live) return;
+    // In the pager we own the alt screen (no scroll region): resize the shell so
+    // its emulator tracks the host size, then re-clamp the offset to the new page
+    // height and re-render the pager for the new dimensions.
+    if (viewMode === 'scroll') {
+      session.resize(cols, Math.max(1, rows - 1));
+      clampScrollOffset();
+      renderScroll();
+      return;
+    }
     const shellRows = Math.max(1, rows - 1);
     write('\x1b[r');
     write('\x1b[2J\x1b[H');
@@ -440,9 +719,11 @@ function attachBarTerminal(
     if (restored) return;
     restored = true;
     clearInterval(timer);
+    clearFrameFallback(); // no stray frame-fallback paint after teardown
     session.dispose(); // release the log sink so any final logs print to stdout normally
     stdin.removeListener('data', onInput);
     stdout.removeListener('resize', onResize);
+    if (viewMode === 'scroll') write('\x1b[?1049l'); // leave the pager's alt screen first
     write(MOUSE_DISABLE); // stop SGR mouse reporting we enabled for the bar
     write('\x1b[r'); // reset scroll region
     write('\x1b[2J\x1b[H'); // clear screen + home, so no stale bar/shell is left behind
@@ -477,7 +758,9 @@ function attachBarTerminal(
     write('\x1b[2J\x1b[H');
     write(`\x1b[1;${shellRows}r`); // reserve the bottom row for the bar
     session.resize(cols, shellRows); // shell is authoritative-sized to rows-1
-    scanAppMouse(session.getReplay()); // seed app-mouse state from the shell's screen
+    const goLiveFrame = session.getReplay({ scrollback: 0 });
+    scanAppMouse(goLiveFrame); // seed app-mouse state from the shell's screen
+    scanAppAlt(goLiveFrame); // seed alt-buffer state (no repaint: we're in debug)
     write(MOUSE_ENABLE); // enable SGR mouse reporting for the clickable bar
     live = true;
     // Start on the welcome/log view (viewMode defaults to 'debug'): the pinned

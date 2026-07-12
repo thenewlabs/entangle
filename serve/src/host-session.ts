@@ -24,8 +24,35 @@ export interface HostSession {
   write(data: Uint8Array | string): void;
   /** Resize the session (host is authoritative) to `cols` x `rows`. */
   resize(cols: number, rows: number): void;
-  /** Recent-output snapshot of the active window (initial/repaint screen). */
-  getReplay(): Uint8Array;
+  /**
+   * Serialized current frame of the active window (initial/repaint screen).
+   * `opts.scrollback` requests N lines of history ahead of the frame (default 0).
+   *
+   * NOTE: in daemon mode ({@link RemoteHostSession}) this returns a value cached
+   * from the daemon's post-attach `replay` frame and can be STALE; prefer
+   * {@link requestFrame} + {@link onFrame} for repaints that must reflect the
+   * window's live screen (e.g. after a full-screen app quits). getReplay is kept
+   * for the go-live paint, where the attach frame is current.
+   */
+  getReplay(opts?: { scrollback?: number }): Uint8Array;
+  /**
+   * Ask for a FRESH serialized frame of the active window; the frame is
+   * delivered to the {@link onFrame} callback (synchronously in-process, or
+   * after an IPC round-trip in daemon mode). `opts.scrollback` requests N lines
+   * of history ahead of the frame (default 0).
+   */
+  requestFrame(opts?: { scrollback?: number }): void;
+  /** Register the callback fired when a fresh frame (from {@link requestFrame}) arrives. */
+  onFrame(cb: (frame: Uint8Array) => void): void;
+  /**
+   * Ask for the FULL scrollback of the active window as plain-text lines
+   * (history + current screen, oldest first); delivered to {@link onScrollback}
+   * (synchronously in-process, or after an IPC round-trip in daemon mode). The
+   * source for the host's copy-mode/scrollback pager — plain text only, no SGR.
+   */
+  requestScrollback(): void;
+  /** Register the callback fired when scrollback lines (from {@link requestScrollback}) arrive. */
+  onScrollback(cb: (lines: string[]) => void): void;
 
   // --- windows -------------------------------------------------------------
   /** Register the callback fired whenever the window set changes. */
@@ -87,6 +114,8 @@ export class LocalHostSession implements HostSession {
   private readonly logCbs: Array<(line: string) => void> = [];
   private readonly urlCbs: Array<(url: string) => void> = [];
   private url: string | null = null;
+  private frameCb?: (frame: Uint8Array) => void;
+  private scrollbackCb?: (lines: string[]) => void;
 
   // `output` is accepted for symmetry with the workspace's construction (and so
   // a future session variant can log through it); the log sink it installs is a
@@ -118,7 +147,15 @@ export class LocalHostSession implements HostSession {
   onHostData(cb: (chunk: Buffer) => void): void { this.workspace.onHostData(cb); }
   write(data: Uint8Array | string): void { this.workspace.write(data); }
   resize(cols: number, rows: number): void { this.workspace.resize(cols, rows); }
-  getReplay(): Uint8Array { return this.workspace.getReplay(); }
+  getReplay(opts?: { scrollback?: number }): Uint8Array { return this.workspace.getReplay(opts); }
+  onFrame(cb: (frame: Uint8Array) => void): void { this.frameCb = cb; }
+  // In-process: no round trip — the workspace snapshot is already live, so
+  // deliver it to the onFrame callback synchronously.
+  requestFrame(opts?: { scrollback?: number }): void { this.frameCb?.(this.workspace.getReplay(opts)); }
+  onScrollback(cb: (lines: string[]) => void): void { this.scrollbackCb = cb; }
+  // In-process: no round trip — the workspace already has the buffer lines, so
+  // deliver them to the onScrollback callback synchronously.
+  requestScrollback(): void { this.scrollbackCb?.(this.workspace.scrollbackLines()); }
 
   // --- windows -------------------------------------------------------------
   onWindowState(cb: (s: WindowStateBody) => void): void { this.workspace.onWindowState(cb); }

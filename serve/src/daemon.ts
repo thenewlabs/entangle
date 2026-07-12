@@ -133,6 +133,28 @@ export async function runDaemon(): Promise<void> {
           case 'close': if (msg.index !== undefined) workspace.closeWindowFromViewport(vpId, msg.index); break;
         }
         break;
+      case 'refresh':
+        // Serialize the viewport's active window NOW and send it back as a
+        // `replay` frame (getReplay()'s source client-side). Because this is a
+        // full IPC round-trip after the client's own bytes were fed to the
+        // emulator, the serialize reflects the window's live screen — this is
+        // what lets a host repaint (e.g. after a full-screen app quits) paint
+        // the CURRENT primary instead of the stale attach-time cache.
+        try {
+          const frame = workspace.snapshotForViewport(
+            vpId,
+            msg.scrollback !== undefined ? { scrollback: msg.scrollback } : undefined,
+          );
+          writeMessage(socket, { t: 'replay', chunk: encodeChunk(frame) });
+        } catch { /* dropped client; its close handler cleans up */ }
+        break;
+      case 'scrollback':
+        // Serialize the viewport's active window buffer to plain-text lines NOW
+        // and send them back for the client's copy-mode pager.
+        try {
+          writeMessage(socket, { t: 'scrollback', lines: workspace.scrollbackLinesForViewport(vpId) });
+        } catch { /* dropped client; its close handler cleans up */ }
+        break;
       case 'detach':
         // Drop just this client's viewport; the daemon (and session) keep running.
         clients.delete(socket);

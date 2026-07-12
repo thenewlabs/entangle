@@ -38,6 +38,20 @@ export type ClientToDaemon =
   | { t: 'input'; data: string }
   | { t: 'resize'; cols: number; rows: number }
   | { t: 'win'; op: WindowOp; index?: number }
+  /**
+   * Ask the daemon for a FRESH serialized frame of this client's active window
+   * (optionally `scrollback` lines of history). The daemon replies with the
+   * existing `replay` frame — it already means "a serialized frame for
+   * getReplay()" — serialized on receipt, so it reflects the window's live
+   * screen at request time rather than the stale post-attach cache.
+   */
+  | { t: 'refresh'; scrollback?: number }
+  /**
+   * Ask the daemon for the FULL scrollback of this client's active window as
+   * plain-text lines (history + current screen, oldest first), for the host's
+   * copy-mode pager. The daemon replies with a `scrollback` frame.
+   */
+  | { t: 'scrollback' }
   | { t: 'detach' };
 
 /** Messages sent from the daemon to an attached terminal client. */
@@ -51,6 +65,8 @@ export type DaemonToClient =
   | { t: 'viewers'; n: number }
   | { t: 'log'; line: string }
   | { t: 'url'; url: string }
+  /** Plain-text scrollback lines answering a client `scrollback` request. */
+  | { t: 'scrollback'; lines: string[] }
   | { t: 'exit'; code: number | null };
 
 /** Any framed IPC message, in either direction. */

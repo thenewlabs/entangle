@@ -16,14 +16,12 @@ function makeWorkspace(opts?: {
   cols?: number;
   rows?: number;
   cwd?: string;
-  maxReplayBytes?: number;
   maxWindows?: number;
 }): SharedWorkspace {
   const w = new SharedWorkspace(output, {
     cols: opts?.cols ?? 80,
     rows: opts?.rows ?? 24,
     ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-    ...(opts?.maxReplayBytes !== undefined ? { maxReplayBytes: opts.maxReplayBytes } : {}),
     ...(opts?.maxWindows !== undefined ? { maxWindows: opts.maxWindows } : {}),
   });
   live.push(w);
@@ -80,8 +78,9 @@ function makeViewport(sid: string): TestViewport {
   return vp;
 }
 
-// Screen clear + home the workspace writes on a window switch (see CLEAR in
-// shared-workspace.ts). We assert on the leading \x1b[2J (erase display).
+// The workspace writes a switch payload (leave alt + clear screen/scrollback +
+// serialized frame — see switchPayload in shared-workspace.ts) on a window
+// switch. We assert on the \x1b[2J (erase display) it contains.
 const CLEAR_ERASE = '\x1b[2J';
 
 describe('SharedWorkspace (integration, real PTYs)', () => {
@@ -253,6 +252,52 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     expect(vp.data).toContain(CLEAR_ERASE);
     expect(vp.data).toContain('ALPHA_REPAINT'); // window 0's prior output replayed
   }, 12000);
+
+  it('resize repaint preserves scrollback (no \\x1b[3J) while a switch erases it (\\x1b[3J)', () => {
+    const ws = makeWorkspace();
+    const vp = makeViewport('v1');
+    ws.attachViewport(vp);
+
+    // A window-switch repaint wipes AND rebuilds the consumer's scrollback, so it
+    // carries the erase-scrollback control (\x1b[3J).
+    vp.data = '';
+    ws.repaintViewport('v1');
+    expect(vp.data).toContain('\x1b[3J');
+
+    // A viewer-resize repaint redraws only the visible screen and leaves the
+    // client's own accumulated scrollback intact: it clears the screen (\x1b[2J)
+    // but must NOT emit \x1b[3J.
+    vp.data = '';
+    ws.repaintViewportScreen('v1');
+    expect(vp.data).toContain(CLEAR_ERASE);   // screen is still cleared
+    expect(vp.data).not.toContain('\x1b[3J'); // ...but scrollback is preserved
+  });
+
+  it('scrollbackLines(For)Viewport returns the active window buffer history', async () => {
+    const ws = makeWorkspace();
+    const vp = makeViewport('v1');
+    ws.attachViewport(vp);
+
+    // Quiet echo/prompt, then overflow the screen with numbered lines so an early
+    // one lands in scrollback (host + viewport both sit on window 0 here).
+    ws.write("stty -echo; PS1=''\n");
+    ws.write('for i in $(seq 0 71); do printf "WSLINE-%03d\\n" "$i"; done\n');
+
+    await waitFor(() => ws.scrollbackLines().some((l) => l.includes('WSLINE-071')), {
+      message: 'host scrollbackLines never showed the last line',
+    });
+
+    const hostLines = ws.scrollbackLines();
+    const hEarly = hostLines.findIndex((l) => l.includes('WSLINE-000'));
+    const hLate = hostLines.findIndex((l) => l.includes('WSLINE-071'));
+    expect(hEarly).toBeGreaterThanOrEqual(0);
+    expect(hLate).toBeGreaterThan(hEarly);
+
+    // The viewport (also on window 0) sees the same history via its own accessor.
+    const vpLines = ws.scrollbackLinesForViewport('v1');
+    expect(vpLines.some((l) => l.includes('WSLINE-000'))).toBe(true);
+    expect(vpLines.some((l) => l.includes('WSLINE-071'))).toBe(true);
+  }, 15000);
 
   it('closeWindow removes a window and re-homes activeIndex', async () => {
     const ws = makeWorkspace();

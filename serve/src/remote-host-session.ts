@@ -53,6 +53,8 @@ export class RemoteHostSession implements HostSession {
   private logCb?: (line: string) => void;
   private urlCb?: (url: string) => void;
   private exitCb?: (code: number | null, signal: string | null) => void;
+  private frameCb?: (frame: Uint8Array) => void;
+  private scrollbackCb?: (lines: string[]) => void;
 
   // Guards: `exited` makes the onExit path fire at most once (a clean `exit`
   // frame or an unexpected socket close, whichever comes first); `closed` stops
@@ -87,8 +89,13 @@ export class RemoteHostSession implements HostSession {
         break;
       case 'replay':
         // Cached for getReplay(); NOT fed to onHostData — the host UI writes the
-        // replay itself once, via getReplay(), at go-live.
+        // replay itself once, via getReplay(), at go-live. ALSO fire onFrame so a
+        // `refresh` response repaints (the daemon answers `refresh` with a fresh
+        // `replay` frame). The post-attach replay also lands here, but the host's
+        // onFrame handler ignores frames unless it's live and on the shell view,
+        // so that initial one is a harmless no-op.
         this.replay = decodeChunk(m.chunk);
+        this.frameCb?.(this.replay);
         break;
       case 'window-state':
         this.winState = m.state;
@@ -108,6 +115,9 @@ export class RemoteHostSession implements HostSession {
       case 'url':
         this.url = m.url;
         this.urlCb?.(m.url);
+        break;
+      case 'scrollback':
+        this.scrollbackCb?.(m.lines);
         break;
       case 'exit':
         // Record the clean exit code so a following socket 'close' reports it,
@@ -151,7 +161,19 @@ export class RemoteHostSession implements HostSession {
     this.send({ t: 'input', data: encodeChunk(bytes) });
   }
   resize(cols: number, rows: number): void { this.send({ t: 'resize', cols, rows }); }
-  getReplay(): Uint8Array { return this.replay; }
+  // The daemon already serialized the frame it sent us; return that cached bytes
+  // regardless of `opts` (the scrollback was chosen daemon-side at attach time).
+  getReplay(_opts?: { scrollback?: number }): Uint8Array { return this.replay; }
+  onFrame(cb: (frame: Uint8Array) => void): void { this.frameCb = cb; }
+  // Ask the daemon to serialize this viewport's active window NOW; the fresh
+  // frame arrives as a `replay` frame and fires onFrame (see dispatch).
+  requestFrame(opts?: { scrollback?: number }): void {
+    this.send(opts?.scrollback !== undefined ? { t: 'refresh', scrollback: opts.scrollback } : { t: 'refresh' });
+  }
+  onScrollback(cb: (lines: string[]) => void): void { this.scrollbackCb = cb; }
+  // Ask the daemon for this viewport's active-window scrollback NOW; the lines
+  // arrive as a `scrollback` frame and fire onScrollback (see dispatch).
+  requestScrollback(): void { this.send({ t: 'scrollback' }); }
 
   // --- windows -------------------------------------------------------------
   onWindowState(cb: (s: WindowStateBody) => void): void { this.windowStateCb = cb; }

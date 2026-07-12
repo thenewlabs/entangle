@@ -45,6 +45,9 @@ export function TerminalView(_props: TerminalViewProps) {
         fontSize: 14,
         fontFamily: 'Menlo, Monaco, "Courier New", monospace',
         theme: { background: '#1e1e1e', foreground: '#d4d4d4' },
+        // Generous, explicit scrollback so the viewer can scroll back through
+        // history accumulated from the live stream (default is only 1000 lines).
+        scrollback: 5000,
       });
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
@@ -68,16 +71,19 @@ export function TerminalView(_props: TerminalViewProps) {
 
       term.onData((data: string) => child.stdin.write(data));
 
-      // On resize we must resync cleanly: after re-fitting xterm to the new
-      // size, drop the stale (re-wrapped) local buffer with term.reset(), then
-      // tell the server the new size. The server repaints the viewer on resize
-      // (screen clear + active-window replay), so the fresh screen is redrawn
-      // host-authoritatively instead of the re-wrapped host-sized garbage.
-      // Order matters: fit -> reset -> resize(send). Debounced so a drag-resize
-      // doesn't spam reset/resize; a single reset+resize runs once it settles.
+      // On resize we re-fit xterm to the new size and tell the server the new
+      // dimensions. The server replies with a host-authoritative in-place
+      // repaint (clear viewport + serialized active-window screen, NO scrollback
+      // erase), so the visible screen is redrawn correctly for the new size.
+      // We deliberately do NOT term.reset() here: reset wipes xterm's scrollback,
+      // and the viewer must keep the history it has accumulated from the live
+      // stream. xterm re-wraps its own buffer on fit; the incoming server repaint
+      // overwrites the viewport, so we let the stale re-wrap stand for the brief
+      // moment before it arrives rather than clear() it — the flash is negligible
+      // and clearing risks a visible blank gap. Debounced so a drag-resize
+      // doesn't spam fit/resize; a single fit+resize runs once it settles.
       const resync = () => {
         fitAddonRef.current?.fit();
-        term.reset();
         child.resize(term.cols, term.rows);
       };
       const handleResize = () => {
