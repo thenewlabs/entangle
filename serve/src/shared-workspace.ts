@@ -9,7 +9,7 @@ import { SharedSession } from './shared-session.js';
  * window of its own choosing — its "active" window. The workspace multiplexes
  * that window's output onto the stream via {@link onData}, repaints it on a
  * per-viewport window switch (also via {@link onData}: a clear + the new
- * window's replay), and pushes that viewport's own {@link WindowStateBody} to
+ * window's serialized frame), and pushes that viewport's own {@link WindowStateBody} to
  * it via {@link onWindowState} on every change. Different viewports can sit on
  * different windows independently (or share one by being on the same window).
  * `onExit` fires only when the workspace as a whole ends (its last window
@@ -23,11 +23,38 @@ export interface Viewport {
   onWindowState: (state: WindowStateBody) => void;
 }
 
-/** Screen clear + home used to repaint a viewport/host on a window switch. */
-const CLEAR = Buffer.from('\x1b[2J\x1b[3J\x1b[H', 'utf8');
+/** Default scrollback lines a viewport/attach repaint replays with its frame. */
+const DEFAULT_SCROLLBACK_LINES = 1000;
 
 /** Hard cap on concurrent windows so a client can't spawn unbounded shells. */
 const DEFAULT_MAX_WINDOWS = 16;
+
+/**
+ * Repaint bytes for a WINDOW SWITCH: leave any alt buffer (`\x1b[?1049l`), home,
+ * clear the screen AND scrollback (`\x1b[2J\x1b[3J`), then the serialized frame.
+ *
+ * The `\x1b[3J` (erase scrollback) is retained here ONLY because it is paired
+ * atomically with a serialize that REBUILDS the target window's own scrollback:
+ * we wipe the consumer's history and immediately repopulate it with the window
+ * we're switching to. That's why it no longer loses history the way the old raw
+ * `CLEAR` + truncated-ring replay did — the frame carries the history with it.
+ */
+function switchPayload(frame: Uint8Array): Buffer {
+  return Buffer.concat([Buffer.from('\x1b[?1049l\x1b[H\x1b[2J\x1b[3J'), Buffer.from(frame)]);
+}
+
+/**
+ * Repaint bytes for an IN-PLACE redraw (e.g. a viewer resize): leave the alt
+ * buffer, home, clear the screen — but NOT the scrollback (no `\x1b[3J`), so the
+ * consumer keeps its accumulated history — then the serialized frame.
+ *
+ * Exported as the canonical in-place-repaint sequence; host-terminal replicates
+ * these same bytes inline for its alt-screen-exit repaint (it deliberately does
+ * not import this module, staying decoupled from the concrete workspace).
+ */
+export function screenPayload(frame: Uint8Array): Buffer {
+  return Buffer.concat([Buffer.from('\x1b[?1049l\x1b[H\x1b[2J'), Buffer.from(frame)]);
+}
 
 /**
  * A shared, tmux-style workspace of windows with a PER-CONSUMER active window.
@@ -62,7 +89,6 @@ export class SharedWorkspace {
   private exited = false;
 
   private readonly cwd?: string;
-  private readonly maxReplayBytes?: number;
   private readonly maxWindows: number;
 
   private hostDataCb?: (chunk: Buffer) => void;
@@ -75,12 +101,11 @@ export class SharedWorkspace {
 
   constructor(
     private output: OutputHandler,
-    opts: { cols: number; rows: number; cwd?: string; maxReplayBytes?: number; maxWindows?: number }
+    opts: { cols: number; rows: number; cwd?: string; maxWindows?: number }
   ) {
     this.cols = Math.max(1, opts.cols);
     this.rows = Math.max(1, opts.rows);
     if (opts.cwd !== undefined) this.cwd = opts.cwd;
-    if (opts.maxReplayBytes !== undefined) this.maxReplayBytes = opts.maxReplayBytes;
     this.maxWindows = opts.maxWindows ?? DEFAULT_MAX_WINDOWS;
 
     // Start with a single window so the existing single-shell behavior is
@@ -127,9 +152,22 @@ export class SharedWorkspace {
     for (const w of this.windows) w.resize(cols, rows);
   }
 
-  /** Recent-output snapshot of the HOST's active window (host's initial paint). */
-  getReplay(): Uint8Array {
-    return this.windows[this.hostActiveIndex]?.getReplay() ?? new Uint8Array(0);
+  /**
+   * Serialized current frame of the HOST's active window (host's initial paint).
+   * Defaults to no scrollback so the host's real terminal isn't flooded with
+   * history on go-live; the host-terminal passes `{ scrollback: 0 }` explicitly.
+   */
+  getReplay(opts?: { scrollback?: number }): Uint8Array {
+    return this.windows[this.hostActiveIndex]?.snapshot({ scrollback: opts?.scrollback ?? 0 }) ?? new Uint8Array(0);
+  }
+
+  /**
+   * All buffer lines (scrollback history + current screen, oldest first) of the
+   * HOST's active window — the source for the host's own scrollback pager. Plain
+   * text only (see {@link SharedSession.scrollbackLines}).
+   */
+  scrollbackLines(): string[] {
+    return this.windows[this.hostActiveIndex]?.scrollbackLines() ?? [];
   }
 
   /** Number of attached client viewports. */
@@ -155,7 +193,9 @@ export class SharedWorkspace {
     this.viewportActive.set(v.sid, 0);
     this.output.info(`Viewport attached: ${v.sid} (${this.viewports.size} total)`);
     this.viewersChangedCb?.(this.viewports.size);
-    return { replay: this.windows[0]?.getReplay() ?? new Uint8Array(0) };
+    // No clear prefix: the client's terminal is fresh, so just the serialized
+    // frame (with a page of scrollback) syncs its screen and history.
+    return { replay: this.windows[0]?.snapshot({ scrollback: DEFAULT_SCROLLBACK_LINES }) ?? new Uint8Array(0) };
   }
 
   /** Detach a client viewport (disconnect / stream close). */
@@ -175,7 +215,8 @@ export class SharedWorkspace {
 
   /**
    * Repaint a SINGLE viewport with ITS OWN active window's screen (the same
-   * clear + replay a per-viewport window switch sends, scoped to one sid). The
+   * switch payload — clear + serialized frame — a per-viewport window switch
+   * sends, scoped to one sid). The
    * host stays authoritative over the shell size, so when a remote viewer
    * resizes we can't resize the PTY under everyone else; instead we re-send that
    * viewer's active window's screen so its locally-corrupted display is redrawn.
@@ -186,7 +227,28 @@ export class SharedWorkspace {
     if (!v) return;
     const active = this.windows[this.viewportActive.get(sid) ?? 0];
     if (!active) return;
-    const payload = Buffer.concat([CLEAR, Buffer.from(active.getReplay())]);
+    const payload = switchPayload(active.snapshot({ scrollback: DEFAULT_SCROLLBACK_LINES }));
+    try { v.onData(new Uint8Array(payload)); } catch {}
+  }
+
+  /**
+   * Redraw a SINGLE viewport's VISIBLE screen in place, PRESERVING its scrollback
+   * (a {@link screenPayload}: clear the screen but NOT the consumer's history — no
+   * `\x1b[3J`). Unlike {@link repaintViewport}'s switch payload, this is for a
+   * VIEWER RESIZE: the web client keeps its own accumulated xterm scrollback, so
+   * we must only redraw the current screen at the new size and must NOT wipe the
+   * history the client is holding. The host stays authoritative over the shell
+   * size, so a remote resize can't reshape the PTY under everyone else; instead we
+   * re-send just this viewer's active-window screen so its locally-reflowed
+   * display is redrawn clean.
+   */
+  repaintViewportScreen(sid: string): void {
+    if (this.exited) return;
+    const v = this.viewports.get(sid);
+    if (!v) return;
+    const active = this.windows[this.viewportActive.get(sid) ?? 0];
+    if (!active) return;
+    const payload = screenPayload(active.snapshot({ scrollback: 0 }));
     try { v.onData(new Uint8Array(payload)); } catch {}
   }
 
@@ -242,6 +304,25 @@ export class SharedWorkspace {
     if (this.exited || !this.viewports.has(sid)) return;
     if (index < 0 || index >= this.windows.length) return;
     try { this.windows[index]!.kill(); } catch {}
+  }
+
+  /**
+   * A FRESH serialized frame of THAT viewport's active window (mirrors
+   * {@link windowStateForViewport} but for the frame). Used by the daemon to
+   * answer a client's on-demand `refresh` with the window's live screen, rather
+   * than the single post-attach replay cached client-side.
+   */
+  snapshotForViewport(sid: string, opts?: { scrollback?: number }): Uint8Array {
+    return this.windows[this.viewportActive.get(sid) ?? 0]?.snapshot(opts) ?? new Uint8Array(0);
+  }
+
+  /**
+   * All buffer lines (scrollback history + current screen, oldest first) of
+   * THAT viewport's active window — the source for a client/host scrollback
+   * pager. Plain text only (see {@link SharedSession.scrollbackLines}).
+   */
+  scrollbackLinesForViewport(sid: string): string[] {
+    return this.windows[this.viewportActive.get(sid) ?? 0]?.scrollbackLines() ?? [];
   }
 
   /** Current window state as seen by a viewport (shared list + its own active). */
@@ -316,7 +397,6 @@ export class SharedWorkspace {
       cols: this.cols,
       rows: this.rows,
       ...(this.cwd !== undefined ? { cwd: this.cwd } : {}),
-      ...(this.maxReplayBytes !== undefined ? { maxReplayBytes: this.maxReplayBytes } : {}),
     });
     win.onExit((code, signal) => this.handleWindowExit(win, code, signal));
     // Tap EVERY window once, for its whole lifetime; the router delivers each
@@ -354,12 +434,15 @@ export class SharedWorkspace {
     }
   }
 
-  /** Repaint the HOST with a clear + its active window's replay. */
+  /**
+   * Repaint the HOST with a switch payload + its active window's frame. No
+   * scrollback: the host's real terminal shouldn't be flooded with history on a
+   * window switch (its own scrollback is the terminal's, not the window's).
+   */
   private repaintHost(): void {
     const active = this.windows[this.hostActiveIndex];
     if (!active) return;
-    const payload = Buffer.concat([CLEAR, Buffer.from(active.getReplay())]);
-    this.hostDataCb?.(payload);
+    this.hostDataCb?.(switchPayload(active.snapshot({ scrollback: 0 })));
   }
 
   /** Push the host its own window-state (host's active index). */

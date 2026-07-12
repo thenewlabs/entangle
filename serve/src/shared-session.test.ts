@@ -16,13 +16,11 @@ function makeSession(opts?: {
   cols?: number;
   rows?: number;
   cwd?: string;
-  maxReplayBytes?: number;
 }): SharedSession {
   const s = new SharedSession(output, {
     cols: opts?.cols ?? 80,
     rows: opts?.rows ?? 24,
     ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-    ...(opts?.maxReplayBytes !== undefined ? { maxReplayBytes: opts.maxReplayBytes } : {}),
   });
   live.push(s);
   return s;
@@ -97,7 +95,8 @@ describe('SharedSession (integration, real PTY)', () => {
     s.write('echo EARLYMARK\n');
     await waitFor(() => host.includes('EARLYMARK'), { message: 'host never saw EARLYMARK' });
 
-    // A late joiner gets the prior output through the replay snapshot.
+    // A late joiner gets the prior output through the serialized snapshot (the
+    // emulator's current screen, which still shows EARLYMARK).
     let late = '';
     const { replay } = s.attach({
       sid: 'late',
@@ -173,29 +172,62 @@ describe('SharedSession (integration, real PTY)', () => {
     expect(counts).toEqual([1, 2, 1, 0]);
   }, 10000);
 
-  it('bounds the replay buffer to maxReplayBytes', async () => {
-    const s = makeSession({ maxReplayBytes: 64 });
+  it('snapshot reflects an alt-screen frame then the restored primary after exit', async () => {
+    const s = makeSession();
     let host = '';
     s.onHostData((chunk) => { host += chunk.toString('utf8'); });
 
-    // Quiet the prompt so no large prompt chunk becomes the retained tail chunk.
-    s.write("PS1=''\n");
+    // Suppress input echo + the prompt so the screen holds only program output
+    // (otherwise the shell echoes the typed marker text onto the PRIMARY screen).
+    s.write("stty -echo; PS1=''\n");
+    await waitFor(() => host.includes('stty -echo'), { message: 'shell not ready' });
+    await delay(150);
 
-    // Drip many small commands. Waiting for each unique marker to appear in the
-    // host stream before sending the next keeps every PTY data chunk small, so
-    // the bounded buffer genuinely drops old chunks rather than retaining one
-    // oversized burst. Total output far exceeds 64 bytes.
-    for (let i = 0; i < 40; i++) {
-      const marker = `Z${i}X`;
-      s.write(`echo ${marker}\n`);
-      // eslint-disable-next-line no-await-in-loop
-      await waitFor(() => host.includes(marker), { timeout: 4000, message: `never saw ${marker}` });
-    }
+    // Enter the alt buffer and print a marker there; the serialized snapshot must
+    // reconstruct the CURRENT (alt) frame — the marker + the 1049h enter toggle.
+    s.write("printf '\\033[?1049h'; echo ALTFRAME_MARK\n");
+    await waitFor(() => decode(s.snapshot()).includes('ALTFRAME_MARK'), {
+      message: 'snapshot never showed the alt frame',
+    });
+    expect(decode(s.snapshot())).toContain('ALTFRAME_MARK');
+    expect(decode(s.snapshot())).toContain('\x1b[?1049h');
 
-    const replay = s.getReplay();
-    expect(replay.length).toBeLessThanOrEqual(64);
-    // Sanity: we did produce (and retain something of) the recent output.
-    expect(replay.length).toBeGreaterThan(0);
+    // Leave the alt buffer and print a primary marker; the snapshot now shows the
+    // restored primary (with PRIMARY_MARK) and no longer the alt marker.
+    s.write("printf '\\033[?1049l'; echo PRIMARY_MARK\n");
+    await waitFor(() => decode(s.snapshot()).includes('PRIMARY_MARK'), {
+      message: 'snapshot never showed the restored primary',
+    });
+    const snap = decode(s.snapshot());
+    expect(snap).toContain('PRIMARY_MARK');
+    expect(snap).not.toContain('ALTFRAME_MARK');
+  }, 15000);
+
+  it('scrollbackLines() returns buffer history (early + late lines) in order', async () => {
+    const s = makeSession();
+    let host = '';
+    s.onHostData((chunk) => { host += chunk.toString('utf8'); });
+
+    // Quiet the prompt/echo so the buffer holds our lines cleanly, then print a
+    // batch of distinct numbered lines that overflow the 24-row screen so an
+    // EARLY one lands in scrollback while a LATE one is on the current screen.
+    s.write("stty -echo; PS1=''\n");
+    await waitFor(() => host.includes('stty -echo'), { message: 'shell not ready' });
+    s.write('for i in $(seq 0 71); do printf "SBLINE-%03d\\n" "$i"; done\n');
+
+    // Poll the emulator buffer (not the raw stream) until the last line is in.
+    await waitFor(() => s.scrollbackLines().some((l) => l.includes('SBLINE-071')), {
+      message: 'scrollbackLines never showed the last line',
+    });
+
+    const lines = s.scrollbackLines();
+    const early = lines.findIndex((l) => l.includes('SBLINE-000'));
+    const late = lines.findIndex((l) => l.includes('SBLINE-071'));
+    // Both present, and the early line comes before the late one (oldest first).
+    expect(early).toBeGreaterThanOrEqual(0);
+    expect(late).toBeGreaterThan(early);
+    // Trailing whitespace is trimmed (translateToString(true)).
+    expect(lines[early]).toBe('SBLINE-000');
   }, 15000);
 
   it('fires onExit for the session and attached viewers when the shell exits', async () => {

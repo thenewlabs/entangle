@@ -291,9 +291,12 @@ async function handleStreamResize(
   // The host terminal owns the shared shell's size, so a viewer resize must NOT
   // resize the shared PTY (participants would fight over dimensions). Instead,
   // repaint just this viewport with the active window's screen so its locally
-  // reflowed/corrupted display is redrawn clean at its new size.
+  // reflowed/corrupted display is redrawn clean at its new size. Use the
+  // SCREEN repaint (no \x1b[3J): the viewer keeps its own accumulated xterm
+  // scrollback, so a resize must redraw the visible screen only, NOT erase the
+  // history the client is holding (a window switch is what wipes+rebuilds it).
   if (session.sharedViewers?.has(message.msg.sid)) {
-    session.sharedWorkspace?.repaintViewport(message.msg.sid);
+    session.sharedWorkspace?.repaintViewportScreen(message.msg.sid);
     return;
   }
 
