@@ -47,12 +47,43 @@ if (existsSync(webDistPath)) {
   console.log('✓ Copied web assets');
 }
 
+// Bundle the entangle browser client as a classic IIFE. This is injected into
+// the served SPA (RELAY_SPA_DIR mode) so `window.entangle` is attached — with
+// the capability parsed from the URL — BEFORE the SPA's deferred module runs.
+// Serving a prebuilt artifact keeps the relay from esbuild-ing at request time
+// in production.
+await buildEntangleClient();
+
 console.log('✓ All standalone executables built successfully!');
 console.log(`\nFiles created in ${distDir}:`);
 console.log('- serve.js (+ serve.min.js) - Fully bundled serve executable');
 console.log('- connect.js (+ connect.min.js) - Fully bundled connect CLI');
 console.log('- relay.js (+ relay.min.js) - Fully bundled relay server with web assets');
 console.log('- web/ (static assets for server)');
+
+async function buildEntangleClient() {
+  const webRoot = join(rootDir, 'web');
+  const entryPoint = join(webRoot, 'src', 'window-entangle-spawn.ts');
+  const outfile = join(distDir, 'entangle-client.js');
+  if (!existsSync(entryPoint)) {
+    console.warn(`⚠ Entangle client entry not found at ${entryPoint}; skipping`);
+    return;
+  }
+  try {
+    await build({
+      entryPoints: [entryPoint],
+      bundle: true,
+      format: 'iife',
+      target: 'es2020',
+      absWorkingDir: webRoot,
+      outfile,
+    });
+    console.log(`✓ Built entangle client: ${outfile} (${(readFileSync(outfile).length / 1024).toFixed(1)}KB)`);
+  } catch (error) {
+    console.error('✗ Failed to build entangle client:', error);
+    throw error;
+  }
+}
 
 async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
   try {
