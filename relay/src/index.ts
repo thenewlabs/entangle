@@ -103,19 +103,33 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
 
   const previewHost = (process.env.RELAY_PREVIEW_HOST || '').trim().toLowerCase();
 
-  // The Locus view frames the preview origin (RELAY_PREVIEW_HOST) in an iframe.
-  // With a bare `default-src 'self'` the browser blocks that frame, so widen
-  // ONLY framing to the preview host. Allow both http and https on any port so
-  // the same derivation works locally (preview.localhost:8080) and in prod
-  // (preview.locus.thenewlabs.com over https). Nothing else is broadened.
+  // The Locus view frames the preview origin in an iframe. Each preview now gets
+  // its OWN wildcard subdomain `<token>.preview.<domain>` (own browser origin →
+  // own Service Worker / cookies / storage), so widen framing to BOTH the base
+  // preview host AND any `*.preview.<domain>` subdomain. Allow both http and
+  // https on any port so the same derivation works locally
+  // (preview.localhost:8080, p3x9.preview.localhost:8080) and in prod
+  // (preview.locus.thenewlabs.com, p3x9.preview.locus.thenewlabs.com over
+  // https). Nothing else is broadened.
   const frameSources = previewHost
-    ? ["'self'", `http://${previewHost}:*`, `https://${previewHost}:*`]
+    ? [
+        "'self'",
+        `http://${previewHost}:*`,
+        `https://${previewHost}:*`,
+        `http://*.${previewHost}:*`,
+        `https://*.${previewHost}:*`,
+      ]
     : ["'self'"];
 
+  // A request is a "preview host" request iff its Host (port-stripped,
+  // lowercased) EQUALS the base preview host OR ends with `.<previewHost>`
+  // (i.e. a `<token>.preview.<domain>` per-preview subdomain).
+  const matchesPreviewHost = (host: string): boolean =>
+    !!previewHost && (host === previewHost || host.endsWith('.' + previewHost));
+
   const isPreviewHostReq = (req: express.Request): boolean => {
-    if (!previewHost) return false;
     const host = (req.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
-    return host === previewHost;
+    return matchesPreviewHost(host);
   };
 
   // Framing needs BOTH sides to agree: the VIEW page's `frame-src` (above) lets
@@ -123,9 +137,10 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
   // framed via `frame-ancestors`. Compute the allowed view origin(s) that may
   // frame the preview: an explicit `RELAY_VIEW_ORIGIN` (comma-separated) if set,
   // else derive it from the request — the preview host is conventionally a
-  // `preview.` subdomain of the view host, so strip that prefix and keep the
-  // request scheme + host:port (e.g. preview.localhost:8080 → localhost:8080,
-  // preview.locus.thenewlabs.com → locus.thenewlabs.com over https).
+  // per-preview `<token>.preview.` subdomain (or the bare `preview.` base) of
+  // the view host, so strip that FULL prefix and keep the request scheme +
+  // host:port (e.g. p3x9.preview.locus.thenewlabs.com → locus.thenewlabs.com
+  // over https, preview.localhost:8080 → localhost:8080).
   const viewOriginsForPreview = (req: express.Request): string[] => {
     const env = (process.env.RELAY_VIEW_ORIGIN || '').trim();
     if (env) return env.split(',').map((s) => s.trim()).filter(Boolean);
@@ -133,7 +148,9 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
     if (!host) return [];
     const xfProto = ((req.headers['x-forwarded-proto'] as string) || '').split(',')[0]?.trim();
     const scheme = xfProto || req.protocol || 'http';
-    const viewHost = host.replace(/^preview\./i, '');
+    // Strip the full `<label>.preview.` OR bare `preview.` prefix to yield the
+    // view host (matched case-insensitively, anchored at the start).
+    const viewHost = host.replace(/^(?:[^.]+\.)?preview\./i, '');
     return [`${scheme}://${viewHost}`];
   };
 
@@ -210,10 +227,12 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
         output.info(`Preview host ${previewHost} serves ${previewDoc} from ${previewDir}`);
       }
 
+      // Any `<token>.preview.<domain>` subdomain (or the base preview host) is
+      // served the preview bootstrap / preview static dir, exactly like the base
+      // preview host — see matchesPreviewHost above.
       const isPreviewHost = (req: express.Request): boolean => {
-        if (!previewHost) return false;
         const host = (req.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
-        return host === previewHost;
+        return matchesPreviewHost(host);
       };
 
       // The Locus VIEW SPA expects a global `window.entangle` (openPipe /

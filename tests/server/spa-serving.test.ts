@@ -32,7 +32,7 @@ function httpGet(
   port: number,
   path: string,
   host?: string,
-): Promise<{ status: number; body: string; contentType: string }> {
+): Promise<{ status: number; body: string; contentType: string; csp: string }> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {};
     if (host) headers.Host = host;
@@ -47,6 +47,7 @@ function httpGet(
             status: res.statusCode ?? 0,
             body,
             contentType: (res.headers['content-type'] ?? '').toString(),
+            csp: (res.headers['content-security-policy'] ?? '').toString(),
           }),
         );
       },
@@ -170,5 +171,49 @@ describe('relay optional SPA-serving (Locus)', () => {
     const res = await httpGet(port, '/anything', 'locus.locus.test');
     expect(res.status).toBe(200);
     expect(res.body).toContain('<div id="root">');
+  });
+
+  // --- Wildcard per-preview subdomains: <token>.preview.<domain> ------------
+
+  it('serves the preview bootstrap on a wildcard <token>.preview.<domain> host', async () => {
+    const res = await httpGet(port, '/some/deep/path', `p3x9.${PREVIEW_HOST}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('locus-transport');
+    expect(res.body).not.toContain('<div id="root">');
+    // Blanked transport + injected entangle client, same as the base preview host.
+    expect(res.body).not.toContain('__LOCUS_TRANSPORT__');
+    expect(res.body).toContain('/__entangle-client.js');
+  });
+
+  it('serves /__entangle-client.js as JS on a wildcard subdomain host', async () => {
+    const res = await httpGet(port, '/__entangle-client.js', `p3x9.${PREVIEW_HOST}`);
+    expect(res.status).toBe(200);
+    expect(res.contentType).toContain('javascript');
+  });
+
+  it('serves /sw.js as JS (not the HTML fallback) on a wildcard subdomain host', async () => {
+    const res = await httpGet(port, '/sw.js', `p3x9.${PREVIEW_HOST}`);
+    expect(res.status).toBe(200);
+    expect(res.contentType).toContain('javascript');
+    expect(res.body).toContain('service worker');
+  });
+
+  it('gives a wildcard subdomain preview CSP with frame-ancestors of the derived view origin', async () => {
+    const res = await httpGet(port, '/', `p3x9.${PREVIEW_HOST}`);
+    // The full `<label>.preview.` prefix is stripped to derive the view host.
+    expect(res.csp).toContain("frame-ancestors 'self' http://locus.test");
+    expect(res.csp).not.toContain("frame-ancestors 'none'");
+  });
+
+  it('gives the view host frame-src including the *.preview wildcard subdomain source', async () => {
+    const res = await httpGet(port, '/', 'locus.locus.test');
+    expect(res.csp).toContain("frame-ancestors 'none'");
+    // Base preview host plus the wildcard-subdomain sources.
+    expect(res.csp).toContain(`http://${PREVIEW_HOST}:*`);
+    expect(res.csp).toContain(`https://${PREVIEW_HOST}:*`);
+    expect(res.csp).toContain(`http://*.${PREVIEW_HOST}:*`);
+    expect(res.csp).toContain(`https://*.${PREVIEW_HOST}:*`);
+    // child-src mirrors frame-src.
+    expect(res.csp).toContain(`child-src 'self' http://${PREVIEW_HOST}:*`);
   });
 });
