@@ -99,14 +99,41 @@ export class SharedWorkspace {
   public cols: number;
   public rows: number;
 
+  /**
+   * PERSISTENT mode (headless daemons like Locus): when the LAST window exits the
+   * workspace does NOT end — a fresh shell is respawned in its place, so there is
+   * always a terminal to attach to. Default false: last-window exit ends the
+   * workspace (the `entangle serve` host semantics, where session end = exit).
+   */
+  public readonly persistent: boolean;
+
+  /**
+   * VIEWER-AUTHORITATIVE resize: a viewport resize resizes the whole workspace
+   * (every window PTY) instead of only repainting that viewport. For headless
+   * workspaces with no host TTY (Locus) the browser viewport is the only real
+   * terminal, so its size must win — otherwise every shell stays at the 80×24
+   * construction default forever. Default false: the host terminal stays
+   * authoritative and viewer resizes only repaint (multi-participant sharing).
+   */
+  public readonly viewerResizeAuthoritative: boolean;
+
   constructor(
     private output: OutputHandler,
-    opts: { cols: number; rows: number; cwd?: string; maxWindows?: number }
+    opts: {
+      cols: number;
+      rows: number;
+      cwd?: string;
+      maxWindows?: number;
+      persistent?: boolean;
+      viewerResizeAuthoritative?: boolean;
+    }
   ) {
     this.cols = Math.max(1, opts.cols);
     this.rows = Math.max(1, opts.rows);
     if (opts.cwd !== undefined) this.cwd = opts.cwd;
     this.maxWindows = opts.maxWindows ?? DEFAULT_MAX_WINDOWS;
+    this.persistent = opts.persistent === true;
+    this.viewerResizeAuthoritative = opts.viewerResizeAuthoritative === true;
 
     // Start with a single window so the existing single-shell behavior is
     // preserved when nobody ever creates a second one.
@@ -483,6 +510,21 @@ export class SharedWorkspace {
     const idx = this.windows.indexOf(win);
     if (idx === -1) return;
     this.windows.splice(idx, 1);
+
+    // Last window gone. PERSISTENT workspaces respawn a fresh shell in place —
+    // there must always be a window to attach to (typing `exit` in the last
+    // Locus terminal yields a new prompt, it does not kill the workspace).
+    if (this.windows.length === 0 && this.persistent) {
+      const win = this.spawnWindow();
+      this.windows.push(win);
+      this.hostActiveIndex = 0;
+      for (const sid of this.viewportActive.keys()) this.viewportActive.set(sid, 0);
+      this.repaintHost();
+      for (const sid of this.viewports.keys()) this.repaintViewport(sid);
+      this.broadcastWindowState();
+      this.output.info('Persistent workspace: last window exited; respawned a fresh shell');
+      return;
+    }
 
     // Last window gone: the whole workspace ends. Tell every viewport and the
     // host so the client streams and host process wind down.

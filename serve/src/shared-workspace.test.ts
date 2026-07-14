@@ -17,12 +17,18 @@ function makeWorkspace(opts?: {
   rows?: number;
   cwd?: string;
   maxWindows?: number;
+  persistent?: boolean;
+  viewerResizeAuthoritative?: boolean;
 }): SharedWorkspace {
   const w = new SharedWorkspace(output, {
     cols: opts?.cols ?? 80,
     rows: opts?.rows ?? 24,
     ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
     ...(opts?.maxWindows !== undefined ? { maxWindows: opts.maxWindows } : {}),
+    ...(opts?.persistent !== undefined ? { persistent: opts.persistent } : {}),
+    ...(opts?.viewerResizeAuthoritative !== undefined
+      ? { viewerResizeAuthoritative: opts.viewerResizeAuthoritative }
+      : {}),
   });
   live.push(w);
   return w;
@@ -497,4 +503,68 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     expect(ws.windowStateForViewport('c').activeIndex).toBe(0); // c unchanged
     expect(ws.hasExited).toBe(false);
   }, 15000);
+});
+
+describe('SharedWorkspace — persistent mode (headless daemons, e.g. Locus)', () => {
+  it('defaults are off: persistent=false, viewerResizeAuthoritative=false', () => {
+    const ws = makeWorkspace();
+    expect(ws.persistent).toBe(false);
+    expect(ws.viewerResizeAuthoritative).toBe(false);
+  });
+
+  it('respawns a fresh shell when the last window is closed (workspace never ends)', async () => {
+    const ws = makeWorkspace({ persistent: true });
+    let exited = false;
+    ws.onExit(() => { exited = true; });
+    const vp = makeViewport('v1');
+    ws.attachViewport(vp);
+    const firstId = ws.windowState().windows[0]!.id;
+
+    ws.closeWindow(0); // last window
+
+    await waitFor(
+      () => ws.windowState().windows.length === 1 && ws.windowState().windows[0]!.id !== firstId,
+      { message: 'persistent workspace never respawned a window' },
+    );
+    expect(exited).toBe(false);
+    expect(ws.hasExited).toBe(false);
+    expect(vp.exited).toBe(false);
+    // The surviving viewport was re-homed onto the fresh window and repainted.
+    expect(ws.windowStateForViewport('v1').activeIndex).toBe(0);
+    // …and the fresh shell is live: input still lands somewhere real.
+    ws.writeFromViewport('v1', 'echo RESPAWNED_OK\n');
+    await waitFor(() => vp.data.includes('RESPAWNED_OK'), { message: 'respawned shell not interactive' });
+  }, 15000);
+
+  it('respawns when the last shell exits via `exit` too', async () => {
+    const ws = makeWorkspace({ persistent: true });
+    let exited = false;
+    ws.onExit(() => { exited = true; });
+    const firstId = ws.windowState().windows[0]!.id;
+
+    ws.write('exit\n');
+
+    await waitFor(
+      () => ws.windowState().windows.length === 1 && ws.windowState().windows[0]!.id !== firstId,
+      { message: 'persistent workspace never respawned after shell exit' },
+    );
+    expect(exited).toBe(false);
+    expect(ws.hasExited).toBe(false);
+  }, 15000);
+
+  it('closing a NON-last window in persistent mode behaves as before (no respawn)', async () => {
+    const ws = makeWorkspace({ persistent: true });
+    ws.newWindow(); // 2 windows
+    ws.closeWindow(1);
+    await waitFor(() => ws.windowState().windows.length === 1, { message: 'window close never settled' });
+    expect(ws.hasExited).toBe(false);
+  }, 15000);
+
+  it('viewerResizeAuthoritative resizes the whole workspace via resize()', () => {
+    const ws = makeWorkspace({ viewerResizeAuthoritative: true });
+    expect(ws.viewerResizeAuthoritative).toBe(true);
+    ws.resize(133, 41);
+    expect(ws.cols).toBe(133);
+    expect(ws.rows).toBe(41);
+  });
 });

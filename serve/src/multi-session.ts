@@ -295,8 +295,18 @@ async function handleStreamResize(
   // SCREEN repaint (no \x1b[3J): the viewer keeps its own accumulated xterm
   // scrollback, so a resize must redraw the visible screen only, NOT erase the
   // history the client is holding (a window switch is what wipes+rebuilds it).
+  //
+  // EXCEPT in viewer-authoritative workspaces (headless daemons with no host
+  // TTY, e.g. Locus): there the browser viewport IS the terminal, so its resize
+  // reshapes the whole workspace — otherwise every shell would stay at the
+  // 80×24 construction default forever.
   if (session.sharedViewers?.has(message.msg.sid)) {
-    session.sharedWorkspace?.repaintViewportScreen(message.msg.sid);
+    const workspace = session.sharedWorkspace;
+    if (workspace?.viewerResizeAuthoritative) {
+      workspace.resize(message.msg.cols, message.msg.rows);
+    } else {
+      workspace?.repaintViewportScreen(message.msg.sid);
+    }
     return;
   }
 
