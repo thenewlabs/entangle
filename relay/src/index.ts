@@ -87,7 +87,7 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
   // Ensure all loggers in this process share the same output mode
   process.env.OUTPUT_MODE = outputMode;
   const output = new OutputHandler({ mode: parseOutputMode(outputMode) });
-  output.version('Entangle Server', getVersionInfo());
+  output.version('Entangle Server', getVersionInfo(import.meta.url));
   
   const config = getConfig();
   const app = express();
@@ -458,7 +458,7 @@ if (isMainModule()) {
   program
     .name('entangle-relay')
     .description('Entangle blind relay server')
-    .version(getVersionInfo())
+    .version(getVersionInfo(import.meta.url))
     .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');
 
   program

@@ -38,7 +38,7 @@ program
   .enablePositionalOptions()
   .passThroughOptions()
   .description('Invoke commands or terminal sessions on remote capabilities')
-  .version(getVersionInfo())
+  .version(getVersionInfo(import.meta.url))
   .argument('<cap-url>', 'Capability URL (e.g., https://suncoder.dev/cap/capId#S=secret)')
   .argument('[command...]', 'Command and arguments to execute (omit for terminal mode)')
   .option('--cwd <path>', 'Working directory')
@@ -64,7 +64,7 @@ program
       
       if (commandArgs.length === 0) {
         // Terminal mode
-        output.version('Entangle Invoke - Terminal Mode', getVersionInfo());
+        output.version('Entangle Invoke - Terminal Mode', getVersionInfo(import.meta.url));
         
         const terminalOptions: { cwd?: string; cols?: number; rows?: number } = { cols, rows };
         if (options.cwd !== undefined) terminalOptions.cwd = options.cwd;
@@ -72,7 +72,7 @@ program
         await openTerminal(wsUrl, S, terminalOptions, password);
       } else {
         // Single command mode
-        output.version('Entangle Invoke - Command Mode', getVersionInfo());
+        output.version('Entangle Invoke - Command Mode', getVersionInfo(import.meta.url));
         
         const singleOptions: { argv: string[]; cwd?: string; abortAfterMs?: number } = { argv: commandArgs };
         if (options.cwd !== undefined) singleOptions.cwd = options.cwd;

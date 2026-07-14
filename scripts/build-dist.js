@@ -18,7 +18,6 @@ if (existsSync(distDir)) {
 mkdirSync(distDir, { recursive: true });
 
 console.log('Building fully bundled standalone executables...');
-console.log('Note: Development versions (.js) work correctly. Minified versions (.min.js) may have import.meta.url issues.');
 
 // Build fully bundled executables
 await buildFullyBundledExecutable({
@@ -86,6 +85,22 @@ async function buildEntangleClient() {
 }
 
 async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
+  // The bundle is CJS (no import.meta.url), so utils' packageVersion() cannot find the
+  // package's manifest at runtime — inject the version at build time instead. The single
+  // source of truth stays the workspace's own package.json.
+  const pkgVersion = JSON.parse(
+    readFileSync(join(dirname(dirname(entryPoint)), 'package.json'), 'utf8'),
+  ).version;
+  const define = {
+    ENTANGLE_BUILD_VERSION: JSON.stringify(pkgVersion),
+    // Rewrite every `import.meta.url` to a CJS-safe equivalent AT BUILD TIME. The old
+    // post-build regex on the emitted bundle missed minifier-renamed references, so the
+    // .min.js variants crashed at module load (fileURLToPath(undefined)).
+    'import.meta.url': '__entangleImportMetaUrl',
+  };
+  const banner = {
+    js: "const __entangleImportMetaUrl = require('node:url').pathToFileURL(__filename).href;",
+  };
   try {
     // Build development version - fully bundled
     await build({
@@ -95,6 +110,8 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
       target: 'node18',
       format: 'cjs',
       outfile: outfile + '.cjs.temp',
+      define,
+      banner,
       external: [
         // Only externalize native Node.js modules that cannot be bundled
         'fsevents', // Optional native dependency
@@ -114,6 +131,8 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
       target: 'node18',
       format: 'cjs',
       outfile: minOutfile + '.cjs.temp',
+      define,
+      banner,
       external: [
         'fsevents',
         '@homebridge/node-pty-prebuilt-multiarch',
@@ -125,10 +144,7 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
     // Create final executables, check if shebang already exists
     const shebang = '#!/usr/bin/env node\n';
     
-    let devContent = readFileSync(outfile + '.cjs.temp', 'utf8');
-    // Replace import.meta.url with a CommonJS-compatible equivalent
-    devContent = devContent.replace(/import\.meta\.url/g, '(__filename ? "file://" + __filename : undefined)');
-    devContent = devContent.replace(/import_meta\d*\.url/g, '(__filename ? "file://" + __filename : undefined)');
+    const devContent = readFileSync(outfile + '.cjs.temp', 'utf8');
     
     if (devContent.startsWith('#!/usr/bin/env node')) {
       writeFileSync(outfile, devContent);
@@ -136,10 +152,7 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
       writeFileSync(outfile, shebang + devContent);
     }
     
-    let minContent = readFileSync(minOutfile + '.cjs.temp', 'utf8');
-    // Replace import.meta.url with a CommonJS-compatible equivalent
-    minContent = minContent.replace(/import\.meta\.url/g, '(__filename ? "file://" + __filename : undefined)');
-    minContent = minContent.replace(/import_meta\d*\.url/g, '(__filename ? "file://" + __filename : undefined)');
+    const minContent = readFileSync(minOutfile + '.cjs.temp', 'utf8');
     
     if (minContent.startsWith('#!/usr/bin/env node')) {
       writeFileSync(minOutfile, minContent);

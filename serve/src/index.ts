@@ -156,7 +156,7 @@ const program = new Command();
 program
   .name('entangle-serve')
   .description('Entangle secure agent for exposing CLI tools')
-  .version(getVersionInfo())
+  .version(getVersionInfo(import.meta.url))
   .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');
 
 program
@@ -180,7 +180,7 @@ program
       const outputMode = parseOutputMode(program.opts().outputMode);
       const output = new OutputHandler({ mode: outputMode });
 
-      output.version('Entangle Agent', getVersionInfo());
+      output.version('Entangle Agent', getVersionInfo(import.meta.url));
 
       const config = getConfig();
       const { serverUrl, pinnedCapability } = await resolveServeTarget({
