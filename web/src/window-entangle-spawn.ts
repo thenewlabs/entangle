@@ -43,7 +43,8 @@ class Emitter {
   }
 }
 
-class EntangleConnection {
+// Exported for unit tests (heartbeat/watchdog behavior); browser consumers use `window.entangle`.
+export class EntangleConnection {
   private ws: WebSocket | null = null;
   private reader = new FrameReader();
   private K_raw: Uint8Array | null = null;
@@ -78,6 +79,7 @@ class EntangleConnection {
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private connectInFlight: Promise<void> | null = null;
   private lastRecvTs = 0;
+  private lastWatchdogTickTs = 0;
   private connStatus: 'connecting' | 'open' | 'reconnecting' | 'closed' = 'connecting';
   private statusHandlers = new Set<(s: string) => void>();
   private reconnectedHandlers = new Set<() => void>();
@@ -160,10 +162,27 @@ class EntangleConnection {
   private _startHeartbeat(): void {
     this._stopHeartbeat();
     this.heartbeatTimer = setInterval(() => this._sendKeepalive(), EntangleConnection.HB_INTERVAL);
+    this.lastWatchdogTickTs = Date.now();
     this.watchdogTimer = setInterval(() => {
+      const now = Date.now();
+      // Event-loop starvation guard: this page can share its main thread with a HEAVY app in a
+      // same-origin iframe (code-server's workbench blocks it for 30s+ while installing
+      // extensions), and background tabs get their timers throttled. During such a stall inbound
+      // frames sit unprocessed, so a stale lastRecvTs is NOT evidence of a dead path — killing
+      // the (healthy) socket here caused a reconnect+frame-reload loop exactly when the app was
+      // busiest. Detect the stall by our own tick cadence; on wake, grant one fresh heartbeat
+      // window and probe with an immediate keepalive instead of closing. A genuinely dead path
+      // still gets closed by the following ticks when the probe goes unanswered.
+      const starved = now - this.lastWatchdogTickTs > 30000; // 3× the 10s tick cadence
+      this.lastWatchdogTickTs = now;
+      if (starved) {
+        this.lastRecvTs = Math.max(this.lastRecvTs, now - EntangleConnection.HB_INTERVAL);
+        this._sendKeepalive();
+        return;
+      }
       if (
         this.ws && this.ws.readyState === WebSocket.OPEN &&
-        Date.now() - this.lastRecvTs > EntangleConnection.HB_WATCHDOG
+        now - this.lastRecvTs > EntangleConnection.HB_WATCHDOG
       ) {
         // No keepalive echo in the watchdog window → the path is half-open. Force
         // a close so onclose kicks off reconnection.
