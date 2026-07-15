@@ -800,16 +800,34 @@ declare global {
 
 // Attach to window
 (() => {
-  const cap = parseCapabilityFromUrl();
   const entangle: any = window.entangle || (window.entangle = {});
+  let attached = false;
+  // Late capability injection: a host page can supply the capability when the URL carries
+  // none — e.g. Locus's preview bootstrap opened at the origin ROOT restores it from
+  // origin-scoped storage (the preview origin is derived from the capId, so storage there
+  // can never yield a foreign capability). One-shot: ignored once a connection exists. The
+  // client itself never persists the secret; where it comes from is the embedder's policy.
+  entangle.setCapability = (capId: string, S: string): boolean => {
+    if (typeof capId === 'string' && capId !== '' && typeof S === 'string' && S !== '') {
+      attachWith(capId, S);
+    }
+    return attached;
+  };
+  const cap = parseCapabilityFromUrl();
   if (!cap) {
-    // Expose a lazy erroring spawn
+    // Lazy erroring stubs until (unless) a capability is injected via setCapability.
     entangle.spawn = () => { throw new Error('Capability not found in URL'); };
     entangle.exec = async () => { throw new Error('Capability not found in URL'); };
     entangle.openPipe = () => { throw new Error('Capability not found in URL'); };
-    return;
+  } else {
+    attachWith(cap.capId, cap.S);
   }
-  const conn = new EntangleConnection(cap.capId, cap.S);
+  return;
+
+  function attachWith(capId: string, S: string): void {
+  if (attached) return;
+  attached = true;
+  const conn = new EntangleConnection(capId, S);
   entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
   // Interactive PTY session (used by the terminal UI).
   entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string }) => conn.spawnPty(options);
@@ -891,6 +909,7 @@ declare global {
       });
     });
   };
+  } // end attachWith
 })();
 
 export {};

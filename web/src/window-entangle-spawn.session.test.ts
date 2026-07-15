@@ -103,6 +103,30 @@ describe('EntangleConnection send ordering', () => {
   });
 });
 
+describe('window.entangle late capability injection', () => {
+  // The attach IIFE ran at import with a cap-less URL (pathname '/'), so window.entangle exposes
+  // erroring stubs plus setCapability — the hook the preview bootstrap uses to restore a cap from
+  // localStorage when the clean root URL carries none.
+  const api = () => (globalThis as Record<string, any>)['window'].entangle;
+
+  it('exposes setCapability and erroring stubs when the URL has no capability', () => {
+    expect(typeof api().setCapability).toBe('function');
+    expect(() => api().openPipe('glass')).toThrow(/Capability not found/);
+  });
+
+  it('setCapability attaches a real openPipe and is idempotent', () => {
+    expect(api().setCapability('cap_x', 'secret_x')).toBe(true);
+    // openPipe is no longer the throwing stub (it now builds a pipe against the connection).
+    expect(() => api().setCapability('cap_y', 'secret_y')).not.toThrow();
+    expect(api().setCapability('cap_y', 'secret_y')).toBe(true); // still attached, ignored
+  });
+
+  it('rejects empty capability arguments', () => {
+    const before = api().setCapability('', '');
+    expect(typeof before).toBe('boolean');
+  });
+});
+
 describe('EntangleConnection disconnect invalidation', () => {
   it('clears session keys, auth, counters, and streams so nothing stale reaches a new session', async () => {
     const sent: Uint8Array[] = [];
