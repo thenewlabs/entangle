@@ -616,7 +616,7 @@ export async function handleMultiStreamFrame(
       }
 
       case FrameType.KEEPALIVE:
-        // Echo keepalive back
+        // Echo keepalive back so the client's liveness watchdog sees a reply.
         await sendEncrypted(session, FrameType.KEEPALIVE, message);
         break;
 

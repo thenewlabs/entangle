@@ -126,6 +126,12 @@ const STREAM_FRAME_TYPES = new Set<FrameType>([
   FrameType.STREAM_EXIT,
   // Shared-workspace window control rides the same multi-session handler.
   FrameType.WINDOW_CTL,
+  // KEEPALIVE too: the multi-session handler ECHOES it (the local switch below only `break`s,
+  // so keepalives went unanswered and the client's liveness watchdog force-closed every idle
+  // connection ~45s later — a reconnect storm on any preview/workbench left sitting). Routing it
+  // here also keeps the session-global counter consistent (the client counts keepalives in its
+  // outgoing counter; the serve must validate+count them the same way, exactly like WINDOW_CTL).
+  FrameType.KEEPALIVE,
 ]);
 
 async function handleFrame(
