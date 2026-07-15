@@ -58,6 +58,24 @@ export class EntangleConnection {
   private streamCounters = new StreamCounters();
   private children = new Map<string, BrowserChildProcess>();
   private pendingOpens: BrowserChildProcess[] = [];
+  // Serializes every counter-consuming send. AEAD encryption is async and does NOT resolve in
+  // call order, so "take counter now, send after await" lets two concurrent sends hit the wire
+  // out of order — the agent's replay defense then terminates the session on the first
+  // inversion (seen as "Stream counter mismatch: expected=N, received=N+1" under load). Each
+  // sender runs its counter take + encrypt + send as one queued task, so counter order always
+  // equals wire order. Liveness gates run INSIDE the task: a task queued before a disconnect
+  // must no-op after it, never consume a counter it can't send.
+  private sendChain: Promise<void> = Promise.resolve();
+  private _enqueueSend(task: () => Promise<void> | void): Promise<void> {
+    const run = this.sendChain.then(() => task());
+    this.sendChain = run.catch(() => { /* a failed send must not stall the queue */ });
+    return run;
+  }
+  /** Whether a queued stream-frame send is still valid (session live AND the stream is live). */
+  private _canSendStream(sid: string): boolean {
+    return !!this.ws && this.ws.readyState === WebSocket.OPEN && !!this.keys &&
+      this.authenticated && this.children.has(sid);
+  }
   // In-flight password verification: sent once, awaited by every stream open so
   // no STREAM_OPEN races ahead of the agent's AUTH_PW verification.
   private pwVerifyPromise: Promise<void> | null = null;
@@ -196,17 +214,16 @@ export class EntangleConnection {
   }
   /** Round-trip liveness: the agent echoes KEEPALIVE, so receiving it confirms the whole path. */
   private _sendKeepalive(): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys) return;
-    const ctr = this.counters.outgoing.next(); // session-global (agent validates counters.incoming)
-    const msg = { ctr, msg: { v: 1 as const, kind: 'keepalive' as const } };
-    const aad = frameAad(FrameType.KEEPALIVE, AeadDir.ClientToServer);
-    const plaintext = encode(msg);
-    (async () => {
+    void this._enqueueSend(async () => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys || !this.authenticated) return;
+      const ctr = this.counters.outgoing.next(); // session-global (agent validates counters.incoming)
+      const msg = { ctr, msg: { v: 1 as const, kind: 'keepalive' as const } };
+      const aad = frameAad(FrameType.KEEPALIVE, AeadDir.ClientToServer);
       try {
-        const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
-        this.ws!.send(encodeFrame(FrameType.KEEPALIVE, ct));
+        const ct = await streamAeadEncrypt(this.keys.K_enc, encode(msg), aad);
+        this.ws.send(encodeFrame(FrameType.KEEPALIVE, ct));
       } catch { /* next watchdog tick handles a dead socket */ }
-    })();
+    });
   }
 
   /** Intentional teardown: stop reconnecting and close. */
@@ -253,9 +270,14 @@ export class EntangleConnection {
       this.pwResolve = resolve;
       this.pwReject = reject;
     });
-    const ctr = this.counters.outgoing.next();
-    const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
-    this.ws.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
+    // Rides the session-global counter, so it must go through the send queue like every other
+    // counter-consuming send (a queued keepalive holding an earlier counter must ship first).
+    void this._enqueueSend(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys || !this.authenticated) return;
+      const ctr = this.counters.outgoing.next();
+      const pwEncrypted = aeadEncrypt(this.keys.K_enc, FrameType.AUTH_PW, ctr, { password }, AeadDir.ClientToServer);
+      this.ws.send(encodeFrame(FrameType.AUTH_PW, encode(pwEncrypted)));
+    });
     return this.pwVerifyPromise;
   }
 
@@ -378,20 +400,37 @@ export class EntangleConnection {
 
       this.ws!.onerror = () => reject(new Error('WebSocket error'));
       this.ws!.onclose = () => {
-        this.authenticated = false;
         this.ws = null;
         this._stopHeartbeat();
-        if (this.pwReject) this._settlePassword(new Error('disconnect'));
-        // Inform children of disconnect (their streams are dead; consumers re-open
-        // fresh pipes on the onReconnected event).
-        for (const child of this.children.values()) child._onError('disconnect');
-        this.children.clear();
-        // Fail any in-flight opens so awaiters don't hang forever.
-        for (const child of this.pendingOpens.splice(0)) child._onError('disconnect');
+        this._handleDisconnected();
         // Auto-reconnect unless this was an intentional close.
         if (!this.intentionalClose) this.scheduleReconnect();
       };
     });
+  }
+
+  /**
+   * Invalidate EVERY piece of per-session state the moment the socket drops. Session keys and
+   * counters are per-session by design (fresh HKDF salt each AUTH), so nothing from the old
+   * session may leak into the next one: a send with stale keys arrives "before authentication",
+   * and a stale stream id / counter trips the agent's replay defense, which terminates the NEW
+   * session — a reconnect loop. (The old frame-reload-on-reconnect design rebuilt this object on
+   * every drop, which is why none of this state used to need explicit invalidation.)
+   */
+  private _handleDisconnected(): void {
+    this.authenticated = false;
+    this.keys = null; // gate every send until the new session's keys exist
+    this.passwordVerified = false; // the agent re-verifies per session
+    this.counters = new BidirectionalCounters();
+    this.streamCounters = new StreamCounters();
+    this.reader = new FrameReader(); // a partial frame from the cut socket must not prefix the next one
+    if (this.pwReject) this._settlePassword(new Error('disconnect'));
+    // Inform children of disconnect (their streams are dead; consumers re-open
+    // fresh pipes on the onReconnected event).
+    for (const child of this.children.values()) child._onError('disconnect');
+    this.children.clear();
+    // Fail any in-flight opens so awaiters don't hang forever.
+    for (const child of this.pendingOpens.splice(0)) child._onError('disconnect');
   }
 
   private async dispatchFrame(frame: { type: FrameType; payload: Uint8Array }) {
@@ -505,11 +544,16 @@ export class EntangleConnection {
         return;
       }
     }
-    const sid = child._sid;
-    // Start counters for this stream
-    const ctr = this.streamCounters.increment(sid, 'outgoing');
+    await this._enqueueSend(async () => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys || !this.authenticated) {
+        child._onError('disconnect');
+        return;
+      }
+      const sid = child._sid;
+      // Start counters for this stream
+      const ctr = this.streamCounters.increment(sid, 'outgoing');
 
-    let openMsg: any;
+      let openMsg: any;
     if (child._mode === 'pty') {
       openMsg = {
         v: 1 as const,
@@ -544,52 +588,67 @@ export class EntangleConnection {
         },
       };
     }
-    const msg = { ctr, msg: openMsg };
-    const plaintext = encode(msg);
-    const aad = frameAad(FrameType.STREAM_OPEN, AeadDir.ClientToServer);
-    const ciphertext = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
+      const msg = { ctr, msg: openMsg };
+      const plaintext = encode(msg);
+      const aad = frameAad(FrameType.STREAM_OPEN, AeadDir.ClientToServer);
+      const ciphertext = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
 
-    const frame = encodeFrame(FrameType.STREAM_OPEN, ciphertext);
-
-    this.ws.send(frame);
-    // Track pending open to bind when 'opened' arrives with actual sid
-    this.pendingOpens.push(child);
+      this.ws.send(encodeFrame(FrameType.STREAM_OPEN, ciphertext));
+      // Track pending open to bind when 'opened' arrives with actual sid
+      this.pendingOpens.push(child);
+    });
   }
 
+  // Split outbound stream bytes so no wire frame can approach the protocol's MAX_FRAME_BYTES
+  // (1MB): the receiving FrameReader silently DISCARDS an oversized frame, and the resulting
+  // counter gap trips the agent's replay defense, which terminates the whole session — seen
+  // live when vscode wrote its multi-MB extensions cache through the preview tunnel. 256KB
+  // leaves ample headroom for CBOR + AEAD overhead. Pipes are byte streams, so splitting is
+  // invisible to the receiver.
+  private static readonly DATA_CHUNK_MAX = 256 * 1024;
+
   _sendData(sid: string, chunk: Uint8Array): void {
-    if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.increment(sid, 'outgoing');
-    const msg = { ctr, msg: { v: 1 as const, kind: 'data' as const, sid, chunk } };
-    const aad = frameAad(FrameType.STREAM_DATA, AeadDir.ClientToServer);
-    const plaintext = encode(msg);
-    (async () => {
-      const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+    // Copy before queueing: encryption is deferred to the send queue, and the caller may reuse
+    // its buffer the moment write() returns. Splitting shares the same copy via subarrays.
+    const bytes = chunk.slice();
+    for (let off = 0; ; off += EntangleConnection.DATA_CHUNK_MAX) {
+      const part = bytes.subarray(off, off + EntangleConnection.DATA_CHUNK_MAX);
+      this._sendDataFrame(sid, part);
+      if (off + EntangleConnection.DATA_CHUNK_MAX >= bytes.length) break;
+    }
+  }
+
+  private _sendDataFrame(sid: string, chunk: Uint8Array): void {
+    void this._enqueueSend(async () => {
+      if (!this._canSendStream(sid)) return;
+      const ctr = this.streamCounters.increment(sid, 'outgoing');
+      const msg = { ctr, msg: { v: 1 as const, kind: 'data' as const, sid, chunk } };
+      const aad = frameAad(FrameType.STREAM_DATA, AeadDir.ClientToServer);
+      const ct = await streamAeadEncrypt(this.keys!.K_enc, encode(msg), aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_DATA, ct));
-    })();
+    });
   }
 
   _sendSignal(sid: string, signal: SignalName): void {
-    if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.increment(sid, 'outgoing');
-    const msg = { ctr, msg: { v: 1 as const, kind: 'signal' as const, sid, signal } };
-    const aad = frameAad(FrameType.STREAM_SIGNAL, AeadDir.ClientToServer);
-    const plaintext = encode(msg);
-    (async () => {
-      const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+    void this._enqueueSend(async () => {
+      if (!this._canSendStream(sid)) return;
+      const ctr = this.streamCounters.increment(sid, 'outgoing');
+      const msg = { ctr, msg: { v: 1 as const, kind: 'signal' as const, sid, signal } };
+      const aad = frameAad(FrameType.STREAM_SIGNAL, AeadDir.ClientToServer);
+      const ct = await streamAeadEncrypt(this.keys!.K_enc, encode(msg), aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_SIGNAL, ct));
-    })();
+    });
   }
 
   _sendResize(sid: string, cols: number, rows: number): void {
-    if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.increment(sid, 'outgoing');
-    const msg = { ctr, msg: { v: 1 as const, kind: 'pty-resize' as const, sid, cols, rows } };
-    const aad = frameAad(FrameType.STREAM_RESIZE, AeadDir.ClientToServer);
-    const plaintext = encode(msg);
-    (async () => {
-      const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+    void this._enqueueSend(async () => {
+      if (!this._canSendStream(sid)) return;
+      const ctr = this.streamCounters.increment(sid, 'outgoing');
+      const msg = { ctr, msg: { v: 1 as const, kind: 'pty-resize' as const, sid, cols, rows } };
+      const aad = frameAad(FrameType.STREAM_RESIZE, AeadDir.ClientToServer);
+      const ct = await streamAeadEncrypt(this.keys!.K_enc, encode(msg), aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_RESIZE, ct));
-    })();
+    });
   }
 
   spawnPty(options: { cols: number; rows: number; cwd?: string }): BrowserChildProcess {
@@ -597,15 +656,14 @@ export class EntangleConnection {
   }
 
   _sendClose(sid: string): void {
-    if (!this.ws || !this.keys) return;
-    const ctr = this.streamCounters.increment(sid, 'outgoing');
-    const msg = { ctr, msg: { v: 1 as const, kind: 'close' as const, sid } };
-    const aad = frameAad(FrameType.STREAM_CLOSE, AeadDir.ClientToServer);
-    const plaintext = encode(msg);
-    (async () => {
-      const ct = await streamAeadEncrypt(this.keys!.K_enc, plaintext, aad);
+    void this._enqueueSend(async () => {
+      if (!this._canSendStream(sid)) return;
+      const ctr = this.streamCounters.increment(sid, 'outgoing');
+      const msg = { ctr, msg: { v: 1 as const, kind: 'close' as const, sid } };
+      const aad = frameAad(FrameType.STREAM_CLOSE, AeadDir.ClientToServer);
+      const ct = await streamAeadEncrypt(this.keys!.K_enc, encode(msg), aad);
       this.ws!.send(encodeFrame(FrameType.STREAM_CLOSE, ct));
-    })();
+    });
   }
 
   // Register a tab-bar subscriber. Immediately replays the last known state (if
@@ -624,14 +682,16 @@ export class EntangleConnection {
   // counter (like AUTH_PW), since window ops are not stream-scoped.
   async sendWindowOp(op: string, extra: Record<string, unknown> = {}): Promise<void> {
     await this.ensureConnected();
-    if (!this.ws || !this.keys) return;
-    const plaintext = encode({
-      ctr: this.counters.outgoing.next(),
-      msg: { v: 1 as const, kind: 'op' as const, op, ...extra },
+    await this._enqueueSend(async () => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys || !this.authenticated) return;
+      const plaintext = encode({
+        ctr: this.counters.outgoing.next(),
+        msg: { v: 1 as const, kind: 'op' as const, op, ...extra },
+      });
+      const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ClientToServer);
+      const ct = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
+      this.ws.send(encodeFrame(FrameType.WINDOW_CTL, ct));
     });
-    const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ClientToServer);
-    const ct = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
-    this.ws.send(encodeFrame(FrameType.WINDOW_CTL, ct));
   }
 }
 
