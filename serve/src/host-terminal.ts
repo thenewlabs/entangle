@@ -782,12 +782,18 @@ function attachRawTerminal(session: HostSession, output: OutputHandler): void {
   const stdout = process.stdout;
 
   // No status bar and no debug tab here, so there's nowhere to surface captured
-  // logs — release the session's log sink so agent logs print to stdout as they
-  // did before this UI existed (the bar path keeps the sink for its debug tab).
-  session.dispose();
+  // logs — release the session's log sink (if it owns one) so agent logs print
+  // to stdout as they did before this UI existed (the bar path keeps the sink
+  // for its debug tab). NOT dispose(): a daemon-backed session's dispose ends
+  // its socket, which would kill the attach right here.
+  session.releaseLogSink?.();
 
   const initial = session.getReplay();
   if (initial.length > 0) { try { stdout.write(Buffer.from(initial)); } catch {} }
+  // A daemon-backed session delivers its post-attach replay (and any refreshed
+  // frames) asynchronously via onFrame — paint those too, so a raw reattach
+  // shows the window's current screen instead of starting blank.
+  session.onFrame((frame) => { try { stdout.write(Buffer.from(frame)); } catch {} });
 
   session.onHostData((chunk) => { try { stdout.write(chunk); } catch {} });
 

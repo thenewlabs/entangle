@@ -93,6 +93,13 @@ export interface HostSession {
   onExit(cb: (code: number | null, signal: string | null) => void): void;
   /** Tear down any owned resources (e.g. release the captured-log sink). */
   dispose(): void;
+  /**
+   * Release just the captured-log sink (if this session owns one) so agent logs
+   * print to stdout — a lighter cousin of {@link dispose} for UIs with no debug
+   * tab to feed. Unlike dispose it must NOT tear the session down (a daemon-
+   * backed session's dispose ends its socket).
+   */
+  releaseLogSink?(): void;
   /** Detach without ending the session (unused for now). */
   detach?(): void;
 }
@@ -185,5 +192,6 @@ export class LocalHostSession implements HostSession {
 
   // --- lifecycle -----------------------------------------------------------
   onExit(cb: (code: number | null, signal: string | null) => void): void { this.workspace.onExit(cb); }
-  dispose(): void { OutputHandler.setLogSink(null); }
+  releaseLogSink(): void { OutputHandler.setLogSink(null); }
+  dispose(): void { this.releaseLogSink(); }
 }
