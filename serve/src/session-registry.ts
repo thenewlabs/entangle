@@ -22,6 +22,10 @@ export interface SessionInfo {
   capId: string;
   url: string;
   createdAt: number;
+  /** What runs the session. Absent on entries written by older builds = 'entangle'. */
+  kind?: 'entangle' | 'locus';
+  /** The workspace directory a locus session serves. */
+  workspaceRoot?: string;
 }
 
 const REGISTRY_FILE = 'sessions.json';
@@ -94,7 +98,10 @@ function isSessionInfo(value: unknown): value is SessionInfo {
     typeof v.pid === 'number' &&
     typeof v.capId === 'string' &&
     typeof v.url === 'string' &&
-    typeof v.createdAt === 'number'
+    typeof v.createdAt === 'number' &&
+    // Optional additive fields (absent on entries from older builds).
+    (v.kind === undefined || v.kind === 'entangle' || v.kind === 'locus') &&
+    (v.workspaceRoot === undefined || typeof v.workspaceRoot === 'string')
   );
 }
 
@@ -143,6 +150,22 @@ export function removeSession(name: string): void {
 /** Find a registered session by name. */
 export function findSession(name: string): SessionInfo | undefined {
   return listSessions().find((s) => s.name === name);
+}
+
+/**
+ * Poll the registry until the named session has a URL (the daemon re-registers
+ * with the link once the relay announces the capability). Resolves the URL, or
+ * '' if none appears within `timeoutMs` — callers treat that as "URL pending",
+ * not an error, since the daemon may still be connecting to its relay.
+ */
+export async function waitForSessionUrl(name: string, timeoutMs = 8000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const url = findSession(name)?.url;
+    if (url) return url;
+    if (Date.now() >= deadline) return '';
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 // --- liveness --------------------------------------------------------------

@@ -9,6 +9,13 @@
  *   entangle relay   [...]  -> @thenewlabs/entangle-relay   (blind relay server)
  *   entangle connect [...]  -> @thenewlabs/entangle-connect (invoke remote caps)
  *
+ * plus session-management aliases that forward to serve's subcommands, so the
+ * common session verbs sit at the top level:
+ *
+ *   entangle ls      [...]  -> entangle-serve ls      (list running sessions)
+ *   entangle attach  [...]  -> entangle-serve attach  (reattach a session)
+ *   entangle kill    [...]  -> entangle-serve kill    (kill a session)
+ *
  * Everything after the sub-command is forwarded to the target tool verbatim, so
  * each tool keeps its exact argument parsing. This matters most for `connect`,
  * which uses passthrough options — `entangle connect <url> ls -la` must reach it
@@ -23,8 +30,12 @@ import { fileURLToPath } from 'url';
 
 const require = createRequire(import.meta.url);
 
-/** Each sub-command maps to the package that implements it. */
-const SUBCOMMANDS: Record<string, { packages: string[]; summary: string }> = {
+/**
+ * Each sub-command maps to the package that implements it. `prefixArgs` are
+ * inserted before the user's own args — that is how the top-level session
+ * verbs alias serve's subcommands without re-parsing anything here.
+ */
+const SUBCOMMANDS: Record<string, { packages: string[]; prefixArgs?: string[]; summary: string }> = {
   serve: {
     packages: ['@thenewlabs/entangle-serve'],
     summary: 'Expose local CLI tools through a capability',
@@ -36,6 +47,21 @@ const SUBCOMMANDS: Record<string, { packages: string[]; summary: string }> = {
   connect: {
     packages: ['@thenewlabs/entangle-connect'],
     summary: 'Invoke commands or terminal sessions on a remote capability',
+  },
+  ls: {
+    packages: ['@thenewlabs/entangle-serve'],
+    prefixArgs: ['ls'],
+    summary: 'List running sessions (entangle + locus)',
+  },
+  attach: {
+    packages: ['@thenewlabs/entangle-serve'],
+    prefixArgs: ['attach'],
+    summary: 'Attach this terminal to a running session',
+  },
+  kill: {
+    packages: ['@thenewlabs/entangle-serve'],
+    prefixArgs: ['kill'],
+    summary: 'Kill a running session',
   },
 };
 
@@ -106,7 +132,7 @@ function main(): void {
     process.exit(1);
   }
 
-  const child = spawn(process.execPath, [entry, ...rest], { stdio: 'inherit' });
+  const child = spawn(process.execPath, [entry, ...(target.prefixArgs ?? []), ...rest], { stdio: 'inherit' });
 
   child.on('error', (err) => {
     console.error(`entangle: failed to start '${command}': ${err.message}`);

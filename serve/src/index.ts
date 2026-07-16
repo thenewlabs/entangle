@@ -2,7 +2,6 @@
 
 import * as net from 'net';
 import * as fs from 'fs';
-import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { Command } from 'commander';
 import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
@@ -12,7 +11,7 @@ import { promptHidden } from './prompt.js';
 import { SharedWorkspace } from './shared-workspace.js';
 import { LocalHostSession } from './host-session.js';
 import { attachHostTerminal } from './host-terminal.js';
-import { RemoteHostSession } from './remote-host-session.js';
+import { attachToSocket, connectSocket, pollSocket, spawnDetached } from './daemon-client.js';
 import {
   cleanupStale,
   defaultSessionName,
@@ -23,6 +22,7 @@ import {
   logPath,
   removeSession,
   socketPath,
+  waitForSessionUrl,
   type SessionInfo,
 } from './session-registry.js';
 
@@ -42,47 +42,6 @@ if (process.argv[2] === '__daemon') {
   runCli();
 }
 
-/** How long to wait for a freshly spawned daemon's socket to become connectable. */
-const SOCKET_POLL_INTERVAL_MS = 100;
-const SOCKET_POLL_TIMEOUT_MS = 8000;
-
-/** Resolve after `ms`. */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Connect to a unix socket, rejecting on connection error. */
-function connectSocket(path: string): Promise<net.Socket> {
-  return new Promise((resolve, reject) => {
-    const socket = net.connect(path);
-    const onError = (err: Error): void => reject(err);
-    socket.once('error', onError);
-    socket.once('connect', () => { socket.removeListener('error', onError); resolve(socket); });
-  });
-}
-
-/**
- * Poll a socket path until it accepts a connection, resolving the connected
- * socket. Rejects with a pointer to `logFile` if it never comes up in time. The
- * socket is left flowing-paused (no 'data' listener) so no daemon frames are
- * lost before the RemoteHostSession attaches its reader.
- */
-async function pollSocket(path: string, logFile: string): Promise<net.Socket> {
-  const deadline = Date.now() + SOCKET_POLL_TIMEOUT_MS;
-  for (;;) {
-    try {
-      return await connectSocket(path);
-    } catch {
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Session daemon did not come up within ${SOCKET_POLL_TIMEOUT_MS / 1000}s (socket ${path}); see log: ${logFile}`,
-        );
-      }
-      await delay(SOCKET_POLL_INTERVAL_MS);
-    }
-  }
-}
-
 /**
  * Spawn the detached daemon for `sessionName` (this same binary re-invoked with
  * the hidden `__daemon` arg) and poll its socket, resolving the connected socket
@@ -98,11 +57,10 @@ async function spawnDaemon(opts: {
   ensureRunDir();
   const sock = socketPath(sessionName);
   const logFile = logPath(sessionName);
-  const logFd = fs.openSync(logFile, 'a');
-  const entry = fileURLToPath(import.meta.url);
-  const child = spawn(process.execPath, [entry, '__daemon'], {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
+  spawnDetached({
+    entry: fileURLToPath(import.meta.url),
+    args: ['__daemon'],
+    logFile,
     env: {
       ...process.env,
       ENTANGLE_DAEMON_SESSION: sessionName,
@@ -112,23 +70,7 @@ async function spawnDaemon(opts: {
       ...(password ? { ENTANGLE_DAEMON_PASSWORD: password } : {}),
     },
   });
-  child.unref();
-  fs.closeSync(logFd); // the child holds its own fd
   return pollSocket(sock, logFile);
-}
-
-/**
- * Attach this terminal to a daemon over its (already connected) socket: wrap it
- * in a RemoteHostSession sized to the current terminal and hand it to the host
- * UI. host-terminal keeps the process alive and calls process.exit on the
- * session's exit/detach path.
- */
-function attachToSocket(socket: net.Socket, output: OutputHandler): void {
-  const session = new RemoteHostSession(socket, {
-    cols: process.stdout.columns || 80,
-    rows: process.stdout.rows || 24,
-  });
-  attachHostTerminal(session, output);
 }
 
 /** Reduce a session URL to a short, secret-free form (drops the `#S=` fragment). */
@@ -173,6 +115,7 @@ program
   .option('--shared', 'Serve one shared terminal that everyone with the URL attaches to (default when run in a terminal)')
   .option('--headless', 'Run headless: each connection gets its own shell instead of a shared terminal')
   .option('--session <name>', 'Name of the detachable session to start or reattach to (defaults to one derived from the capability)')
+  .option('-d, --detach', 'Start the session in the background and print its URL instead of attaching')
   .action(async (url: string | undefined, options) => {
     try {
       // Propagate output mode to all loggers in this process
@@ -212,12 +155,19 @@ program
         : options.shared === true ? true
         : isTty && outputMode === 'text';
 
+      if (options.detach === true && options.headless === true) {
+        output.error('--detach cannot be combined with --headless (a detached session is always shared)');
+        process.exit(1);
+      }
+
       // The interactive shared path (a real terminal serving one shared session
       // in text mode) is daemonized tmux-style: a detached daemon owns the
       // session + relay connection and this process is just a client that
       // attaches to it, so closing the terminal (or Ctrl-B d) leaves the session
-      // running. Every other path keeps today's in-foreground behavior below.
-      if (shared && isTty && outputMode === 'text') {
+      // running. `--detach` takes the same path but exits after starting the
+      // daemon instead of attaching. Every other path keeps today's
+      // in-foreground behavior below.
+      if (options.detach === true || (shared && isTty && outputMode === 'text')) {
         // The daemon must pin a concrete capability, so mint the ephemeral one
         // here (instead of letting startAgent mint it) when none was pinned.
         const cap: CapabilityInfo = pinnedCapability ?? await createCapability({ singleRun: false });
@@ -225,16 +175,32 @@ program
 
         cleanupStale();
         const existing = findSession(sessionName);
+        const live = existing && isAlive(existing) ? existing : undefined;
+
+        if (options.detach === true) {
+          if (live) {
+            output.info(`Session "${sessionName}" is already running; reattach with: entangle attach ${sessionName}`);
+            return;
+          }
+          const socket = await spawnDaemon({ sessionName, serverUrl, cap, ...(password ? { password } : {}) });
+          socket.end(); // liveness probe only — the daemon drops this viewport on close
+          const sessionUrl = await waitForSessionUrl(sessionName);
+          output.info(`Session "${sessionName}" started in the background.`);
+          if (sessionUrl) output.info(`  ${sessionUrl}`);
+          else output.info('  URL pending — run `entangle ls` once the relay connects.');
+          output.info(`Reattach with: entangle attach ${sessionName}`);
+          return;
+        }
 
         let socket: net.Socket;
-        if (existing && isAlive(existing)) {
+        if (live) {
           // Reattach to the live daemon. It may be serving a different
           // capability than the one we just resolved (e.g. a reused --session
           // name); attaching to the running one is the least surprising choice.
-          if (existing.capId !== cap.capId) {
+          if (live.capId !== cap.capId) {
             output.info(`A session named "${sessionName}" is already running with a different capability; attaching to it.`);
           }
-          socket = await connectSocket(existing.socket);
+          socket = await connectSocket(live.socket);
         } else {
           socket = await spawnDaemon({ sessionName, serverUrl, cap, ...(password ? { password } : {}) });
         }
@@ -326,7 +292,8 @@ program
       const alive = isAlive(s) ? `alive(${s.pid})` : 'dead';
       const created = new Date(s.createdAt).toISOString();
       const where = shortUrl(s.url) || s.capId;
-      output.text(`${s.name}\t${alive}\t${created}\t${where}`);
+      const kind = s.kind ?? 'entangle';
+      output.text(`${s.name}\t${kind}\t${alive}\t${created}\t${where}${s.workspaceRoot ? `\t${s.workspaceRoot}` : ''}`);
     }
   });
 
@@ -406,7 +373,10 @@ Examples:
   # Mint on the configured/default relay
   entangle serve
 
-  # List / attach / kill detachable sessions
+  # Start a session in the background (detached) and print its URL
+  entangle serve --detach
+
+  # List / attach / kill detachable sessions (also: entangle ls|attach|kill)
   entangle serve ls
   entangle serve attach <name>
   entangle serve kill <name>

@@ -15,6 +15,7 @@ import {
   findSession,
   isAlive,
   cleanupStale,
+  waitForSessionUrl,
   type SessionInfo,
 } from './session-registry.js';
 
@@ -132,6 +133,50 @@ describe('registry CRUD', () => {
     ensureRunDir();
     fs.writeFileSync(path.join(runDir, 'sessions.json'), '{ not json');
     expect(listSessions()).toEqual([]);
+  });
+});
+
+describe('additive schema (kind / workspaceRoot)', () => {
+  it('round-trips kind and workspaceRoot', () => {
+    addSession(makeInfo({ name: 'lo', kind: 'locus', workspaceRoot: '/w/space' }));
+    const got = findSession('lo');
+    expect(got?.kind).toBe('locus');
+    expect(got?.workspaceRoot).toBe('/w/space');
+  });
+
+  it('still lists legacy entries written without the new fields', () => {
+    ensureRunDir();
+    const legacy = makeInfo({ name: 'old' });
+    delete (legacy as Record<string, unknown>).kind;
+    delete (legacy as Record<string, unknown>).workspaceRoot;
+    fs.writeFileSync(path.join(runDir, 'sessions.json'), JSON.stringify([legacy]));
+    const got = findSession('old');
+    expect(got).toBeDefined();
+    expect(got?.kind).toBeUndefined();
+  });
+
+  it('filters entries with a bogus kind value', () => {
+    ensureRunDir();
+    const bogus = { ...makeInfo({ name: 'weird' }), kind: 'container' };
+    fs.writeFileSync(path.join(runDir, 'sessions.json'), JSON.stringify([bogus, makeInfo({ name: 'fine' })]));
+    expect(listSessions().map((s) => s.name)).toEqual(['fine']);
+  });
+});
+
+describe('waitForSessionUrl', () => {
+  it('resolves once the session gains a url', async () => {
+    addSession(makeInfo({ name: 'pending', url: '' }));
+    setTimeout(() => addSession(makeInfo({ name: 'pending', url: 'https://relay.test/cap/x#S=y' })), 150);
+    await expect(waitForSessionUrl('pending', 4000)).resolves.toBe('https://relay.test/cap/x#S=y');
+  });
+
+  it("resolves '' when no url appears in time", async () => {
+    addSession(makeInfo({ name: 'stuck', url: '' }));
+    await expect(waitForSessionUrl('stuck', 300)).resolves.toBe('');
+  });
+
+  it("resolves '' for a session that does not exist", async () => {
+    await expect(waitForSessionUrl('ghost', 300)).resolves.toBe('');
   });
 });
 
