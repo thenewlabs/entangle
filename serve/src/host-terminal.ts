@@ -801,7 +801,33 @@ function attachRawTerminal(session: HostSession, output: OutputHandler): void {
   if (stdin.isTTY) stdin.setRawMode(true);
   stdin.resume();
 
-  const onInput = (d: Buffer) => session.write(new Uint8Array(d));
+  // A daemon-backed session gets a detach key even without the bar: Ctrl-B d
+  // detaches (Ctrl-B Ctrl-B sends a literal Ctrl-B; any other command byte is
+  // swallowed, like the bar's prefix), otherwise a raw attach could only be
+  // left by killing the terminal. Interactive TTYs only — piped stdin stays
+  // pure byte-for-byte passthrough.
+  const canDetach = !!stdin.isTTY && typeof session.detach === 'function';
+  let pendingPrefix = false;
+  const onInput = (d: Buffer) => {
+    if (!canDetach) { session.write(new Uint8Array(d)); return; }
+    let start = 0;
+    for (let i = 0; i < d.length; i++) {
+      const byte = d[i]!;
+      if (pendingPrefix) {
+        pendingPrefix = false;
+        if (byte === PREFIX) session.write(new Uint8Array([PREFIX]));
+        else if (byte === 0x64 /* d */) { session.detach!(); return; }
+        start = i + 1;
+        continue;
+      }
+      if (byte === PREFIX) {
+        if (i > start) session.write(new Uint8Array(d.subarray(start, i)));
+        pendingPrefix = true;
+        start = i + 1;
+      }
+    }
+    if (d.length > start) session.write(new Uint8Array(d.subarray(start)));
+  };
   stdin.on('data', onInput);
 
   const onResize = () => session.resize(stdout.columns || 80, stdout.rows || 24);
