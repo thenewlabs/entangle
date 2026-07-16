@@ -52,7 +52,13 @@ export type ClientToDaemon =
    * copy-mode pager. The daemon replies with a `scrollback` frame.
    */
   | { t: 'scrollback' }
-  | { t: 'detach' };
+  | { t: 'detach' }
+  /**
+   * End the WHOLE session (daemon shutdown: workspace, registry entry, every
+   * attached client) — the in-band equivalent of `entangle kill`. The daemon
+   * answers with an `exit` broadcast before the sockets close.
+   */
+  | { t: 'kill' };
 
 /** Messages sent from the daemon to an attached terminal client. */
 export type DaemonToClient =

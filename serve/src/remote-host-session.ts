@@ -211,6 +211,15 @@ export class RemoteHostSession implements HostSession {
     this.fireExit(null, null);
   }
 
+  /**
+   * End the WHOLE session (host UI Ctrl-B q): ask the daemon to shut down. The
+   * daemon broadcasts `exit` and closes the sockets, which drives this client's
+   * normal exit path — so no local teardown here.
+   */
+  kill(): void {
+    this.send({ t: 'kill' });
+  }
+
   /** Tear down: end the socket (no exit fired — the caller is disposing us). */
   dispose(): void {
     this.closed = true;

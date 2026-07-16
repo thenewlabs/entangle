@@ -102,6 +102,12 @@ export interface HostSession {
   releaseLogSink?(): void;
   /** Detach without ending the session (unused for now). */
   detach?(): void;
+  /**
+   * End the WHOLE session — daemon shutdown, every client exits. Present only
+   * on daemon-backed sessions (the host UI's Ctrl-B q binding needs it; an
+   * in-process session ends by exiting its shells or Ctrl-C instead).
+   */
+  kill?(): void;
 }
 
 /**

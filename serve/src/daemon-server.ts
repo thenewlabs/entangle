@@ -188,6 +188,11 @@ export async function createDaemonServer(opts: DaemonServerOptions): Promise<Dae
         workspace.detachViewport(vpId);
         try { socket.end(); } catch { /* already ending */ }
         break;
+      case 'kill':
+        // End the whole session on a client's request (host UI Ctrl-B q): the
+        // exit broadcast inside shutdown() tells every attached client first.
+        shutdown(0);
+        break;
     }
   };
 

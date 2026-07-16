@@ -280,7 +280,7 @@ function attachBarTerminal(
     `Share this live session:`,
     `  ${BAR_FG}${link ?? 'connecting…'}${RESET}`,
     ``,
-    `Ctrl-B  [=scroll  d=detach  l=logs  c=new  n/p=win  1-9=select  x=close`,
+    `Ctrl-B  [=scroll  d=detach  l=logs  c=new  n/p=win  1-9=select  x=close  q=quit`,
   ];
 
   // Render the welcome/log view: a PINNED HEADER (brand, intro, share URL, key
@@ -591,7 +591,16 @@ function attachBarTerminal(
     const ch = String.fromCharCode(byte);
     // Detach fires the session's onExit path, which runs restore()+exit below;
     // don't force an exit here that would race it.
-    if (ch === 'd') { session.detach?.(); return; }
+    if (ch === 'd') { detaching = true; session.detach?.(); return; }
+    // Quit = END the whole session (daemon shutdown), guarded by a y/N confirm
+    // on the bar row. Only offered for sessions that support it (daemon-backed):
+    // a persistent workspace respawns its shell on close, so without this there
+    // is no way out of the session from inside the terminal.
+    if (ch === 'q' && session.kill) {
+      pendingKill = true;
+      write(`\x1b7\x1b[${rows};1H\x1b[2K${BAR_BG}${BAR_FG} End this session for everyone? y = yes, any other key = cancel ${RESET}\x1b8`);
+      return;
+    }
     if (ch === 'l') { enterDebug(); return; }
     if (ch === '[') { enterScroll(); return; } // tmux-style: Ctrl-B [ = copy mode
     if (ch === 'c') { enterShell(); session.newWindow(); }
@@ -640,12 +649,25 @@ function attachBarTerminal(
   // other bytes forward to the active window, flushed around each prefix or mouse
   // boundary so ordering across a window switch is preserved.
   let pendingPrefix = false;
+  let pendingKill = false; // armed by Ctrl-B q; the next byte confirms or cancels
+  let detaching = false; // set by Ctrl-B d so the exit path can print a reattach hint
   const onInput = (d: Buffer) => {
     // In the pager, keystrokes drive scrolling and are never sent to the shell.
     if (viewMode === 'scroll') { handleScrollInput(d); return; }
     let start = 0;
     for (let i = 0; i < d.length; ) {
       const byte = d[i]!;
+      // Kill-confirm consumes exactly one byte and never forwards it: y ends the
+      // session (the daemon's exit broadcast runs the normal exit path below),
+      // anything else cancels and repaints the bar over the prompt.
+      if (pendingKill) {
+        pendingKill = false;
+        if (byte === 0x79 /* y */ || byte === 0x59 /* Y */) { session.kill!(); return; }
+        drawBar();
+        i++;
+        start = i;
+        continue;
+      }
       if (pendingPrefix) {
         pendingPrefix = false;
         if (byte === PREFIX) session.write(new Uint8Array([PREFIX]));
@@ -735,7 +757,15 @@ function attachBarTerminal(
   session.onExit((code) => {
     restore();
     write('\n');
-    output.info('Shared session ended.');
+    if (detaching) {
+      // Print the FULL session URL on the primary screen: the status bar
+      // truncates it to the terminal width, so this is the copyable source.
+      output.info('Detached — the session keeps running.');
+      const url = session.getUrl();
+      if (url) output.info(`View URL: ${url}`);
+    } else {
+      output.info('Shared session ended.');
+    }
     process.exit(code ?? 0);
   });
 

@@ -210,6 +210,25 @@ describe('createDaemonServer', () => {
     expect(h.exitSpy).not.toHaveBeenCalled();
   });
 
+  it('a client kill message ends the WHOLE session (host UI Ctrl-B q)', async () => {
+    const h = await makeServer({ name: 'kill-session' });
+    const killer = await connectClient(h.sock);
+    const bystander = await connectClient(h.sock);
+    await waitFor(() => types(killer).includes('replay') && types(bystander).includes('replay'), {
+      message: 'clients not attached',
+    });
+
+    killer.send({ t: 'kill' });
+    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'kill did not shut the daemon down' });
+
+    // Every attached client (not just the sender) got the exit broadcast, and
+    // the session is deregistered.
+    expect(types(killer)).toContain('exit');
+    expect(types(bystander)).toContain('exit');
+    expect(h.exitSpy).toHaveBeenCalledWith(0);
+    expect(findSession('kill-session')).toBeUndefined();
+  });
+
   it('shutdown broadcasts exit, runs beforeExit before exit(0), deregisters and unlinks', async () => {
     const events: string[] = [];
     const h = await makeServer({
