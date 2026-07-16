@@ -61,6 +61,27 @@ export function sanitizeName(name: string): string {
   return safe.length > 0 && safe !== '.' && safe !== '..' ? safe : 'session';
 }
 
+/**
+ * Maximum usable byte length of a unix socket path: sun_path is 108 bytes on
+ * Linux and 104 on macOS/BSD, both including the trailing NUL. A longer path
+ * is silently TRUNCATED by bind/connect — the daemon ends up listening on a
+ * different file than the registry records, so liveness checks report dead
+ * sessions and reattach logic double-spawns. Fail closed at the conservative
+ * cross-platform bound instead.
+ */
+export const MAX_SOCKET_PATH_BYTES = 103;
+
+/** Throw a clear configuration error if `path` cannot be bound un-truncated. */
+export function assertSocketPathUsable(sockPath: string): void {
+  const bytes = Buffer.byteLength(sockPath);
+  if (bytes > MAX_SOCKET_PATH_BYTES) {
+    throw new Error(
+      `Unix socket path too long (${bytes} > ${MAX_SOCKET_PATH_BYTES} bytes): ${sockPath} — ` +
+      'set ENTANGLE_RUN_DIR to a shorter directory',
+    );
+  }
+}
+
 /** Absolute path of the unix socket for a session. */
 export function socketPath(name: string): string {
   return path.join(resolveRunDir(), `${sanitizeName(name)}.sock`);

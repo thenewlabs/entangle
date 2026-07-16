@@ -13,6 +13,7 @@ import { LocalHostSession } from './host-session.js';
 import { attachHostTerminal } from './host-terminal.js';
 import { attachToSocket, connectSocket, pollSocket, spawnDetached } from './daemon-client.js';
 import {
+  assertSocketPathUsable,
   cleanupStale,
   defaultSessionName,
   ensureRunDir,
@@ -56,6 +57,9 @@ async function spawnDaemon(opts: {
   const { sessionName, serverUrl, cap, password } = opts;
   ensureRunDir();
   const sock = socketPath(sessionName);
+  // Fail here, in the foreground, rather than letting the detached daemon die
+  // on the same check and time the socket poll out.
+  assertSocketPathUsable(sock);
   const logFile = logPath(sessionName);
   spawnDetached({
     entry: fileURLToPath(import.meta.url),

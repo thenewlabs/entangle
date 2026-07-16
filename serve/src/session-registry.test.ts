@@ -16,6 +16,8 @@ import {
   isAlive,
   cleanupStale,
   waitForSessionUrl,
+  assertSocketPathUsable,
+  MAX_SOCKET_PATH_BYTES,
   type SessionInfo,
 } from './session-registry.js';
 
@@ -99,6 +101,14 @@ describe('path helpers', () => {
     expect(defaultSessionName(cap)).toBe(defaultSessionName(cap));
     expect(defaultSessionName(cap)).toMatch(/^cap-[A-Za-z0-9]{1,10}$/);
     expect(defaultSessionName('a')).not.toBe(defaultSessionName('b'));
+  });
+
+  it('assertSocketPathUsable rejects paths bind() would truncate', () => {
+    expect(() => assertSocketPathUsable('/short/path.sock')).not.toThrow();
+    expect(() => assertSocketPathUsable('x'.repeat(MAX_SOCKET_PATH_BYTES))).not.toThrow();
+    expect(() => assertSocketPathUsable(`/${'x'.repeat(MAX_SOCKET_PATH_BYTES)}.sock`)).toThrow(/too long/);
+    // Byte length, not char count: multi-byte characters hit the limit sooner.
+    expect(() => assertSocketPathUsable('/ü'.repeat(40))).toThrow(/too long/);
   });
 });
 

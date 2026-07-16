@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import type { OutputHandler } from '@thenewlabs/entangle-utils';
 import type { SharedWorkspace } from './shared-workspace.js';
 import type { LocalHostSession } from './host-session.js';
-import { addSession, logPath, removeSession, type SessionInfo } from './session-registry.js';
+import { addSession, assertSocketPathUsable, logPath, removeSession, type SessionInfo } from './session-registry.js';
 import {
   createMessageReader,
   decodeChunk,
@@ -65,6 +65,9 @@ export interface DaemonServer {
  */
 export async function createDaemonServer(opts: DaemonServerOptions): Promise<DaemonServer> {
   const { name, socketPath: socketPathValue, workspace, session: localSession, output } = opts;
+  // Refuse a path bind() would silently truncate — a truncated socket looks
+  // dead to every liveness check that stats the full path.
+  assertSocketPathUsable(socketPathValue);
   const exit = opts.exit ?? ((code: number) => process.exit(code));
 
   const createdAt = Date.now();
