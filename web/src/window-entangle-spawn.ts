@@ -382,9 +382,21 @@ export class EntangleConnection {
               this.counters.incoming.validate(decrypted.ctr);
               const msg = decrypted.msg;
               if (msg && msg.kind === 'window-state') {
-                this.lastWindowState = msg as WindowStateBody;
+                const state = msg as WindowStateBody;
+                // PER-VIEWPORT routing: with multiple pty streams on one
+                // connection, a window-state carries the viewport's `sid` so it
+                // reaches the OWNING terminal handle's own subscribers. Missing
+                // sid (legacy single-viewport server) falls through to the global
+                // handlers below.
+                const sid = (state as { sid?: string }).sid;
+                if (sid) {
+                  const child = this.children.get(sid);
+                  if (child) child._onWindowState(state);
+                }
+                // Global handlers stay for back-compat (single-workspace tab bar).
+                this.lastWindowState = state;
                 for (const cb of this.windowStateHandlers) {
-                  try { cb(msg as WindowStateBody); } catch {}
+                  try { cb(state); } catch {}
                 }
               }
             } catch {
@@ -555,13 +567,23 @@ export class EntangleConnection {
 
       let openMsg: any;
     if (child._mode === 'pty') {
+      // Multi-workspace selection: a `workspaceKey` (Locus tab id) rides
+      // exec.argv[0] and the tab's directory rides exec.cwd, so the agent's
+      // workspace resolver can pick/lazily-create the right SharedWorkspace
+      // WITHOUT a protocol change. Both are optional: with neither, `exec` is
+      // omitted entirely and the agent uses its single default workspace
+      // (identical to the pre-multi-workspace wire).
+      const wk = child._workspaceKey;
+      const cwd = child._options.cwd;
+      const argv = wk !== undefined ? [wk] : [];
+      const needExec = wk !== undefined || cwd !== undefined;
       openMsg = {
         v: 1 as const,
         kind: 'open' as const,
         sid,
         mode: 'pty' as const,
         pty: { cols: child._ptyOptions!.cols, rows: child._ptyOptions!.rows },
-        ...(child._options.cwd ? { exec: { argv: [], cwd: child._options.cwd } } : {}),
+        ...(needExec ? { exec: { argv, ...(cwd ? { cwd } : {}) } } : {}),
       };
     } else if (child._mode === 'pipe') {
       openMsg = {
@@ -651,8 +673,17 @@ export class EntangleConnection {
     });
   }
 
-  spawnPty(options: { cols: number; rows: number; cwd?: string }): BrowserChildProcess {
-    return new BrowserChildProcess(this, '', [], options.cwd ? { cwd: options.cwd } : {}, 'pty', { cols: options.cols, rows: options.rows });
+  spawnPty(options: { cols: number; rows: number; cwd?: string; workspaceKey?: string }): BrowserChildProcess {
+    return new BrowserChildProcess(
+      this,
+      '',
+      [],
+      options.cwd ? { cwd: options.cwd } : {},
+      'pty',
+      { cols: options.cols, rows: options.rows },
+      undefined,
+      options.workspaceKey
+    );
   }
 
   _sendClose(sid: string): void {
@@ -679,14 +710,17 @@ export class EntangleConnection {
 
   // Send a client->server window operation on the WINDOW_CTL channel. Framed
   // like STREAM_* (stream AEAD + CBOR `{ ctr, msg }`) but on the SESSION GLOBAL
-  // counter (like AUTH_PW), since window ops are not stream-scoped.
-  async sendWindowOp(op: string, extra: Record<string, unknown> = {}): Promise<void> {
+  // counter (like AUTH_PW), since window ops are not stream-scoped. `sid` is the
+  // optional target pty-viewport: with multiple terminals on one connection the
+  // op must name which one it drives (additive protocol field). Omitted for the
+  // legacy global controls, where the agent applies it to its only viewport.
+  async sendWindowOp(op: string, extra: Record<string, unknown> = {}, sid?: string): Promise<void> {
     await this.ensureConnected();
     await this._enqueueSend(async () => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.keys || !this.authenticated) return;
       const plaintext = encode({
         ctr: this.counters.outgoing.next(),
-        msg: { v: 1 as const, kind: 'op' as const, op, ...extra },
+        msg: { v: 1 as const, kind: 'op' as const, op, ...extra, ...(sid !== undefined ? { sid } : {}) },
       });
       const aad = frameAad(FrameType.WINDOW_CTL, AeadDir.ClientToServer);
       const ct = await streamAeadEncrypt(this.keys.K_enc, plaintext, aad);
@@ -698,6 +732,11 @@ export class EntangleConnection {
 class BrowserChildProcess {
   private emitter = new Emitter();
   public _sid: string;
+  // Per-stream window-state subscribers. A pty terminal that belongs to its own
+  // workspace (multi-workspace) gets its OWN tab bar here, routed by sid, instead
+  // of the connection-global handler which mixes every workspace together.
+  private windowStateHandlers = new Set<(state: WindowStateBody) => void>();
+  private lastWindowState: WindowStateBody | null = null;
   constructor(
     private conn: EntangleConnection,
     public _command: string,
@@ -705,7 +744,11 @@ class BrowserChildProcess {
     public _options: SpawnOptions,
     public _mode: 'cmd' | 'pty' | 'pipe' = 'cmd',
     public _ptyOptions?: { cols: number; rows: number },
-    public _pipeName?: string
+    public _pipeName?: string,
+    // Multi-workspace selector (a Locus tab id) for pty streams; rides
+    // exec.argv[0] in the open message so the agent's resolver picks the
+    // workspace this terminal attaches to.
+    public _workspaceKey?: string
   ) {
     this._sid = crypto.getRandomValues(new Uint8Array(8)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '');
     // Initiate open asap
@@ -748,12 +791,47 @@ class BrowserChildProcess {
   close() {
     this.conn._sendClose(this._sid);
   }
+
+  // --- Per-stream shared-workspace controls (this terminal's own tab bar) -----
+  // These drive THIS pty viewport's window set on the agent, scoped by sending
+  // the stream's own sid on the WINDOW_CTL op. Inbound window-state for this sid
+  // is delivered to onWindowState subscribers, so each terminal handle manages
+  // its workspace independently of any other terminal on the same connection.
+
+  /**
+   * Subscribe to this terminal's window-state (tab bar) pushes. Immediately
+   * replays the last known state so a late subscriber isn't left blank. Returns
+   * an unsubscribe function.
+   */
+  onWindowState(cb: (state: WindowStateBody) => void): () => void {
+    this.windowStateHandlers.add(cb);
+    if (this.lastWindowState) { try { cb(this.lastWindowState); } catch {} }
+    return () => { this.windowStateHandlers.delete(cb); };
+  }
+  /** Create a new window and switch this terminal onto it. */
+  newWindow(): Promise<void> { return this.conn.sendWindowOp('new-window', {}, this._sid); }
+  /** Switch this terminal to its next window (wraps). */
+  nextWindow(): Promise<void> { return this.conn.sendWindowOp('next-window', {}, this._sid); }
+  /** Switch this terminal to its previous window (wraps). */
+  prevWindow(): Promise<void> { return this.conn.sendWindowOp('prev-window', {}, this._sid); }
+  /** Switch this terminal to window `index`. */
+  selectWindow(index: number): Promise<void> { return this.conn.sendWindowOp('select-window', { index }, this._sid); }
+  /** Close window `index` in this terminal's workspace. */
+  closeWindow(index: number): Promise<void> { return this.conn.sendWindowOp('close-window', { index }, this._sid); }
+  /** Rename window `index` in this terminal's workspace. */
+  renameWindow(index: number, title: string): Promise<void> { return this.conn.sendWindowOp('rename-window', { index, title }, this._sid); }
+
   // Internal events from connection
   _onOpened() { this.emitter.emit('opened'); }
   _onData(chunk: Uint8Array, channel: 'stdout' | 'stderr' = 'stdout') { this.emitter.emit('data', chunk, channel); }
   _onExit(code: number | null, signal: string | null) { this.emitter.emit('exit', code, signal); }
   _onError(message: string) { this.emitter.emit('error', message); }
   _onClosed() {}
+  /** Deliver a window-state push routed to this stream's sid. */
+  _onWindowState(state: WindowStateBody) {
+    this.lastWindowState = state;
+    for (const cb of this.windowStateHandlers) { try { cb(state); } catch {} }
+  }
 }
 
 /**
@@ -829,8 +907,13 @@ declare global {
   attached = true;
   const conn = new EntangleConnection(capId, S);
   entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
-  // Interactive PTY session (used by the terminal UI).
-  entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string }) => conn.spawnPty(options);
+  // Interactive PTY session (used by the terminal UI). `workspaceKey` selects
+  // which durable SharedWorkspace this terminal attaches to (multi-workspace):
+  // a single connection can host several, each keyed by a Locus tab id, with
+  // `cwd` as that workspace's directory. Omit the key for the single default
+  // workspace (back-compat). The returned handle exposes its OWN per-terminal
+  // window controls + onWindowState, scoped to this stream.
+  entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string; workspaceKey?: string }) => conn.spawnPty(options);
   // Forwarded channel: open a named agent-side pipe as a byte duplex.
   entangle.openPipe = (name: string) => conn.openPipe(name);
 

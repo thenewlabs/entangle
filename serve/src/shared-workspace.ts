@@ -30,6 +30,18 @@ const DEFAULT_SCROLLBACK_LINES = 1000;
 const DEFAULT_MAX_WINDOWS = 16;
 
 /**
+ * A respawned shell that lives at least this long is treated as a healthy
+ * session: its next exit respawns IMMEDIATELY (the streak resets). A shell that
+ * exits faster than this — an unusable cwd (deleted/renamed mid-session), a
+ * missing/misconfigured shell — is treated as a fast-fail and backed off, so a
+ * persistent workspace can never tight-loop respawns.
+ */
+const RESPAWN_HEALTHY_MS = 2000;
+/** Base / cap for the exponential backoff between fast-failing shell respawns. */
+const RESPAWN_BACKOFF_BASE_MS = 200;
+const RESPAWN_BACKOFF_CAP_MS = 30000;
+
+/**
  * Repaint bytes for a WINDOW SWITCH: leave any alt buffer (`\x1b[?1049l`), home,
  * clear the screen AND scrollback (`\x1b[2J\x1b[3J`), then the serialized frame.
  *
@@ -87,6 +99,14 @@ export class SharedWorkspace {
   /** Per-viewport active window index, keyed by sid. Defaults to 0 on attach. */
   private viewportActive = new Map<string, number>();
   private exited = false;
+  /** Set by {@link kill}; suppresses any pending/future persistent respawn. */
+  private killed = false;
+  /** Consecutive fast-fail respawns (reset once a shell survives RESPAWN_HEALTHY_MS). */
+  private respawnStreak = 0;
+  /** Wall-clock of the last persistent respawn ATTEMPT (to measure shell lifetime). */
+  private lastRespawnSpawnAt = 0;
+  /** Pending backoff timer for the next persistent respawn, if any. */
+  private respawnTimer?: ReturnType<typeof setTimeout>;
 
   private readonly cwd?: string;
   private readonly maxWindows: number;
@@ -202,6 +222,10 @@ export class SharedWorkspace {
 
   /** Kill every window (which drives the workspace to exit). */
   kill(): void {
+    // Mark killed FIRST so a window exit can't respawn a persistent shell out
+    // from under a teardown, and cancel any pending backoff respawn.
+    this.killed = true;
+    if (this.respawnTimer) { clearTimeout(this.respawnTimer); delete this.respawnTimer; }
     for (const w of this.windows) {
       try { w.kill(); } catch {}
     }
@@ -506,16 +530,53 @@ export class SharedWorkspace {
     return { active, repaint: false };
   }
 
-  private handleWindowExit(win: SharedSession, code: number | null, signal: string | null): void {
-    const idx = this.windows.indexOf(win);
-    if (idx === -1) return;
-    this.windows.splice(idx, 1);
+  /**
+   * Bring a fresh shell back after the last window of a PERSISTENT workspace
+   * exits — WITHOUT ever tight-looping.
+   *
+   * A normal exit (the shell ran a real session, then the user typed `exit`)
+   * respawns immediately, exactly as before. But a shell that CANNOT stay up —
+   * an unusable cwd (the tab's directory deleted/renamed mid-session), a
+   * missing/misconfigured shell — exits the instant it starts. The previous
+   * unconditional synchronous respawn turned that into an unbounded tight loop:
+   * respawn → instant exit → respawn …, which pegs a core, churns PTYs + headless
+   * emulators, floods logs and eventually exhausts fds/PIDs — taking the whole
+   * daemon (and every attached client, local TTY included) down, i.e. the
+   * "durable" workspace ENDS after a while. So consecutive fast failures are
+   * backed off exponentially (capped); a shell that survives
+   * {@link RESPAWN_HEALTHY_MS} resets the streak to the immediate path. The
+   * workspace itself never ends — it keeps trying to bring a shell back.
+   */
+  private respawnPersistentShell(): void {
+    if (this.killed) return;
 
-    // Last window gone. PERSISTENT workspaces respawn a fresh shell in place —
-    // there must always be a window to attach to (typing `exit` in the last
-    // Locus terminal yields a new prompt, it does not kill the workspace).
-    if (this.windows.length === 0 && this.persistent) {
-      const win = this.spawnWindow();
+    // Measure the just-exited shell's lifetime (from its spawn attempt). A
+    // healthy, long-lived session resets the streak so its exit respawns at once.
+    const lived = this.lastRespawnSpawnAt === 0 ? Infinity : Date.now() - this.lastRespawnSpawnAt;
+    if (lived >= RESPAWN_HEALTHY_MS) this.respawnStreak = 0;
+    const delay = this.respawnStreak === 0
+      ? 0
+      : Math.min(RESPAWN_BACKOFF_CAP_MS, RESPAWN_BACKOFF_BASE_MS * 2 ** (this.respawnStreak - 1));
+    this.respawnStreak++;
+
+    const spawn = (): void => {
+      delete this.respawnTimer;
+      if (this.killed || this.windows.length > 0) return;
+      this.lastRespawnSpawnAt = Date.now();
+      let win: SharedSession;
+      try {
+        win = this.spawnWindow();
+      } catch (err) {
+        // This runs inside a node-pty exit callback: a synchronous spawn failure
+        // must NOT escape (it would crash the daemon). Treat it as another fast
+        // failure and back off — never crash, never give up.
+        this.output.error(
+          'Persistent workspace: shell respawn failed',
+          err instanceof Error ? err.message : String(err),
+        );
+        this.respawnPersistentShell();
+        return;
+      }
       this.windows.push(win);
       this.hostActiveIndex = 0;
       for (const sid of this.viewportActive.keys()) this.viewportActive.set(sid, 0);
@@ -523,6 +584,31 @@ export class SharedWorkspace {
       for (const sid of this.viewports.keys()) this.repaintViewport(sid);
       this.broadcastWindowState();
       this.output.info('Persistent workspace: last window exited; respawned a fresh shell');
+    };
+
+    if (delay === 0) {
+      spawn();
+    } else {
+      this.output.warn(
+        `Persistent workspace: shell keeps exiting immediately; retrying in ${delay}ms (attempt ${this.respawnStreak})`,
+      );
+      this.respawnTimer = setTimeout(spawn, delay);
+      this.respawnTimer.unref?.();
+    }
+  }
+
+  private handleWindowExit(win: SharedSession, code: number | null, signal: string | null): void {
+    const idx = this.windows.indexOf(win);
+    if (idx === -1) return;
+    this.windows.splice(idx, 1);
+
+    // Last window gone. PERSISTENT workspaces respawn a fresh shell in place —
+    // there must always be a window to attach to (typing `exit` in the last
+    // Locus terminal yields a new prompt, it does not kill the workspace). The
+    // respawn is RATE-LIMITED (see respawnPersistentShell): a shell that cannot
+    // stay up must never tight-loop.
+    if (this.windows.length === 0 && this.persistent) {
+      this.respawnPersistentShell();
       return;
     }
 

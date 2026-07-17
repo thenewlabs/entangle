@@ -37,6 +37,24 @@ import type { SharedWorkspace } from './shared-workspace.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
+/**
+ * Resolves the {@link SharedWorkspace} a pty viewport binds to, from an optional
+ * workspace KEY and initial CWD carried in the pty STREAM_OPEN. Injected by the
+ * embedder (via `startAgent`) to enable MULTI-WORKSPACE hosting over a single
+ * capability/connection: each distinct key selects its own durable workspace,
+ * lazily created with `cwd` on first use.
+ *
+ * When `key` is undefined/absent the resolver MUST return the single default
+ * workspace — this is the back-compat path (one shared workspace, exactly the
+ * pre-multi-workspace behavior). `entangle serve`'s own CLI/daemon inject a
+ * constant resolver that ignores both arguments and always returns their one
+ * `SharedWorkspace`.
+ */
+export type WorkspaceResolver = (
+  key: string | undefined,
+  cwd: string | undefined
+) => SharedWorkspace;
+
 export interface MultiSession {
   socketId: string;
   ws: WebSocket;
@@ -55,13 +73,16 @@ export interface MultiSession {
   // state; passed to the StreamManager for `mode: 'pipe'` opens.
   pipeEndpoints?: Map<string, PipeEndpoint>;
   terminated?: boolean;
-  // Shared-workspace mode: a tmux-style set of windows that every client's
-  // viewport binds to. When set, a `pty` STREAM_OPEN binds a viewport to the
-  // workspace (multiplexing the active window) instead of spawning a fresh
-  // shell, `sharedViewers` tracks this session's viewport sids so their
-  // data/close route there, and WINDOW_CTL frames drive window operations.
-  sharedWorkspace?: SharedWorkspace | undefined;
-  sharedViewers?: Set<string>;
+  // Shared-workspace mode: when a resolver is set, a `pty` STREAM_OPEN binds a
+  // viewport to a SharedWorkspace (multiplexing the active window) instead of
+  // spawning a fresh shell. The resolver picks WHICH workspace from the key+cwd
+  // in the open message, so one connection can host several workspaces at once
+  // (multi-workspace); with no key it returns the single default workspace
+  // (back-compat). `viewerWorkspaces` maps each of this session's pty-viewport
+  // sids to the workspace it attached to, so data/resize/close/window-ops route
+  // to the correct workspace by sid.
+  getWorkspace?: WorkspaceResolver | undefined;
+  viewerWorkspaces?: Map<string, SharedWorkspace>;
 }
 
 // Tear down a single invoker session on a protocol/counter error WITHOUT
@@ -122,12 +143,20 @@ async function sendEncrypted(
 // during setup is buffered and flushed only after they are sent.
 async function handleSharedAttach(
   session: MultiSession,
-  _message: StreamOpenMessage
+  message: StreamOpenMessage
 ): Promise<void> {
-  const workspace = session.sharedWorkspace!;
+  // Multi-workspace selection: the workspace KEY and initial CWD ride the pty
+  // open's `exec` field — argv[0] is the key (a Locus tab id), `cwd` the tab's
+  // directory. Absent/empty argv → key undefined → the resolver's default
+  // workspace (back-compat with clients that send no key). argv beyond [0] is
+  // ignored here: in shared mode it is never executed as a command.
+  const exec = message.msg?.exec;
+  const key = exec?.argv && exec.argv.length > 0 ? exec.argv[0] : undefined;
+  const cwd = exec?.cwd;
+  const workspace = session.getWorkspace!(key, cwd);
   const sid = randomBytes(8).toString('base64url');
-  if (!session.sharedViewers) session.sharedViewers = new Set<string>();
-  session.sharedViewers.add(sid);
+  if (!session.viewerWorkspaces) session.viewerWorkspaces = new Map<string, SharedWorkspace>();
+  session.viewerWorkspaces.set(sid, workspace);
 
   let live = false;
   const pending: Uint8Array[] = [];
@@ -139,10 +168,10 @@ async function handleSharedAttach(
       void sendStreamData(session, sid, chunk, 'stdout');
     },
     onExit: (code, signal) => {
-      session.sharedViewers?.delete(sid);
+      session.viewerWorkspaces?.delete(sid);
       void sendStreamExit(session, sid, code, signal);
     },
-    onWindowState: (state) => { void sendWindowState(session, state); },
+    onWindowState: (state) => { void sendWindowState(session, sid, state); },
   });
 
   // Confirm the open with the agent-assigned sid (first frame for this sid).
@@ -165,15 +194,17 @@ async function handleSharedAttach(
 
   // Populate the client's tab bar with THIS viewport's own window state (its
   // active index), not the host's global view.
-  await sendWindowState(session, workspace.windowStateForViewport(sid));
+  await sendWindowState(session, sid, workspace.windowStateForViewport(sid));
 }
 
-// This viewer's pty viewport sid — the key its per-viewport window ops apply to.
-// A session's `sharedViewers` holds only pty-viewport sids (they are added only
-// in handleSharedAttach), so the first one is the pty viewport.
-function ptyViewportSid(session: MultiSession): string | undefined {
-  if (!session.sharedViewers) return undefined;
-  for (const sid of session.sharedViewers) return sid;
+// Fallback viewport sid for a window op that carried no explicit `sid` (a legacy
+// single-viewport client). A session's `viewerWorkspaces` holds only pty-viewport
+// sids (added only in handleSharedAttach), so the first one is the pty viewport.
+// Multi-viewport clients always send an explicit sid, so this fallback only ever
+// fires for the single-viewport back-compat case.
+function firstViewerSid(session: MultiSession): string | undefined {
+  if (!session.viewerWorkspaces) return undefined;
+  for (const sid of session.viewerWorkspaces.keys()) return sid;
   return undefined;
 }
 
@@ -182,9 +213,10 @@ async function handleStreamOpen(
   session: MultiSession,
   message: StreamOpenMessage
 ): Promise<void> {
-  // In shared-workspace mode a PTY open binds a viewport to the workspace; a
-  // 'cmd' open still spawns normally so one-off `connect <url> ls` keeps working.
-  if (session.sharedWorkspace && message.msg?.mode === 'pty') {
+  // In shared-workspace mode a PTY open binds a viewport to a workspace (the
+  // resolver picks which); a 'cmd' open still spawns normally so one-off
+  // `connect <url> ls` keeps working.
+  if (session.getWorkspace && message.msg?.mode === 'pty') {
     await handleSharedAttach(session, message);
     return;
   }
@@ -265,9 +297,11 @@ async function handleStreamData(
   session: MultiSession,
   message: StreamDataMessage
 ): Promise<void> {
-  // Collaborative input: a viewport's keystrokes merge into the ACTIVE window.
-  if (session.sharedViewers?.has(message.msg.sid)) {
-    session.sharedWorkspace?.writeFromViewport(message.msg.sid, message.msg.chunk);
+  // Collaborative input: a viewport's keystrokes merge into ITS workspace's
+  // active window.
+  const inputWs = session.viewerWorkspaces?.get(message.msg.sid);
+  if (inputWs) {
+    inputWs.writeFromViewport(message.msg.sid, message.msg.chunk);
     return;
   }
 
@@ -300,12 +334,12 @@ async function handleStreamResize(
   // TTY, e.g. Locus): there the browser viewport IS the terminal, so its resize
   // reshapes the whole workspace — otherwise every shell would stay at the
   // 80×24 construction default forever.
-  if (session.sharedViewers?.has(message.msg.sid)) {
-    const workspace = session.sharedWorkspace;
-    if (workspace?.viewerResizeAuthoritative) {
-      workspace.resize(message.msg.cols, message.msg.rows);
+  const resizeWs = session.viewerWorkspaces?.get(message.msg.sid);
+  if (resizeWs) {
+    if (resizeWs.viewerResizeAuthoritative) {
+      resizeWs.resize(message.msg.cols, message.msg.rows);
     } else {
-      workspace?.repaintViewportScreen(message.msg.sid);
+      resizeWs.repaintViewportScreen(message.msg.sid);
     }
     return;
   }
@@ -334,7 +368,7 @@ async function handleStreamSignal(
   // In the shared shell, control chars (e.g. Ctrl-C) arrive as raw data and are
   // written through; explicit signal frames from a viewer are ignored so one
   // participant can't kill the shell out from under the others.
-  if (session.sharedViewers?.has(message.msg.sid)) return;
+  if (session.viewerWorkspaces?.has(message.msg.sid)) return;
 
   if (!session.streamManager) {
     await sendStreamError(session, message.msg.sid, 'No active streams');
@@ -353,11 +387,12 @@ async function handleStreamClose(
   session: MultiSession,
   message: StreamCloseMessage
 ): Promise<void> {
-  // A viewport leaving the shared workspace just detaches — the windows keep
-  // running for everyone else.
-  if (session.sharedViewers?.has(message.msg.sid)) {
-    session.sharedViewers.delete(message.msg.sid);
-    session.sharedWorkspace?.detachViewport(message.msg.sid);
+  // A viewport leaving its workspace just detaches — the windows keep running
+  // for everyone else.
+  const closeWs = session.viewerWorkspaces?.get(message.msg.sid);
+  if (closeWs) {
+    session.viewerWorkspaces!.delete(message.msg.sid);
+    closeWs.detachViewport(message.msg.sid);
     const closedMsg: StreamClosedMessage = {
       ctr: 0,
       msg: { v: 1, kind: 'closed', sid: message.msg.sid },
@@ -453,39 +488,47 @@ async function sendStreamError(
   await sendEncrypted(session, FrameType.STREAM_ERROR, msg, sid);
 }
 
-// Send a window-state broadcast to this client's viewport(s). WINDOW_CTL frames
-// are not stream-scoped, so they ride the session GLOBAL counter (the same
-// sequence AUTH_PW / ERROR use), not a per-stream counter.
+// Send a window-state push for a specific viewport. WINDOW_CTL frames are not
+// stream-scoped, so they ride the session GLOBAL counter (the same sequence
+// AUTH_PW / ERROR use), not a per-stream counter. The viewport's pty `sid` is
+// carried IN the message body (additive optional field) so a multi-viewport
+// client can route the state to the owning stream handle; single-viewport
+// clients ignore it.
 async function sendWindowState(
   session: MultiSession,
+  sid: string,
   state: WindowStateBody
 ): Promise<void> {
   const msg = {
     ctr: session.counters.outgoing.next(),
-    msg: state,
+    msg: { ...state, sid },
   };
   await sendEncrypted(session, FrameType.WINDOW_CTL, msg);
 }
 
-// Handle a client->server window operation (WINDOW_CTL). Window ops drive THIS
-// viewer's OWN active window (keyed by its pty-viewport sid), so viewers can sit
-// on different windows independently; the workspace pushes each affected
-// viewport its own window-state and repaints. Rename mutates the shared window
-// list, so it stays global and re-broadcasts to everyone.
+// Handle a client->server window operation (WINDOW_CTL). Window ops drive the
+// active window of the TARGET viewport, so viewers/tabs can sit on different
+// windows independently; the workspace pushes each affected viewport its own
+// window-state and repaints. The op names its viewport via `op.sid` (additive
+// field): with several pty viewports on one connection, "the first viewport" is
+// no longer a valid assumption. A legacy op without a sid falls back to the
+// session's first/only viewport. The workspace is resolved BY that sid, so an op
+// always lands on the workspace the viewport is actually attached to.
 async function handleWindowCtl(
   session: MultiSession,
   message: WindowCtlOpMessage
 ): Promise<void> {
-  const workspace = session.sharedWorkspace;
-  if (!workspace) return;
-  const sid = ptyViewportSid(session);
   const op = message.msg;
+  const sid = op.sid ?? firstViewerSid(session);
+  if (!sid) return;
+  const workspace = session.viewerWorkspaces?.get(sid);
+  if (!workspace) return;
   switch (op.op) {
-    case 'new-window': if (sid) workspace.newWindowForViewport(sid); break;
-    case 'next-window': if (sid) workspace.nextWindowForViewport(sid); break;
-    case 'prev-window': if (sid) workspace.prevWindowForViewport(sid); break;
-    case 'select-window': if (sid) workspace.selectWindowForViewport(sid, op.index); break;
-    case 'close-window': if (sid) workspace.closeWindowFromViewport(sid, op.index); break;
+    case 'new-window': workspace.newWindowForViewport(sid); break;
+    case 'next-window': workspace.nextWindowForViewport(sid); break;
+    case 'prev-window': workspace.prevWindowForViewport(sid); break;
+    case 'select-window': workspace.selectWindowForViewport(sid, op.index); break;
+    case 'close-window': workspace.closeWindowFromViewport(sid, op.index); break;
     case 'rename-window': workspace.renameWindow(op.index, op.title); break;
   }
 }
@@ -521,8 +564,17 @@ export async function handleMultiStreamFrame(
       return;
     }
 
-    // For stream messages, verify per-stream counter
-    if (message.msg && typeof message.msg.sid === 'string') {
+    // WINDOW_CTL and KEEPALIVE ride the SESSION GLOBAL counter, never a
+    // per-stream one — even though a WINDOW_CTL op now carries a `sid` (the
+    // target VIEWPORT for attribution, not a stream-counter selector). Keying the
+    // counter off `msg.sid` here would route these onto a per-stream sequence the
+    // client never uses and trip the replay defense. Only genuine STREAM_* frames
+    // (which carry the stream's own sid) use the per-stream counter.
+    const streamScoped =
+      frame.type !== FrameType.WINDOW_CTL &&
+      frame.type !== FrameType.KEEPALIVE &&
+      message.msg && typeof message.msg.sid === 'string';
+    if (streamScoped) {
       const sid = message.msg.sid;
       const expectedCounter = session.streamCounters.getNext(sid, 'incoming');
       if (message.ctr !== expectedCounter) {
@@ -531,7 +583,7 @@ export async function handleMultiStreamFrame(
       }
       session.streamCounters.increment(sid, 'incoming');
     } else {
-      // Non-stream messages use global counter
+      // Non-stream messages (incl. WINDOW_CTL / KEEPALIVE) use the global counter.
       try {
         session.counters.incoming.validate(message.ctr);
       } catch (err: any) {
@@ -631,12 +683,14 @@ export async function handleMultiStreamFrame(
 
 // Clean up session
 export function cleanupMultiSession(session: MultiSession): void {
-  // Detach this invoker's viewports from the workspace without killing windows.
-  if (session.sharedViewers && session.sharedWorkspace) {
-    for (const sid of session.sharedViewers) {
-      session.sharedWorkspace.detachViewport(sid);
+  // Detach this invoker's viewports from their workspaces without killing
+  // windows. Each viewport may belong to a DIFFERENT workspace (multi-workspace),
+  // so detach each on the workspace it actually attached to.
+  if (session.viewerWorkspaces) {
+    for (const [sid, ws] of session.viewerWorkspaces) {
+      try { ws.detachViewport(sid); } catch { /* best effort */ }
     }
-    session.sharedViewers.clear();
+    session.viewerWorkspaces.clear();
   }
   if (session.streamManager) {
     session.streamManager.closeAllStreams('Session cleanup');

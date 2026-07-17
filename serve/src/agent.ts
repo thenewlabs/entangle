@@ -5,6 +5,7 @@ import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { createCapability, type CapabilityInfo } from './capability.js';
 import type { SharedWorkspace } from './shared-workspace.js';
+import type { WorkspaceResolver } from './multi-session.js';
 
 interface AgentOptions {
   serverUrl: string;
@@ -14,9 +15,16 @@ interface AgentOptions {
   // Registered forwarded-channel endpoints (allow-list). Merged with any parsed
   // from the ENTANGLE_PIPES env; explicit entries here win on name collision.
   pipeEndpoints?: Map<string, PipeEndpoint>;
-  // When set, serve a shared workspace: every client's viewport binds to it (and
-  // sees the active window) instead of spawning its own shell.
+  // When set, serve a SINGLE shared workspace: every client's viewport binds to
+  // it (and sees the active window) instead of spawning its own shell. Shorthand
+  // for a constant `getWorkspace` resolver; ignored if `getWorkspace` is given.
   sharedWorkspace?: SharedWorkspace;
+  // When set, serve MULTIPLE shared workspaces over one capability: each pty
+  // viewport's workspace is resolved from the key+cwd in its open message. This
+  // is what lets an embedder (Locus) give each top-level tab its own durable
+  // terminals. Takes precedence over `sharedWorkspace`. With no key the resolver
+  // must return the single default workspace (back-compat).
+  getWorkspace?: WorkspaceResolver;
   // Called once the served capability's URL is known (used by the host UI to
   // show it). When provided, the verbose capability block is suppressed.
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
@@ -33,7 +41,9 @@ interface AgentState {
   passwordHash?: string;
   pinned?: boolean;
   pipeEndpoints: Map<string, PipeEndpoint>;
-  sharedWorkspace?: SharedWorkspace;
+  // The resolved workspace resolver (built from `getWorkspace`, or a constant
+  // wrapper around `sharedWorkspace`). Undefined when not serving a workspace.
+  getWorkspace?: WorkspaceResolver;
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
   /** Reconnect backoff attempt counter; reset to 0 on a successful registration. */
   reconnectAttempts?: number;
@@ -57,6 +67,13 @@ export async function startAgent(options: AgentOptions): Promise<void> {
   if (options.pipeEndpoints) {
     for (const [name, endpoint] of options.pipeEndpoints) pipeEndpoints.set(name, endpoint);
   }
+  // A multi-workspace resolver wins; otherwise a single sharedWorkspace is served
+  // via a constant resolver that ignores the key+cwd (back-compat). Either way
+  // the rest of the agent only ever sees `getWorkspace`.
+  const getWorkspace: WorkspaceResolver | undefined =
+    options.getWorkspace ??
+    (options.sharedWorkspace ? () => options.sharedWorkspace! : undefined);
+
   const state: AgentState = {
     capabilities: new Map(),
     serverUrl: options.serverUrl,
@@ -64,7 +81,7 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     pipeEndpoints,
     ...(options.outputMode && { outputMode: options.outputMode }),
     ...(options.password && { password: options.password }),
-    ...(options.sharedWorkspace && { sharedWorkspace: options.sharedWorkspace }),
+    ...(getWorkspace && { getWorkspace }),
     ...(options.onCapabilityReady && { onCapabilityReady: options.onCapabilityReady }),
   };
 
@@ -173,7 +190,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
 
         // Register synchronously (no await) so the session exists before this
         // invoker's AUTH1 arrives on the next relay message.
-        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.sharedWorkspace);
+        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.getWorkspace);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker

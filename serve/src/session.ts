@@ -29,7 +29,7 @@ import { encode, decode } from 'cborg';
 import { randomBytes } from 'crypto';
 import type { CapabilityInfo } from './capability.js';
 import type { SharedWorkspace } from './shared-workspace.js';
-import { handleMultiStreamFrame, cleanupMultiSession } from './multi-session.js';
+import { handleMultiStreamFrame, cleanupMultiSession, type WorkspaceResolver } from './multi-session.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -54,7 +54,10 @@ export interface Session {
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
   // Registered forwarded-channel endpoints (allow-list) for `mode: 'pipe'`.
   pipeEndpoints?: Map<string, PipeEndpoint>;
-  sharedWorkspace?: SharedWorkspace | undefined; // set when serving a shared workspace
+  // Set when serving shared workspace(s): resolves the workspace a pty viewport
+  // binds to from the key+cwd in its open message (multi-workspace); a constant
+  // resolver returning one workspace is the single-workspace back-compat path.
+  getWorkspace?: WorkspaceResolver | undefined;
 }
 
 // Helper to send wrapped relay responses
@@ -76,7 +79,7 @@ export function handleInvokerConnection(
   cap: CapabilityInfo,
   passwordHash?: string,
   pipeEndpoints?: Map<string, PipeEndpoint>,
-  sharedWorkspace?: SharedWorkspace
+  getWorkspace?: WorkspaceResolver
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -88,7 +91,7 @@ export function handleInvokerConnection(
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
     ...(pipeEndpoints && { pipeEndpoints }),
-    sharedWorkspace,
+    getWorkspace,
   };
 
   const reader = new FrameReader();
@@ -157,8 +160,8 @@ async function handleFrame(
         requiresPassword: session.requiresPassword,
         passwordVerified: session.passwordVerified,
         ...(session.pipeEndpoints && { pipeEndpoints: session.pipeEndpoints }),
-        sharedWorkspace: session.sharedWorkspace,
-        sharedViewers: new Set<string>(),
+        getWorkspace: session.getWorkspace,
+        viewerWorkspaces: new Map<string, SharedWorkspace>(),
       };
     }
     // Keep dynamic gating fields fresh (password may be verified after streams open attempts)

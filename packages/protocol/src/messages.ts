@@ -301,6 +301,22 @@ export type StreamErrorMessage = z.infer<typeof StreamErrorMessageSchema>;
 //       windows: [{ id: string, title: string }, ...],  // order == tab order
 //       activeIndex: number }                            // 0-based, index into `windows`
 //
+// ADDITIVE OPTIONAL FIELD — `sid` (viewport correlation, added for multi-workspace):
+//   A single connection may host MULTIPLE pty viewports at once (each STREAM_OPEN
+//   pty binds its own viewport, and — for embedders that inject a workspace
+//   RESOLVER — potentially its own SharedWorkspace, selected by a key ridden in
+//   the pty open's `exec.argv[0]`). Window ops and window-state must therefore be
+//   attributed to a specific viewport (its pty stream `sid`), not to "the one"
+//   viewport. Both the op and the window-state carry an OPTIONAL `sid`:
+//     - Client -> server op with `sid`: apply the op to THAT viewport's workspace.
+//       Omitted (legacy single-viewport clients): the server falls back to the
+//       session's first/only viewport, preserving today's behavior.
+//     - Server -> client window-state with `sid`: the viewport it pertains to, so
+//       a multi-viewport client can route it to the owning stream handle. Legacy
+//       clients ignore the extra field and use their single global handler.
+//   The field is optional on the wire, so old clients and old servers keep
+//   interoperating unchanged (no PROTOCOL bump).
+//
 // The server broadcasts `window-state` to every attached client on ANY change
 // (window created / closed / switched / renamed), and sends it once to a client
 // immediately after it attaches so its tab bar can populate. On an active-window
@@ -313,14 +329,21 @@ export const WindowInfoSchema = z.object({
   title: z.string(),
 });
 
-/** A client->server window operation (the `msg` body of a WINDOW_CTL frame). */
+/**
+ * A client->server window operation (the `msg` body of a WINDOW_CTL frame).
+ *
+ * `sid` is an OPTIONAL additive field: the pty-viewport stream id the op applies
+ * to. A connection can host several pty viewports at once (multi-workspace), so
+ * the op names its target viewport. Omitted by legacy single-viewport clients,
+ * in which case the server applies the op to its first/only viewport.
+ */
 export const WindowOpSchema = z.discriminatedUnion('op', [
-  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('new-window') }),
-  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('next-window') }),
-  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('prev-window') }),
-  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('select-window'), index: z.number().int().nonnegative() }),
-  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('close-window'), index: z.number().int().nonnegative() }),
-  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('rename-window'), index: z.number().int().nonnegative(), title: z.string().max(128) }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('new-window'), sid: z.string().optional() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('next-window'), sid: z.string().optional() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('prev-window'), sid: z.string().optional() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('select-window'), index: z.number().int().nonnegative(), sid: z.string().optional() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('close-window'), index: z.number().int().nonnegative(), sid: z.string().optional() }),
+  z.object({ v: z.literal(1), kind: z.literal('op'), op: z.literal('rename-window'), index: z.number().int().nonnegative(), title: z.string().max(128), sid: z.string().optional() }),
 ]);
 
 /** Client->server WINDOW_CTL envelope: a window operation. */
@@ -329,7 +352,13 @@ export const WindowCtlOpMessageSchema = z.object({
   msg: WindowOpSchema,
 });
 
-/** Server->client WINDOW_CTL envelope: the full window state (for tab bars). */
+/**
+ * Server->client WINDOW_CTL envelope: the full window state (for tab bars).
+ *
+ * `sid` is an OPTIONAL additive field: the pty-viewport this state pertains to,
+ * so a multi-viewport client can route it to the owning stream handle. Legacy
+ * clients ignore it and feed their single global tab bar.
+ */
 export const WindowStateMessageSchema = z.object({
   ctr: z.number(),
   msg: z.object({
@@ -337,6 +366,7 @@ export const WindowStateMessageSchema = z.object({
     kind: z.literal('window-state'),
     windows: z.array(WindowInfoSchema),
     activeIndex: z.number().int(),
+    sid: z.string().optional(),
   }),
 });
 

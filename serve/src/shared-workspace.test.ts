@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import type { WindowStateBody } from '@thenewlabs/entangle-protocol';
 import { SharedWorkspace, type Viewport } from './shared-workspace.js';
@@ -567,4 +570,69 @@ describe('SharedWorkspace — persistent mode (headless daemons, e.g. Locus)', (
     expect(ws.cols).toBe(133);
     expect(ws.rows).toBe(41);
   });
+
+  // Regression: a persistent workspace whose shell CANNOT stay up — here its cwd
+  // is deleted mid-session (a per-tab dir renamed/removed in a coding workbench)
+  // so every fresh bash exits the instant it starts — must NOT tight-loop its
+  // respawns. The old code respawned synchronously and unconditionally, spinning
+  // at PTY-fork speed: it pegged a core, churned PTYs + headless emulators, and
+  // eventually exhausted fds/PIDs, crashing the whole daemon and dropping every
+  // attached client ("Shared session ended") — i.e. the "durable" workspace ENDED
+  // after a while. It must instead back off, stay alive, and never fire onExit.
+  it('does NOT tight-loop respawns when the shell keeps exiting (unusable cwd); backs off and stays alive', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'entangle-cwd-'));
+
+    // A dedicated counting output so we can assert the respawn rate is bounded.
+    let respawns = 0;
+    let backoffs = 0;
+    const spyOut = new OutputHandler({ mode: parseOutputMode('text') });
+    const origInfo = spyOut.info.bind(spyOut);
+    const origWarn = spyOut.warn.bind(spyOut);
+    (spyOut as unknown as { info: OutputHandler['info'] }).info = (msg: string, data?: unknown) => {
+      if (typeof msg === 'string' && msg.includes('respawned a fresh shell')) respawns++;
+      return origInfo(msg, data as never);
+    };
+    (spyOut as unknown as { warn: OutputHandler['warn'] }).warn = (msg: string, data?: unknown) => {
+      if (typeof msg === 'string' && msg.includes('retrying in')) backoffs++;
+      return origWarn(msg, data as never);
+    };
+
+    const ws = new SharedWorkspace(spyOut, { cols: 80, rows: 24, cwd: dir, persistent: true });
+    live.push(ws);
+    let exited = false;
+    ws.onExit(() => { exited = true; });
+    const vp = makeViewport('v1');
+    ws.attachViewport(vp);
+
+    // Pull the cwd out from under the shell, then force the last window to exit:
+    // every respawn now spawns a bash whose cwd no longer exists -> instant exit.
+    rmSync(dir, { recursive: true, force: true });
+    ws.closeWindow(0);
+
+    // Let the fast-fail loop run for a bit. With backoff this is only a handful
+    // of attempts; the OLD unconditional loop managed dozens-to-hundreds here.
+    await delay(1500);
+
+    expect(backoffs).toBeGreaterThan(0);        // backoff actually engaged
+    expect(respawns).toBeLessThan(15);          // bounded — NOT a tight loop
+    expect(exited).toBe(false);                 // workspace never ended
+    expect(ws.hasExited).toBe(false);
+    expect(vp.exited).toBe(false);              // the viewport was never dropped
+
+    // Recovery: restore the cwd; the next (backed-off) respawn succeeds and the
+    // workspace is live and interactive again — it never gave up.
+    mkdirSync(dir, { recursive: true });
+    await waitFor(() => ws.windowState().windows.length === 1, {
+      timeout: 12000,
+      message: 'persistent workspace never recovered a live window after cwd was restored',
+    });
+    ws.writeFromViewport('v1', 'echo RECOVERED_OK\n');
+    await waitFor(() => vp.data.includes('RECOVERED_OK'), {
+      timeout: 12000,
+      message: 'recovered shell is not interactive',
+    });
+    expect(exited).toBe(false);
+
+    rmSync(dir, { recursive: true, force: true });
+  }, 30000);
 });
