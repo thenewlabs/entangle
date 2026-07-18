@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-connect",
-  "version": "2.11.1",
+  "version": "2.11.2",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -14,7 +14,7 @@
   "dependencies": {
     "@thenewlabs/entangle-crypto": "^2.11.0",
     "@thenewlabs/entangle-protocol": "^2.12.0",
-    "@thenewlabs/entangle-utils": "^2.11.2",
+    "@thenewlabs/entangle-utils": "^2.11.3",
     "cborg": "^4.5.8",
     "commander": "^15.0.0",
     "ws": "^8.21.0"

@@ -84,6 +84,29 @@ async function buildEntangleClient() {
   }
 }
 
+/**
+ * Product token -> version, read from each workspace's OWN package.json. This is what a bundled
+ * binary puts on its outbound User-Agent: the runtime `../package.json` lookup cannot survive
+ * bundling (see packages/utils/src/user-agent.ts), so the versions are resolved at build time
+ * while the workspace manifests — the single source of truth — are still on disk.
+ */
+function uaVersionMap(entangleRoot) {
+  const productDirs = {
+    'entangle-serve': 'serve',
+    'entangle-connect': 'connect',
+    'entangle-relay': 'relay',
+    entangle: '.',
+  };
+  const map = {};
+  for (const [product, dir] of Object.entries(productDirs)) {
+    const manifest = join(entangleRoot, dir, 'package.json');
+    if (!existsSync(manifest)) continue;
+    const { version } = JSON.parse(readFileSync(manifest, 'utf8'));
+    if (typeof version === 'string' && version) map[product] = version;
+  }
+  return map;
+}
+
 async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
   // The bundle is CJS (no import.meta.url), so utils' packageVersion() cannot find the
   // package's manifest at runtime — inject the version at build time instead. The single
@@ -93,6 +116,9 @@ async function buildFullyBundledExecutable({ name, entryPoint, outfile }) {
   ).version;
   const define = {
     ENTANGLE_BUILD_VERSION: JSON.stringify(pkgVersion),
+    // Per-product versions for the outbound User-Agent. Separate from the scalar above because
+    // a bundle can embed more than one product (locus does); see packages/utils/src/user-agent.ts.
+    ENTANGLE_BUILD_UA_VERSIONS: JSON.stringify(uaVersionMap(rootDir)),
     // Rewrite every `import.meta.url` to a CJS-safe equivalent AT BUILD TIME. The old
     // post-build regex on the emitted bundle missed minifier-renamed references, so the
     // .min.js variants crashed at module load (fileURLToPath(undefined)).

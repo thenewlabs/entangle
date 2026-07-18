@@ -4,4 +4,5 @@ export * from './validation.js';
 export * from './counters.js';
 export * from './stream-counters.js';
 export * from './version.js';
+export * from './user-agent.js';
 export * from './output.js';

@@ -21,7 +21,7 @@ import {
   AeadDir,
   type DerivedKeys,
 } from '@thenewlabs/entangle-crypto';
-import { BidirectionalCounters, StreamCounters } from '@thenewlabs/entangle-utils';
+import { BidirectionalCounters, StreamCounters, userAgentHeaders } from '@thenewlabs/entangle-utils';
 import { encode, decode } from 'cborg';
 
 export type SignalName = 'SIGINT' | 'SIGTERM' | 'SIGHUP' | 'SIGQUIT' | 'SIGKILL';
@@ -89,7 +89,10 @@ export class InvokeConnection {
     this.K_raw = await deriveKeyMaterial(this.S, saltCap);
     this.bootstrapKeys = deriveBootstrapKeys(this.K_raw);
 
-    this.ws = new WebSocket(wsUrl);
+    // Node's `ws` sends no User-Agent of its own. The browser client reaching the same /relay/
+    // route arrives with a real browser UA; without this the CLI invoker would be the one path
+    // that shows up as "-" in relay logs. Product+version only — the relay is blind.
+    this.ws = new WebSocket(wsUrl, { headers: userAgentHeaders('entangle-connect', import.meta.url) });
 
     await new Promise<void>((resolve, reject) => {
       const fail = (err: Error) => { try { this.ws.close(); } catch {} reject(err); };

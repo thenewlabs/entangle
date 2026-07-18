@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { randomBytes } from 'crypto';
-import { getConfig, OutputHandler, parseOutputMode, type PipeEndpoint } from '@thenewlabs/entangle-utils';
+import { getConfig, OutputHandler, parseOutputMode, userAgentHeaders, type PipeEndpoint } from '@thenewlabs/entangle-utils';
 import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { createCapability, type CapabilityInfo } from './capability.js';
@@ -128,7 +128,10 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
   
   state.output.info(`Connecting to server: ${wsUrl}`);
   
-  const ws = new WebSocket(wsUrl);
+  // Node's `ws` sends no User-Agent unless told to. Without it the relay (and anything in front
+  // of it) logs "-" for every registration, and because this connect is retried on a backoff
+  // loop that reads as UA-less bot polling — enough to get the source IP banned by CrowdSec.
+  const ws = new WebSocket(wsUrl, { headers: userAgentHeaders('entangle-serve', import.meta.url) });
   state.ws = ws;
 
   // Client-side ping watchdog: if the relay silently disappears (half-open, no
