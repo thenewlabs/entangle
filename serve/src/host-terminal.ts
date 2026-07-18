@@ -764,7 +764,11 @@ function attachBarTerminal(
       const url = session.getUrl();
       if (url) output.info(`View URL: ${url}`);
     } else {
-      output.info('Shared session ended.');
+      // Always say WHY when the daemon told us (SIGTERM from an unrelated
+      // script, Ctrl-B q elsewhere, …). A bare "Shared session ended." made a
+      // killed-from-outside session look like a crash; when no reason arrives,
+      // say that too — a dropped socket with no exit frame is its own signal.
+      output.info(endedMessage(session));
     }
     process.exit(code ?? 0);
   });
@@ -801,6 +805,25 @@ function attachBarTerminal(
   // Connecting screen until the relay hands us the capability URL.
   write('\x1b[2J\x1b[H');
   write(`${BAR_FG}⧉ entangle — connecting…${RESET}`);
+}
+
+/**
+ * The line the host prints when a session ends — always with a CAUSE.
+ *
+ * A durable workspace must only ever end on an explicit host-side action, so
+ * when one does end the operator needs to know which action it was. A
+ * daemon-backed session carries the daemon's own reason (`SIGTERM (terminated
+ * by another process)`, `ended by an attached terminal (Ctrl-B q)`, …); if the
+ * socket dropped with no exit frame at all, saying THAT is the diagnosis (the
+ * daemon died without shutting down cleanly). An in-process session has no
+ * daemon to ask, so it keeps the plain wording.
+ */
+function endedMessage(session: HostSession): string {
+  if (!session.exitReason) return 'Shared session ended.';
+  const reason = session.exitReason();
+  return reason
+    ? `Shared session ended — ${reason}`
+    : 'Shared session ended — the daemon connection dropped without an exit frame.';
 }
 
 /**
@@ -876,7 +899,7 @@ function attachRawTerminal(session: HostSession, output: OutputHandler): void {
 
   session.onExit((code) => {
     restore();
-    output.info(`Shared session ended (code=${code ?? 0}).`);
+    output.info(`${endedMessage(session)} (code=${code ?? 0})`);
     process.exit(code ?? 0);
   });
 

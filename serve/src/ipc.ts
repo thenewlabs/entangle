@@ -73,7 +73,15 @@ export type DaemonToClient =
   | { t: 'url'; url: string }
   /** Plain-text scrollback lines answering a client `scrollback` request. */
   | { t: 'scrollback'; lines: string[] }
-  | { t: 'exit'; code: number | null };
+  /**
+   * The session is ending. `reason` (additive, optional — absent on frames from
+   * older daemons) says WHY in human terms, e.g. `SIGTERM (terminated by
+   * another process)`. Without it every ending — a deliberate quit, a stray
+   * `pkill` from an unrelated script, a workspace that ran out of windows —
+   * looks identical to an attached terminal, which is what made a session that
+   * "just stopped" undiagnosable.
+   */
+  | { t: 'exit'; code: number | null; reason?: string };
 
 /** Any framed IPC message, in either direction. */
 export type IpcMessage = ClientToDaemon | DaemonToClient;

@@ -80,10 +80,29 @@ async function makeServer(opts?: {
   registry?: { capId: string; kind: 'entangle' | 'locus'; workspaceRoot?: string };
   beforeExit?: () => Promise<void> | void;
   events?: string[];
+  /** Persistent workspace (Locus's durable-terminal posture). */
+  persistent?: boolean;
+  /** Capture the daemon's own log lines (shutdown reason assertions). */
+  logs?: string[];
 }): Promise<Harness> {
   const name = opts?.name ?? 'test-session';
-  const workspace = new SharedWorkspace(output, { cols: 80, rows: 24 });
+  const workspace = new SharedWorkspace(output, {
+    cols: 80,
+    rows: 24,
+    ...(opts?.persistent ? { persistent: true } : {}),
+  });
   const session = new LocalHostSession(workspace, output);
+  // The shutdown reason is logged AFTER the captured-log sink is released (so it
+  // reaches the session's log file, not the in-memory ring), so capture it by
+  // spying on the OutputHandler the server itself logs through.
+  const serverOutput = new OutputHandler({ mode: parseOutputMode('text') });
+  if (opts?.logs) {
+    const origInfo = serverOutput.info.bind(serverOutput);
+    (serverOutput as unknown as { info: OutputHandler['info'] }).info = (msg: string, data?: unknown) => {
+      opts.logs!.push(String(msg));
+      return origInfo(msg, data as never);
+    };
+  }
   const exitSpy = vi.fn();
   const events: string[] = opts?.events ?? [];
   const sock = socketPath(name);
@@ -92,7 +111,7 @@ async function makeServer(opts?: {
     socketPath: sock,
     workspace,
     session,
-    output,
+    output: serverOutput,
     registry: opts?.registry ?? { capId: 'cap-test-123', kind: 'entangle' },
     installSignalHandlers: false,
     exit: (code) => { events.push(`exit(${code})`); exitSpy(code); },
@@ -253,5 +272,68 @@ describe('createDaemonServer', () => {
     h.server.shutdown(0);
     await delay(50);
     expect(h.exitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: a session that ends must always say WHY — in the session log
+  // and in every attached client's exit frame. A production Locus session was
+  // SIGTERM'd by an unrelated dev script; the log showed only viewports
+  // detaching and pipes closing, and the attached terminal printed a bare
+  // "Shared session ended.", so an externally-killed session was
+  // indistinguishable from a crash and took hours to trace.
+  it('records the shutdown REASON in the log and in every client exit frame', async () => {
+    const logs: string[] = [];
+    const h = await makeServer({ name: 'reason-test', logs });
+    const client = await connectClient(h.sock);
+    const bystander = await connectClient(h.sock);
+    await waitFor(() => types(client).includes('replay') && types(bystander).includes('replay'), {
+      message: 'clients not attached',
+    });
+
+    h.server.shutdown(0, 'SIGTERM (terminated by another process)');
+    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'exit hook not called' });
+
+    for (const c of [client, bystander]) {
+      const exit = c.messages.find((m): m is Extract<DaemonToClient, { t: 'exit' }> => m.t === 'exit');
+      expect(exit?.reason).toBe('SIGTERM (terminated by another process)');
+    }
+    expect(logs.some((l) => l.includes('Session shutting down: SIGTERM (terminated by another process)'))).toBe(true);
+  });
+
+  it('a client kill reports the Ctrl-B q reason (not a mystery shutdown)', async () => {
+    const logs: string[] = [];
+    const h = await makeServer({ name: 'kill-reason', logs });
+    const client = await connectClient(h.sock);
+    await waitFor(() => types(client).includes('replay'), { message: 'client not attached' });
+
+    client.send({ t: 'kill' });
+    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'kill did not shut the daemon down' });
+
+    const exit = client.messages.find((m): m is Extract<DaemonToClient, { t: 'exit' }> => m.t === 'exit');
+    expect(exit?.reason).toContain('Ctrl-B q');
+    expect(logs.some((l) => l.includes('Session shutting down: ended by an attached terminal'))).toBe(true);
+  });
+
+  // Regression: an idle DURABLE workspace with zero viewers must keep running
+  // indefinitely. Clients coming and going — including the last one leaving —
+  // must never end the session or exit the daemon.
+  it('the LAST client detaching never ends a persistent session', async () => {
+    const h = await makeServer({ name: 'idle-test', persistent: true });
+
+    for (let i = 0; i < 3; i++) {
+      const c = await connectClient(h.sock);
+      await waitFor(() => types(c).includes('replay'), { message: `no replay for client ${i}` });
+      c.socket.destroy(); // hard drop, as a browser/ssh disconnect would
+      await waitFor(() => h.workspace.viewerCount() === 0, { message: `viewport ${i} never detached` });
+      expect(h.exitSpy).not.toHaveBeenCalled();
+      expect(types(c)).not.toContain('exit');
+    }
+
+    // Still alive with nobody attached, and still serving new clients.
+    await delay(200);
+    expect(h.exitSpy).not.toHaveBeenCalled();
+    expect(h.workspace.hasExited).toBe(false);
+    expect(findSession('idle-test')).toBeDefined();
+    const late = await connectClient(h.sock);
+    await waitFor(() => types(late).includes('replay'), { message: 'daemon stopped serving clients' });
   });
 });

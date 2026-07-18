@@ -62,6 +62,8 @@ export class RemoteHostSession implements HostSession {
   private exited = false;
   private closed = false;
   private pendingExitCode: number | null = null;
+  /** Why the daemon said it was ending, from its `exit` frame (see exitReason). */
+  private reason: string | null = null;
 
   constructor(socket: Socket, initial: { cols: number; rows: number }) {
     this.socket = socket;
@@ -120,9 +122,10 @@ export class RemoteHostSession implements HostSession {
         this.scrollbackCb?.(m.lines);
         break;
       case 'exit':
-        // Record the clean exit code so a following socket 'close' reports it,
-        // then fire the exit path now.
+        // Record the clean exit code (and the daemon's stated reason) so a
+        // following socket 'close' reports it, then fire the exit path now.
         this.pendingExitCode = m.code;
+        if (m.reason) this.reason = m.reason;
         this.fireExit(m.code, null);
         break;
     }
@@ -198,6 +201,13 @@ export class RemoteHostSession implements HostSession {
 
   // --- lifecycle -----------------------------------------------------------
   onExit(cb: (code: number | null, signal: string | null) => void): void { this.exitCb = cb; }
+
+  /**
+   * Why the session ended, as stated by the daemon's `exit` frame — or null
+   * when the socket simply dropped without one (an older daemon, or a daemon
+   * that died without shutting down cleanly), which is itself diagnostic.
+   */
+  exitReason(): string | null { return this.reason; }
 
   /**
    * Detach without ending the daemon session: tell the daemon to drop this
