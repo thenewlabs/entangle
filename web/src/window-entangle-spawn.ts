@@ -236,10 +236,16 @@ export class EntangleConnection {
     try { this.ws?.close(); } catch {}
   }
 
+  /** Per-connection password. Each agent may have its own, so this cannot live on the window. */
+  private password: string | undefined;
+  setPassword(p: string | undefined): void { this.password = p; }
+
   private getPassword(): string | undefined {
     // The password is supplied interactively (the UI stores it here); it is
     // never read from the URL, so a second factor can't travel with S.
-    return (window as any).entangle?.password || undefined;
+    // Per-connection wins; the window-global is the legacy single-connection path, kept so
+    // `window.entangle.password = pw` (entangle's own SPA) still reaches the default connection.
+    return this.password || (window as any).entangle?.password || undefined;
   }
 
   // Resolve/reject the in-flight password verification and clear its state.
@@ -282,9 +288,16 @@ export class EntangleConnection {
   }
 
   private async _doConnect(): Promise<void> {
-    const saltCap = extractSaltFromCapId(this.capId);
-    this.K_raw = await deriveKeyMaterial(this.S, saltCap);
-    this.bootstrapKeys = deriveBootstrapKeys(this.K_raw);
+    // `K_raw` derives from (S, capId) only — both immutable for the lifetime of this connection —
+    // so it is stable across reconnects and must NOT be re-derived on each attempt: Argon2id at
+    // INTERACTIVE limits is a ~64 MiB, few-hundred-ms hash ON THE MAIN THREAD, and a flapping
+    // agent would pay it on every backoff tick. `_handleDisconnected` deliberately clears only the
+    // per-session `keys`, never this, so memoising here is safe.
+    if (!this.K_raw || !this.bootstrapKeys) {
+      const saltCap = extractSaltFromCapId(this.capId);
+      this.K_raw = await deriveKeyMaterial(this.S, saltCap);
+      this.bootstrapKeys = deriveBootstrapKeys(this.K_raw);
+    }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/relay/${this.capId}`;
@@ -751,8 +764,12 @@ class BrowserChildProcess {
     public _workspaceKey?: string
   ) {
     this._sid = crypto.getRandomValues(new Uint8Array(8)).reduce((s, b) => s + b.toString(16).padStart(2, '0'), '');
-    // Initiate open asap
-    this.conn._openChild(this);
+    // Initiate open asap. The rejection MUST be handled here: `_openChild` awaits
+    // `ensureConnected()`, which rejects whenever the handshake fails — so against an unreachable
+    // agent every spawn/openPipe would otherwise raise an unhandled rejection. Surfacing it as a
+    // stream 'error' is both the honest signal and what keeps one dead connection from taking the
+    // page down (Playwright's `pageerror` and some embedders treat unhandled rejections as fatal).
+    void this.conn._openChild(this).catch((e: any) => this._onError(e?.message || 'connect failed'));
     if (this._options.signal) {
       const onAbort = () => this.kill('SIGTERM');
       if (this._options.signal.aborted) onAbort();
@@ -942,7 +959,7 @@ declare global {
     commandLine: string,
     options: Omit<SpawnOptions, 'shell'> & { encoding?: 'utf-8' | null } = {}
   ) => {
-    return await entangle.exec('sh', ['-lc', commandLine], options);
+    return await execImpl('sh', ['-lc', commandLine], options);
   };
 
   // Helper: bind a default working directory
@@ -950,19 +967,25 @@ declare global {
     return {
       spawn: (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, { ...options, cwd }),
       exec: async (command: string, args: string[] = [], options: SpawnOptions & { encoding?: 'utf-8' | null } = {}) =>
-        await entangle.exec(command, args, { ...options, cwd }),
+        await execImpl(command, args, { ...options, cwd }),
       execCommand: async (commandLine: string, options: Omit<SpawnOptions, 'shell'> & { encoding?: 'utf-8' | null } = {}) =>
-        await entangle.exec('sh', ['-lc', commandLine], { ...options, cwd }),
+        await execImpl('sh', ['-lc', commandLine], { ...options, cwd }),
     };
   };
 
   // Awaitable convenience: run a command and resolve with output and exit
   // Note: stdout and stderr are merged in the current protocol.
-  entangle.exec = async (
+  //
+  // `execImpl` is a hoisted declaration bound to THIS connection's `conn`, and every helper above
+  // routes through it rather than through `entangle.exec`. Reading the method back off the window
+  // global would send the command to whichever connection happens to own the global — which is
+  // this one today, but silently the WRONG MACHINE once a second connection exists.
+  entangle.exec = execImpl;
+  async function execImpl(
     command: string,
     args: string[] = [],
     options: SpawnOptions & { encoding?: 'utf-8' | null } = {}
-  ): Promise<{ code: number | null; signal: string | null; stdout: Uint8Array; text?: string }> => {
+  ): Promise<{ code: number | null; signal: string | null; stdout: Uint8Array; text?: string }> {
     const child = conn.spawn(command, args, options);
     const chunks: Uint8Array[] = [];
     let done = false;
@@ -991,7 +1014,7 @@ declare global {
         }
       });
     });
-  };
+  }
   } // end attachWith
 })();
 
