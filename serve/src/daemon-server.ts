@@ -29,6 +29,12 @@ import {
  * LocalHostSession, starting the relay agent, and reporting the session URL
  * via {@link DaemonServer.setUrl} once the relay announces it.
  */
+/**
+ * Fallback text for a shutdown whose caller named no reason. Every in-tree
+ * caller names one; this only covers an embedder calling `shutdown(code)`.
+ */
+const REASON_UNSPECIFIED = 'requested by the host (no reason given)';
+
 export interface DaemonServerOptions {
   /** Session name — the registry key and the log/socket basename. */
   name: string;
@@ -54,8 +60,13 @@ export interface DaemonServerOptions {
 export interface DaemonServer {
   /** Record the session URL: pushes it to attached clients and the registry. */
   setUrl(url: string): void;
-  /** Tear the daemon down (idempotent): broadcast exit, deregister, exit(0). */
-  shutdown(code: number | null): void;
+  /**
+   * Tear the daemon down (idempotent): broadcast exit, deregister, exit(0).
+   *
+   * `reason` is recorded in the session log and forwarded to every attached
+   * client so a session that ends is never a mystery — see {@link ShutdownReason}.
+   */
+  shutdown(code: number | null, reason?: string): void;
 }
 
 /**
@@ -100,11 +111,20 @@ export async function createDaemonServer(opts: DaemonServerOptions): Promise<Dae
 
   let server: net.Server | undefined;
   let shuttingDown = false;
-  const shutdown = (code: number | null): void => {
+  const shutdown = (code: number | null, reason: string = REASON_UNSPECIFIED): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    broadcast({ t: 'exit', code });
+    // Tell attached clients WHY first (the `exit` frame carries the reason, so
+    // the host terminal can print it instead of a bare "Shared session ended").
+    broadcast({ t: 'exit', code, reason });
     try { localSession.dispose(); } catch { /* best-effort */ }
+    // THEN log it — dispose() released the captured-log sink, so this lands in
+    // the session's log FILE (the durable forensic record) rather than in the
+    // in-memory ring buffer nobody can read once the process is gone. A daemon
+    // signalled from outside (a stray `pkill` from an unrelated dev script is
+    // the real-world case) otherwise leaves a log indistinguishable from a
+    // crash: viewports detach, pipes close, process gone, nothing explaining it.
+    output.info(`Session shutting down: ${reason}`);
     try { workspace.kill(); } catch { /* best-effort */ }
     for (const socket of clients) { try { socket.end(); } catch { /* already gone */ } }
     clients.clear();
@@ -120,8 +140,11 @@ export async function createDaemonServer(opts: DaemonServerOptions): Promise<Dae
   };
 
   if (opts.installSignalHandlers !== false) {
-    process.on('SIGTERM', () => shutdown(0));
-    process.on('SIGINT', () => shutdown(0));
+    // A session must only ever end on an EXPLICIT host-side action, so name the
+    // signal (and that it came from outside this process) in the log and in
+    // every attached client's exit line.
+    process.on('SIGTERM', () => shutdown(0, 'SIGTERM (terminated by another process)'));
+    process.on('SIGINT', () => shutdown(0, 'SIGINT (interrupted)'));
   }
 
   // Subscribe ONCE to the SESSION-GLOBAL streams and fan each out to every
@@ -131,8 +154,10 @@ export async function createDaemonServer(opts: DaemonServerOptions): Promise<Dae
   localSession.onViewersChange((n) => broadcast({ t: 'viewers', n }));
   localSession.onLog((line) => broadcast({ t: 'log', line }));
   localSession.onUrl((url) => broadcast({ t: 'url', url }));
-  // Workspace ended (last window's shell exited) → tear the daemon down.
-  localSession.onExit((code) => shutdown(code));
+  // Workspace ended (last window's shell exited) → tear the daemon down. Note a
+  // PERSISTENT workspace never gets here: it respawns its shell instead, so a
+  // Locus session cannot end this way.
+  localSession.onExit((code) => shutdown(code, 'the workspace ended (last window exited)'));
 
   // --- inbound client handling ---------------------------------------------
 
@@ -191,7 +216,7 @@ export async function createDaemonServer(opts: DaemonServerOptions): Promise<Dae
       case 'kill':
         // End the whole session on a client's request (host UI Ctrl-B q): the
         // exit broadcast inside shutdown() tells every attached client first.
-        shutdown(0);
+        shutdown(0, 'ended by an attached terminal (Ctrl-B q)');
         break;
     }
   };

@@ -91,6 +91,13 @@ export interface HostSession {
   // --- lifecycle -----------------------------------------------------------
   /** Register the callback fired once when the session ends. */
   onExit(cb: (code: number | null, signal: string | null) => void): void;
+  /**
+   * Why the session ended, in human terms, once {@link onExit} has fired — or
+   * null when nothing said (an in-process session, or a socket that dropped
+   * without an exit frame). The host UI prints it, so "the whole thing just
+   * stopped" always comes with a cause.
+   */
+  exitReason?(): string | null;
   /** Tear down any owned resources (e.g. release the captured-log sink). */
   dispose(): void;
   /**
