@@ -240,12 +240,15 @@ export class EntangleConnection {
   private password: string | undefined;
   setPassword(p: string | undefined): void { this.password = p; }
 
-  private getPassword(): string | undefined {
+  getPassword(): string | undefined {
     // The password is supplied interactively (the UI stores it here); it is
     // never read from the URL, so a second factor can't travel with S.
-    // Per-connection wins; the window-global is the legacy single-connection path, kept so
-    // `window.entangle.password = pw` (entangle's own SPA) still reaches the default connection.
-    return this.password || (window as any).entangle?.password || undefined;
+    //
+    // Deliberately does NOT fall back to `window.entangle.password`: that property is an accessor
+    // onto the DEFAULT client, so reading it here would recurse forever on that connection. Writes
+    // to the window global still land on this field via that accessor's setter, and a value set
+    // before this script ran is captured by `attachDefault`.
+    return this.password || undefined;
   }
 
   // Resolve/reject the in-flight password verification and clear its state.
@@ -893,69 +896,175 @@ declare global {
   }
 }
 
+/**
+ * The methods every capability connection exposes. `window.entangle` re-exports the DEFAULT
+ * client's methods flat (the URL-derived capability), so single-capability pages are unaffected;
+ * `window.entangle.connect(capId, S)` returns one of these per additional capability.
+ */
+const FLAT_KEYS = [
+  'spawn', 'exec', 'execCommand', 'withCwd', 'openTerminal', 'openPipe',
+  'onStatus', 'onReconnected', 'connectionStatus', 'disconnect',
+  'newWindow', 'nextWindow', 'prevWindow', 'selectWindow', 'closeWindow', 'onWindowState',
+] as const;
+
 // Attach to window
 (() => {
   const entangle: any = window.entangle || (window.entangle = {});
-  let attached = false;
-  // Late capability injection: a host page can supply the capability when the URL carries
-  // none — e.g. Locus's preview bootstrap opened at the origin ROOT restores it from
-  // origin-scoped storage (the preview origin is derived from the capId, so storage there
-  // can never yield a foreign capability). One-shot: ignored once a connection exists. The
-  // client itself never persists the secret; where it comes from is the embedder's policy.
-  entangle.setCapability = (capId: string, S: string): boolean => {
-    if (typeof capId === 'string' && capId !== '' && typeof S === 'string' && S !== '') {
-      attachWith(capId, S);
-    }
-    return attached;
+  /** capId -> client. One connection per capability; `connect` is idempotent by capId. */
+  const clients = new Map<string, any>();
+  let defaultClient: any = null;
+  const clientsChangedHandlers = new Set<(capIds: string[]) => void>();
+  const anyStatusHandlers = new Set<(capId: string, status: string) => void>();
+
+  function notifyClientsChanged(): void {
+    const ids = [...clients.keys()];
+    for (const cb of clientsChangedHandlers) { try { cb(ids); } catch {} }
+  }
+
+  /**
+   * Open (or return the existing) client for a capability.
+   *
+   * Idempotent by capId, and deliberately does NOT check that a repeat call passes the same
+   * secret: the capId IS the Argon2 salt, so a mismatched secret could never authenticate anyway,
+   * and returning the live client beats tearing down its streams because a stale URL was re-pasted.
+   *
+   * Constructing a client is cheap — EntangleConnection dials lazily on first stream open — so a
+   * host list may be connected up front without paying N handshakes. Do not call methods on a
+   * client until you actually want that machine dialled.
+   */
+  entangle.connect = (capId: string, S: string): any => {
+    if (typeof capId !== 'string' || capId === '') throw new Error('connect: capId required');
+    if (typeof S !== 'string' || S === '') throw new Error('connect: secret required');
+    const existing = clients.get(capId);
+    if (existing) return existing;
+    const client = createClient(new EntangleConnection(capId, S), capId);
+    clients.set(capId, client);
+    notifyClientsChanged();
+    return client;
   };
+  entangle.getClient = (capId: string): any => clients.get(capId);
+  entangle.clients = (): any[] => [...clients.values()];
+  /** Close and forget a client. The default client is closed but kept, so the flat surface stays valid. */
+  entangle.disconnectClient = (capId: string): void => {
+    const client = clients.get(capId);
+    if (!client) return;
+    try { client.disconnect(); } catch {}
+    if (client !== defaultClient) { clients.delete(capId); notifyClientsChanged(); }
+  };
+  entangle.onClientsChanged = (cb: (capIds: string[]) => void): (() => void) => {
+    clientsChangedHandlers.add(cb);
+    try { cb([...clients.keys()]); } catch {}
+    return () => clientsChangedHandlers.delete(cb);
+  };
+  /** Status fan-out across every client, present and future — for a host-list UI. */
+  entangle.onAnyStatus = (cb: (capId: string, status: string) => void): (() => void) => {
+    anyStatusHandlers.add(cb);
+    for (const client of clients.values()) {
+      try { cb(client.capId, client.connectionStatus()); } catch {}
+    }
+    return () => anyStatusHandlers.delete(cb);
+  };
+  /** Capability probe for embedders: feature-detect on this, never on a version string. */
+  entangle.features = ['multi-connect', 'per-client-password'];
+
+  /**
+   * Late capability injection: a host page can supply the capability when the URL carries none —
+   * e.g. Locus's preview bootstrap opened at the origin ROOT restores it from origin-scoped
+   * storage (the preview origin is derived from the capId, so storage there can never yield a
+   * foreign capability). The client itself never persists the secret; where it comes from is the
+   * embedder's policy.
+   *
+   * Re-supplying the SAME capability is a no-op success, because the bootstrap can legitimately
+   * run twice (bfcache restore, re-entrant boot). A DIFFERENT capability is refused: live pipes
+   * and terminals are bound to the default client, so silently re-pointing it would strand them.
+   * Callers wanting a second capability want `connect()` instead. (This previously returned true
+   * in that case while ignoring the argument.)
+   */
+  entangle.setCapability = (capId: string, S: string): boolean => {
+    if (typeof capId !== 'string' || capId === '' || typeof S !== 'string' || S === '') return false;
+    if (defaultClient) return defaultClient.capId === capId;
+    attachDefault(capId, S);
+    return true;
+  };
+
   const cap = parseCapabilityFromUrl();
   if (!cap) {
-    // Lazy erroring stubs until (unless) a capability is injected via setCapability.
-    entangle.spawn = () => { throw new Error('Capability not found in URL'); };
-    entangle.exec = async () => { throw new Error('Capability not found in URL'); };
-    entangle.openPipe = () => { throw new Error('Capability not found in URL'); };
+    // Lazy erroring stubs until (unless) a capability is injected via setCapability. Cover the
+    // whole flat surface, so a capability-less page reports the real reason rather than
+    // "openTerminal is not a function".
+    for (const key of FLAT_KEYS) {
+      entangle[key] = () => { throw new Error('Capability not found in URL'); };
+    }
   } else {
-    attachWith(cap.capId, cap.S);
+    attachDefault(cap.capId, cap.S);
   }
   return;
 
-  function attachWith(capId: string, S: string): void {
-  if (attached) return;
-  attached = true;
-  const conn = new EntangleConnection(capId, S);
-  entangle.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
+  /**
+   * Promote a capability to the DEFAULT client and re-export its methods as the flat
+   * `window.entangle.*` surface, so every pre-multi-connect consumer keeps working verbatim.
+   */
+  function attachDefault(capId: string, S: string): void {
+    const client = entangle.connect(capId, S);
+    defaultClient = client;
+    for (const key of FLAT_KEYS) entangle[key] = client[key];
+    entangle.capId = capId;
+    // `window.entangle.password = pw` (entangle's own SPA) must reach the default CONNECTION now
+    // that each one carries its own. Capture any value set before this script ran.
+    const preset = Object.getOwnPropertyDescriptor(entangle, 'password')?.value;
+    Object.defineProperty(entangle, 'password', {
+      get: () => client.password,
+      set: (v: string | undefined) => { client.password = v; },
+      enumerable: true,
+      configurable: true,
+    });
+    if (preset !== undefined) client.password = preset;
+  }
+
+  function createClient(conn: EntangleConnection, capId: string): any {
+  const api: any = { capId };
+  conn.onStatus((s: string) => {
+    for (const cb of anyStatusHandlers) { try { cb(capId, s); } catch {} }
+  });
+  Object.defineProperty(api, 'password', {
+    get: () => conn.getPassword(),
+    set: (v: string | undefined) => conn.setPassword(v),
+    enumerable: true,
+    configurable: true,
+  });
+  api.spawn = (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, options);
   // Interactive PTY session (used by the terminal UI). `workspaceKey` selects
   // which durable SharedWorkspace this terminal attaches to (multi-workspace):
   // a single connection can host several, each keyed by a Locus tab id, with
   // `cwd` as that workspace's directory. Omit the key for the single default
   // workspace (back-compat). The returned handle exposes its OWN per-terminal
   // window controls + onWindowState, scoped to this stream.
-  entangle.openTerminal = (options: { cols: number; rows: number; cwd?: string; workspaceKey?: string }) => conn.spawnPty(options);
+  api.openTerminal = (options: { cols: number; rows: number; cwd?: string; workspaceKey?: string }) => conn.spawnPty(options);
   // Forwarded channel: open a named agent-side pipe as a byte duplex.
-  entangle.openPipe = (name: string) => conn.openPipe(name);
+  api.openPipe = (name: string) => conn.openPipe(name);
 
   // --- Connection resilience surface ---
   // The socket now auto-reconnects (exp backoff + jitter) with an app-level
   // heartbeat. Consumers observe transitions via onStatus and, crucially,
   // re-open their pipes / re-attach on onReconnected (streams don't survive a
   // reconnect — the session keys and stream ids are renegotiated).
-  entangle.onStatus = (cb: (s: string) => void) => conn.onStatus(cb);
-  entangle.onReconnected = (cb: () => void) => conn.onReconnected(cb);
-  entangle.connectionStatus = () => conn.getStatus();
-  entangle.disconnect = () => conn.close();
+  api.onStatus = (cb: (s: string) => void) => conn.onStatus(cb);
+  api.onReconnected = (cb: () => void) => conn.onReconnected(cb);
+  api.connectionStatus = () => conn.getStatus();
+  api.disconnect = () => conn.close();
 
   // Shared-workspace window controls (tmux-style tab bar). These drive the
   // server SharedWorkspace over the WINDOW_CTL channel; window-state broadcasts
   // flow back through onWindowState so every client's tab bar stays in sync.
-  entangle.newWindow = () => conn.sendWindowOp('new-window');
-  entangle.nextWindow = () => conn.sendWindowOp('next-window');
-  entangle.prevWindow = () => conn.sendWindowOp('prev-window');
-  entangle.selectWindow = (index: number) => conn.sendWindowOp('select-window', { index });
-  entangle.closeWindow = (index: number) => conn.sendWindowOp('close-window', { index });
-  entangle.onWindowState = (cb: (state: WindowStateBody) => void) => conn.onWindowState(cb);
+  api.newWindow = () => conn.sendWindowOp('new-window');
+  api.nextWindow = () => conn.sendWindowOp('next-window');
+  api.prevWindow = () => conn.sendWindowOp('prev-window');
+  api.selectWindow = (index: number) => conn.sendWindowOp('select-window', { index });
+  api.closeWindow = (index: number) => conn.sendWindowOp('close-window', { index });
+  api.onWindowState = (cb: (state: WindowStateBody) => void) => conn.onWindowState(cb);
 
   // Helper: execute a command line via shell and await completion
-  entangle.execCommand = async (
+  api.execCommand = async (
     commandLine: string,
     options: Omit<SpawnOptions, 'shell'> & { encoding?: 'utf-8' | null } = {}
   ) => {
@@ -963,7 +1072,7 @@ declare global {
   };
 
   // Helper: bind a default working directory
-  entangle.withCwd = (cwd: string) => {
+  api.withCwd = (cwd: string) => {
     return {
       spawn: (command: string, args: string[] = [], options: SpawnOptions = {}) => conn.spawn(command, args, { ...options, cwd }),
       exec: async (command: string, args: string[] = [], options: SpawnOptions & { encoding?: 'utf-8' | null } = {}) =>
@@ -977,10 +1086,10 @@ declare global {
   // Note: stdout and stderr are merged in the current protocol.
   //
   // `execImpl` is a hoisted declaration bound to THIS connection's `conn`, and every helper above
-  // routes through it rather than through `entangle.exec`. Reading the method back off the window
+  // routes through it rather than through `api.exec`. Reading the method back off the window
   // global would send the command to whichever connection happens to own the global — which is
   // this one today, but silently the WRONG MACHINE once a second connection exists.
-  entangle.exec = execImpl;
+  api.exec = execImpl;
   async function execImpl(
     command: string,
     args: string[] = [],
@@ -1015,7 +1124,8 @@ declare global {
       });
     });
   }
-  } // end attachWith
+  return api;
+  } // end createClient
 })();
 
 export {};

@@ -4,9 +4,16 @@ import { describe, it, expect, beforeAll } from 'vitest';
 // the stub must carry one BEFORE the dynamic import (same pattern as the session/watchdog suites).
 // A throwing WebSocket keeps every connect attempt fast and deterministic: `_doConnect` rejects,
 // which is exactly the "agent unreachable" path these tests care about.
+// capIds must be real: the first 16 bytes ARE the Argon2 salt, so `extractSaltFromCapId` rejects
+// anything that isn't 32 bytes of base64url and the connection never reaches the socket.
+const CAP_A = 'A'.repeat(43);
+const CAP_B = 'B'.repeat(43);
+const CAP_C = 'C'.repeat(43);
+const CAP_OTHER = 'D'.repeat(43);
+
 (globalThis as Record<string, unknown>)['window'] = Object.assign(Object.create(null), {
   location: {
-    pathname: '/cap/capA',
+    pathname: `/cap/${CAP_A}`,
     hash: '#S=secretA',
     origin: 'http://test',
     protocol: 'http:',
@@ -14,8 +21,15 @@ import { describe, it, expect, beforeAll } from 'vitest';
   },
   addEventListener: () => {},
 });
+/**
+ * Records the relay URL each dial attempt targets, then fails. The URL carries the capId, so
+ * `dialled` is a direct answer to "which connection did that call actually reach?" — a stronger
+ * proof of routing than asserting a spy went untouched.
+ */
+const dialled: string[] = [];
 class DeadSocket {
-  constructor() {
+  constructor(url: string) {
+    dialled.push(url);
     throw new Error('socket unavailable');
   }
 }
@@ -32,7 +46,7 @@ type Entangle = {
     exec: (...a: unknown[]) => Promise<unknown>;
     execCommand: (line: string, o?: unknown) => Promise<unknown>;
   };
-  password?: string;
+  password?: string | undefined;
 };
 const entangle = (globalThis as Record<string, unknown>)['window'] as unknown as { entangle: Entangle };
 
@@ -114,18 +128,147 @@ describe('per-connection state', () => {
     expect(conn.keys).toBeNull();
   });
 
-  it('prefers its own password over the window global', () => {
+  it('keeps its password to itself', () => {
+    // Each agent may carry its own second factor, so the password is per-connection and a value
+    // on the window must never bleed into an unrelated one. `window.entangle.password` is an
+    // accessor onto the DEFAULT client: writing it targets that client only.
     const conn = new EntangleConnection('cap', 'S') as unknown as TestConn;
-    entangle.entangle.password = 'from-window';
-    conn.setPassword('from-connection');
+    entangle.entangle.password = 'default-client-pw';
 
-    // getPassword is private; read it the way the suite reads other internals.
-    const read = (conn as unknown as { getPassword(): string | undefined }).getPassword();
-    expect(read).toBe('from-connection');
+    expect((conn as unknown as { getPassword(): string | undefined }).getPassword()).toBeUndefined();
 
-    conn.setPassword(undefined);
-    expect((conn as unknown as { getPassword(): string | undefined }).getPassword()).toBe('from-window');
-    delete entangle.entangle.password;
+    conn.setPassword('own-pw');
+    expect((conn as unknown as { getPassword(): string | undefined }).getPassword()).toBe('own-pw');
+    expect(entangle.entangle.password).toBe('default-client-pw');
+
+    // Assign, never `delete` — deleting would drop the accessor real embedders rely on.
+    entangle.entangle.password = undefined;
+  });
+});
+
+type Registry = {
+  connect(capId: string, S: string): any;
+  getClient(capId: string): any;
+  clients(): any[];
+  disconnectClient(capId: string): void;
+  onClientsChanged(cb: (ids: string[]) => void): () => void;
+  onAnyStatus(cb: (capId: string, s: string) => void): () => void;
+  setCapability(capId: string, S: string): boolean;
+  capId?: string;
+  features?: string[];
+};
+const registry = entangle.entangle as unknown as Registry;
+
+describe('multi-capability registry', () => {
+  it('exposes the URL capability as the default client', () => {
+    expect(registry.capId).toBe(CAP_A);
+    expect(registry.getClient(CAP_A)).toBeDefined();
+  });
+
+  it('re-exports the default client methods as the flat surface', () => {
+    // Every pre-multi-connect consumer calls window.entangle.openPipe(...) directly. Those must
+    // remain the DEFAULT client's methods, not stubs and not another capability's.
+    const def = registry.getClient(CAP_A);
+    for (const key of ['spawn', 'exec', 'openPipe', 'openTerminal', 'onStatus', 'disconnect']) {
+      expect((entangle.entangle as any)[key]).toBe(def[key]);
+    }
+  });
+
+  it('is idempotent by capId', () => {
+    const first = registry.connect(CAP_B, 'secretB');
+    const second = registry.connect(CAP_B, 'secretB');
+    expect(second).toBe(first);
+    // A re-pasted URL may carry a stale secret; returning the live client beats tearing down its
+    // streams, since a wrong secret could not authenticate against this capId anyway.
+    expect(registry.connect(CAP_B, 'a-different-secret')).toBe(first);
+  });
+
+  it('connect() on the URL capability returns the default client, not a second connection', () => {
+    expect(registry.connect(CAP_A, 'secretA')).toBe(registry.getClient(CAP_A));
+  });
+
+  it('keeps clients distinct per capability', () => {
+    const a = registry.getClient(CAP_A);
+    const b = registry.connect(CAP_B, 'secretB');
+    expect(a).not.toBe(b);
+    expect(a.capId).toBe(CAP_A);
+    expect(b.capId).toBe(CAP_B);
+  });
+
+  it('isolates passwords per client', () => {
+    const a = registry.getClient(CAP_A);
+    const b = registry.connect(CAP_B, 'secretB');
+    a.password = 'pw-a';
+    b.password = 'pw-b';
+    expect(a.password).toBe('pw-a');
+    expect(b.password).toBe('pw-b');
+    // The flat surface proxies the DEFAULT client's password.
+    expect((entangle.entangle as any).password).toBe('pw-a');
+    a.password = undefined;
+    b.password = undefined;
+  });
+
+  it('stamps status events with their capId', () => {
+    const seen: string[] = [];
+    const off = registry.onAnyStatus((capId) => seen.push(capId));
+    expect(seen).toContain(CAP_A);
+    off();
+  });
+
+  it('forgets a disconnected non-default client but keeps the default', () => {
+    registry.connect(CAP_C, 'secretC');
+    expect(registry.getClient(CAP_C)).toBeDefined();
+    registry.disconnectClient(CAP_C);
+    expect(registry.getClient(CAP_C)).toBeUndefined();
+
+    registry.disconnectClient(CAP_A);
+    // Closing the default must not delete it — the flat surface still points at its methods.
+    expect(registry.getClient(CAP_A)).toBeDefined();
+  });
+});
+
+describe('setCapability', () => {
+  it('accepts the capability it already has', () => {
+    expect(registry.setCapability(CAP_A, 'secretA')).toBe(true);
+  });
+
+  it('refuses to re-point the default to a different capability', () => {
+    // Live pipes and terminals are bound to the default client; silently swapping the capability
+    // underneath them would strand every one. Multi-host callers use connect() instead.
+    expect(registry.setCapability(CAP_OTHER, 'secretOther')).toBe(false);
+    expect(registry.capId).toBe(CAP_A);
+    expect(registry.getClient(CAP_OTHER)).toBeUndefined();
+  });
+
+  it('rejects malformed input', () => {
+    expect(registry.setCapability('', 'S')).toBe(false);
+    expect(registry.setCapability('cap', '')).toBe(false);
+  });
+});
+
+describe('a second client executes on its OWN connection', () => {
+  it('dials the capability it belongs to', async () => {
+    // The routing bug this guards is silent: helpers that read `exec` off the window global would
+    // run host B's command against host A's machine with no error anywhere. The dial log makes
+    // the destination explicit.
+    const b = registry.connect(CAP_B, 'secretB');
+    dialled.length = 0;
+
+    await b.execCommand('ls').catch(() => {});
+
+    expect(dialled.length).toBeGreaterThan(0);
+    expect(dialled.every((u) => u.includes(`/relay/${CAP_B}`))).toBe(true);
+    expect(dialled.some((u) => u.includes(`/relay/${CAP_A}`))).toBe(false);
+  });
+
+  it('routes withCwd helpers to its own connection too', async () => {
+    const b = registry.connect(CAP_B, 'secretB');
+    dialled.length = 0;
+
+    await b.withCwd('/tmp').execCommand('ls').catch(() => {});
+
+    expect(dialled.length).toBeGreaterThan(0);
+    expect(dialled.every((u) => u.includes(`/relay/${CAP_B}`))).toBe(true);
   });
 });
 
