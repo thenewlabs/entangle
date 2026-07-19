@@ -117,8 +117,17 @@ describe('window.entangle late capability injection', () => {
   it('setCapability attaches a real openPipe and is idempotent', () => {
     expect(api().setCapability('cap_x', 'secret_x')).toBe(true);
     // openPipe is no longer the throwing stub (it now builds a pipe against the connection).
-    expect(() => api().setCapability('cap_y', 'secret_y')).not.toThrow();
-    expect(api().setCapability('cap_y', 'secret_y')).toBe(true); // still attached, ignored
+    expect(() => api().openPipe('glass')).not.toThrow();
+    expect(api().setCapability('cap_x', 'secret_x')).toBe(true); // same capability: no-op success
+  });
+
+  it('refuses to re-point the default client at a different capability', () => {
+    // Previously this returned true while silently ignoring the argument. Live pipes and
+    // terminals are bound to the default client, so swapping its capability underneath them
+    // would strand every one — and a caller that wants a SECOND capability wants connect().
+    expect(api().setCapability('cap_y', 'secret_y')).toBe(false);
+    expect(api().capId).toBe('cap_x');
+    expect(api().getClient('cap_y')).toBeUndefined();
   });
 
   it('rejects empty capability arguments', () => {
