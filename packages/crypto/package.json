@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-crypto",
-  "version": "2.13.0",
+  "version": "2.13.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
-    "@thenewlabs/entangle-protocol": "^2.14.0",
+    "@thenewlabs/entangle-protocol": "^2.14.1",
     "cborg": "^4.5.8",
     "libsodium-wrappers-sumo": "^0.8.4"
   },
