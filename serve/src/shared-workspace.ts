@@ -42,17 +42,68 @@ const RESPAWN_BACKOFF_BASE_MS = 200;
 const RESPAWN_BACKOFF_CAP_MS = 30000;
 
 /**
- * Repaint bytes for a WINDOW SWITCH: leave any alt buffer (`\x1b[?1049l`), home,
- * clear the screen AND scrollback (`\x1b[2J\x1b[3J`), then the serialized frame.
+ * Restore every DECSET private mode {@link SerializeAddon} can emit back to its
+ * DEFAULT, so a serialized frame can be replayed into a clean slate.
+ *
+ * This exists because `SerializeAddon.serialize()` is ADDITIVE-ONLY: it emits
+ * the *enable* sequence for each non-default mode (`\x1b[?1000h` for mouse
+ * tracking, `\x1b[?2004h` for bracketed paste, …) and emits NOTHING for a mode
+ * that is off. A frame is therefore only correct when replayed into a terminal
+ * already at its defaults. Replay it over a consumer that is holding ANOTHER
+ * window's modes and those modes simply survive — nothing in the frame turns
+ * them back off.
+ *
+ * That leak is user-visible and confusing. A window running a mouse-aware app
+ * (vim `set mouse=a`, htop, less) turns mouse reporting on; switch to a plain
+ * shell window and the consumer stays in mouse-reporting mode, so:
+ *   • the wheel is sent to the PTY instead of scrolling the terminal's own
+ *     scrollback — "scrolling back doesn't work";
+ *   • drag-to-select is claimed as a mouse event, so copy/paste needs a shift
+ *     modifier to work at all;
+ *   • the shell echoes the reports it cannot interpret, painting raw sequence
+ *     tails like `0;29;8M` across the prompt.
+ * All three vanish once the switch starts from a known-default state, because
+ * the frame that follows re-enables whatever the TARGET window legitimately has
+ * on. This restores modes correctly — it does not blanket-disable them, so a
+ * genuinely mouse-aware target window keeps its reporting.
+ *
+ * Deliberately NOT reset: the mouse ENCODING modes (`?1005`/`?1006`/`?1015`).
+ * xterm's `modes` API does not expose the encoding, so `serialize()` cannot
+ * restore one — resetting it here would strip SGR from a live mouse app and
+ * leave it unable to report past column 95. Leaving the encoding latched is
+ * both safe and correct: an encoding only ever selects the FORM of reports that
+ * mouse TRACKING gates, and tracking is reset above.
+ */
+const MODE_RESET =
+  '\x1b[?1l' +    // application cursor keys → normal
+  '\x1b[?66l' +   // application keypad → numeric
+  '\x1b[?2004l' + // bracketed paste → off
+  '\x1b[4l' +     // insert → replace
+  '\x1b[?6l' +    // origin mode → off
+  '\x1b[?45l' +   // reverse wraparound → off
+  '\x1b[?1004l' + // focus reporting → off
+  '\x1b[?7h' +    // wraparound → on (the default)
+  '\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l'; // every mouse TRACKING mode → off
+
+/**
+ * Repaint bytes for a WINDOW SWITCH: leave any alt buffer (`\x1b[?1049l`),
+ * restore default private modes ({@link MODE_RESET}), home, clear the screen AND
+ * scrollback (`\x1b[2J\x1b[3J`), then the serialized frame.
  *
  * The `\x1b[3J` (erase scrollback) is retained here ONLY because it is paired
  * atomically with a serialize that REBUILDS the target window's own scrollback:
  * we wipe the consumer's history and immediately repopulate it with the window
  * we're switching to. That's why it no longer loses history the way the old raw
  * `CLEAR` + truncated-ring replay did — the frame carries the history with it.
+ *
+ * The mode reset is there for exactly the same reason, one layer up: the frame
+ * carries the target window's MODES with it too, but only the ones that are ON.
  */
 function switchPayload(frame: Uint8Array): Buffer {
-  return Buffer.concat([Buffer.from('\x1b[?1049l\x1b[H\x1b[2J\x1b[3J'), Buffer.from(frame)]);
+  return Buffer.concat([
+    Buffer.from(`\x1b[?1049l${MODE_RESET}\x1b[H\x1b[2J\x1b[3J`),
+    Buffer.from(frame),
+  ]);
 }
 
 /**
@@ -244,9 +295,16 @@ export class SharedWorkspace {
     this.viewportActive.set(v.sid, 0);
     this.output.info(`Viewport attached: ${v.sid} (${this.viewports.size} total)`);
     this.viewersChangedCb?.(this.viewports.size);
-    // No clear prefix: the client's terminal is fresh, so just the serialized
-    // frame (with a page of scrollback) syncs its screen and history.
-    return { replay: this.windows[0]?.snapshot({ scrollback: DEFAULT_SCROLLBACK_LINES }) ?? new Uint8Array(0) };
+    // No CLEAR prefix: the client's terminal is fresh, so just the serialized
+    // frame (with a page of scrollback) syncs its screen and history. It is
+    // still prefixed with a MODE_RESET, because "fresh" is the client's promise
+    // and not something we can verify — a client that re-attaches onto an
+    // existing terminal (rather than a newly constructed one) would otherwise
+    // inherit whatever modes the previous session left latched, and the
+    // additive frame could never turn them off. Resetting costs nothing on a
+    // genuinely fresh terminal.
+    const frame = this.windows[0]?.snapshot({ scrollback: DEFAULT_SCROLLBACK_LINES }) ?? new Uint8Array(0);
+    return { replay: new Uint8Array(Buffer.concat([Buffer.from(MODE_RESET), Buffer.from(frame)])) };
   }
 
   /** Detach a client viewport (disconnect / stream close). */

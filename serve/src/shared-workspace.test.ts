@@ -282,6 +282,107 @@ describe('SharedWorkspace (integration, real PTYs)', () => {
     expect(vp.data).not.toContain('\x1b[3J'); // ...but scrollback is preserved
   });
 
+  // Regression: SerializeAddon.serialize() is ADDITIVE-ONLY — it emits the
+  // ENABLE sequence for each non-default DECSET private mode and nothing at all
+  // for a mode that is off. Replaying a frame over a consumer still holding
+  // ANOTHER window's modes therefore left those modes latched forever: a window
+  // running a mouse-aware app (vim `set mouse=a`, htop) left mouse REPORTING on,
+  // so in the plain-shell window the user switched to, the wheel went to the PTY
+  // instead of the scrollback ("scrolling back doesn't work"), drag-to-select was
+  // swallowed ("copy/paste doesn't work") and the shell echoed raw report tails
+  // like `0;29;8M`. The switch payload must start from a known-default state.
+  it('a window switch resets the private modes serialize() can set', () => {
+    const ws = makeWorkspace();
+    const vp = makeViewport('v1');
+    ws.attachViewport(vp);
+
+    vp.data = '';
+    ws.repaintViewport('v1');
+
+    // Every mouse TRACKING mode is turned off before the frame is replayed.
+    for (const mode of ['\x1b[?9l', '\x1b[?1000l', '\x1b[?1002l', '\x1b[?1003l']) {
+      expect(vp.data).toContain(mode);
+    }
+    // ...as is every other mode the serialize addon is able to re-enable.
+    for (const mode of [
+      '\x1b[?1l',    // application cursor keys
+      '\x1b[?66l',   // application keypad
+      '\x1b[?2004l', // bracketed paste
+      '\x1b[4l',     // insert mode
+      '\x1b[?6l',    // origin mode
+      '\x1b[?45l',   // reverse wraparound
+      '\x1b[?1004l', // focus reporting
+      '\x1b[?7h',    // wraparound back ON (its default)
+    ]) {
+      expect(vp.data).toContain(mode);
+    }
+
+    // The mouse ENCODING is deliberately left alone: serialize() cannot restore
+    // it (xterm exposes no encoding in `modes`), so resetting it would strip SGR
+    // from a live mouse app instead of repairing anything.
+    expect(vp.data).not.toContain('\x1b[?1006l');
+    expect(vp.data).not.toContain('\x1b[?1005l');
+    expect(vp.data).not.toContain('\x1b[?1015l');
+
+    // The reset must land BEFORE the frame, or it would undo the modes the frame
+    // legitimately re-enables for the window being switched TO.
+    expect(vp.data.indexOf('\x1b[?1000l')).toBeLessThan(vp.data.indexOf(CLEAR_ERASE));
+  });
+
+  it('the attach replay also starts from default modes', () => {
+    const ws = makeWorkspace();
+    const vp = makeViewport('v1');
+    const { replay } = ws.attachViewport(vp);
+    const text = decode(replay);
+    expect(text).toContain('\x1b[?1000l');
+    expect(text).toContain('\x1b[?2004l');
+    // An attach syncs a fresh client terminal, so it must NOT erase anything.
+    expect(text).not.toContain('\x1b[3J');
+  });
+
+  // End-to-end proof against a real PTY: turn mouse reporting on in window 0,
+  // switch a viewport to a second (plain) window, and assert the bytes that
+  // reach the consumer leave it with tracking OFF.
+  it('mouse reporting enabled in one window does not leak into another', async () => {
+    const ws = makeWorkspace();
+    const vp = makeViewport('v1');
+    ws.attachViewport(vp);
+
+    ws.write("stty -echo; PS1=''\n");
+    // Window 0's app turns on mouse tracking + SGR encoding, as vim/htop would.
+    ws.write("printf '\\033[?1000h\\033[?1006h'\n");
+
+    // Poll the emulator's own frame rather than any echoed text: the mode is set
+    // once the headless terminal has PARSED the sequence, which is exactly the
+    // state the frame is built from.
+    await waitFor(() => decode(ws.snapshotForViewport('v1')).includes('\x1b[?1000h'), {
+      message: 'window 0 never entered mouse-tracking mode',
+    });
+
+    // A second window: a plain shell that never enabled anything.
+    ws.newWindowForViewport('v1');
+    await waitFor(() => ws.windowState().windows.length === 2, {
+      message: 'second window never appeared',
+    });
+
+    vp.data = '';
+    ws.repaintViewport('v1');
+    // Tracking is turned off and the plain window's frame does not turn it back
+    // on — so the consumer ends up with mouse reporting OFF.
+    expect(vp.data).toContain('\x1b[?1000l');
+    expect(vp.data).not.toContain('\x1b[?1000h');
+
+    // The other direction is the guarantee that this is a RESTORE and not a
+    // blanket disable: switching BACK onto the mouse-aware window must re-enable
+    // reporting, because that window's own frame carries the mode. The enable
+    // has to come after the reset or it would be cancelled by it.
+    ws.selectWindowForViewport('v1', 0);
+    vp.data = '';
+    ws.repaintViewport('v1');
+    expect(vp.data).toContain('\x1b[?1000h');
+    expect(vp.data.lastIndexOf('\x1b[?1000l')).toBeLessThan(vp.data.lastIndexOf('\x1b[?1000h'));
+  }, 15000);
+
   it('scrollbackLines(For)Viewport returns the active window buffer history', async () => {
     const ws = makeWorkspace();
     const vp = makeViewport('v1');
