@@ -398,7 +398,7 @@ async function handleStreamClose(
       msg: { v: 1, kind: 'closed', sid: message.msg.sid },
     };
     await sendEncrypted(session, FrameType.STREAM_CLOSE, closedMsg, message.msg.sid);
-    session.streamCounters.removeStream(message.msg.sid);
+    session.streamCounters.retire(message.msg.sid);
     return;
   }
 
@@ -419,8 +419,10 @@ async function handleStreamClose(
   };
 
   await sendEncrypted(session, FrameType.STREAM_CLOSE, closedMsg, message.msg.sid);
-  // Clean up stream counters
-  session.streamCounters.removeStream(message.msg.sid);
+  // Retire (not merely forget) the counters: frames the client already put on
+  // the wire for this sid may still arrive, and they must be dropped as late
+  // rather than misread as a new stream at counter 0.
+  session.streamCounters.retire(message.msg.sid);
 }
 
 // Send stream data to client
@@ -465,8 +467,10 @@ async function sendStreamExit(
   };
 
   await sendEncrypted(session, FrameType.STREAM_EXIT, msg, sid);
-  // Clean up stream counters after exit
-  session.streamCounters.removeStream(sid);
+  // Retire after exit. Exit is UNILATERAL — the process died or the pipe peer
+  // vanished — so the client is still mid-send on this sid. Those in-flight
+  // frames must land on a retired id (dropped) and not recreate a counter at 0.
+  session.streamCounters.retire(sid);
 }
 
 // Send stream error to client
@@ -486,6 +490,43 @@ async function sendStreamError(
   };
 
   await sendEncrypted(session, FrameType.STREAM_ERROR, msg, sid);
+}
+
+// Tear down ONE stream after a per-stream protocol fault, leaving the session
+// and every sibling stream running.
+//
+// Frames are independently AEAD-sealed under the session key with a random
+// per-frame nonce and no chaining between frames, and the sid lives INSIDE the
+// sealed plaintext. A counter fault on this stream therefore carries no
+// information about any other stream's integrity, so tearing down the whole
+// invoker session is pure amplification: one cut pipe used to kill the terminal,
+// files, git and chat with it.
+//
+// What is NOT weakened: the fault still costs the stream its life, the reason is
+// reported to the client, and the sid is RETIRED — its counter can never restart
+// at 0, so a replayed frame history can never be made acceptable again.
+async function closeFaultedStream(
+  session: MultiSession,
+  sid: string,
+  reason: string
+): Promise<void> {
+  // Never log the frame body — only the sid, the reason and the counters.
+  output.warn(`Closing stream ${sid} on session ${session.socketId}: ${reason}`);
+
+  // Report BEFORE retiring: sendStreamError consumes this sid's outgoing
+  // counter, and after retirement the send would restart at 0 and the client
+  // would drop it as out-of-order — the client would never learn why.
+  try { await sendStreamError(session, sid, reason); } catch { /* best effort */ }
+
+  const ws = session.viewerWorkspaces?.get(sid);
+  if (ws) {
+    session.viewerWorkspaces!.delete(sid);
+    try { ws.detachViewport(sid); } catch { /* best effort */ }
+  } else if (session.streamManager) {
+    try { session.streamManager.closeStream(sid, reason); } catch { /* best effort */ }
+  }
+
+  session.streamCounters.retire(sid);
 }
 
 // Send a window-state push for a specific viewport. WINDOW_CTL frames are not
@@ -576,9 +617,25 @@ export async function handleMultiStreamFrame(
       message.msg && typeof message.msg.sid === 'string';
     if (streamScoped) {
       const sid = message.msg.sid;
+
+      // A retired sid is a stream we already tore down. Teardown is unilateral
+      // (process exit, pipe peer gone, fault), so the client legitimately still
+      // has frames in flight for it. Drop them: they are late, not hostile, and
+      // a replay aimed at a dead stream is equally inert. Crucially we do NOT
+      // recreate a counter here — that is what used to turn a late frame into
+      // "expected=0, received=26" and kill the whole session.
+      if (session.streamCounters.isRetired(sid)) {
+        return;
+      }
+
       const expectedCounter = session.streamCounters.getNext(sid, 'incoming');
       if (message.ctr !== expectedCounter) {
-        terminateSession(session, `Stream counter mismatch for ${sid}: expected=${expectedCounter}, received=${message.ctr}`);
+        // Isolate: kill this stream, keep the session and its siblings.
+        await closeFaultedStream(
+          session,
+          sid,
+          `Stream counter mismatch: expected=${expectedCounter}, received=${message.ctr}`
+        );
         return;
       }
       session.streamCounters.increment(sid, 'incoming');

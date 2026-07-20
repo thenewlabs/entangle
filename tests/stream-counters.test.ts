@@ -46,6 +46,53 @@ describe('StreamCounters', () => {
     expect(counters.getNext('stream1', 'outgoing')).toBe(0);
   });
 
+  describe('retirement (replay defense)', () => {
+    it('retire() does NOT reset the counter the way removeStream() does', () => {
+      const counters = new StreamCounters();
+      counters.increment('stream1', 'incoming');
+      counters.increment('stream1', 'incoming');
+      expect(counters.getNext('stream1', 'incoming')).toBe(2);
+
+      counters.retire('stream1');
+
+      // The security property: a retired stream is marked dead, so a caller that
+      // checks isRetired() first never reads the recreated-at-0 counter. If
+      // teardown could zero a counter, a captured frame history could be
+      // replayed from the beginning after forcing a teardown.
+      expect(counters.isRetired('stream1')).toBe(true);
+    });
+
+    it('does not report live or never-seen streams as retired', () => {
+      const counters = new StreamCounters();
+      counters.increment('live', 'incoming');
+      expect(counters.isRetired('live')).toBe(false);
+      expect(counters.isRetired('never-existed')).toBe(false);
+    });
+
+    it('bounds the retired set, evicting oldest first', () => {
+      const counters = new StreamCounters();
+      // 300 > MAX_RETIRED_SIDS (256): a long-lived session must not leak an
+      // entry per stream forever.
+      for (let i = 0; i < 300; i++) counters.retire(`sid-${i}`);
+
+      expect(counters.isRetired('sid-299')).toBe(true); // newest kept
+      expect(counters.isRetired('sid-0')).toBe(false); // oldest evicted
+      expect(counters.isRetired('sid-299')).toBe(true);
+      // Exactly the newest 256 survive.
+      let kept = 0;
+      for (let i = 0; i < 300; i++) if (counters.isRetired(`sid-${i}`)) kept++;
+      expect(kept).toBe(256);
+    });
+
+    it('clear() also clears retirement', () => {
+      const counters = new StreamCounters();
+      counters.retire('stream1');
+      expect(counters.isRetired('stream1')).toBe(true);
+      counters.clear();
+      expect(counters.isRetired('stream1')).toBe(false);
+    });
+  });
+
   it('should list all stream IDs', () => {
     const counters = new StreamCounters();
     
