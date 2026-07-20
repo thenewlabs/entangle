@@ -199,4 +199,43 @@ describe('Hardening — rate-limiter is bounded (M2)', () => {
     expect(after.allowed).toBe(false);
     expect(after.retryAfterMs).toBeGreaterThan(0);
   });
+
+  it('holds the cap when the clock does not advance (a whole flood inside one ms)', () => {
+    // The eviction pass used to require `now - lastRefill > 0`, so buckets all
+    // created within the SAME millisecond were never evictable and the map grew
+    // without bound past maxBuckets. A frozen clock is the deterministic,
+    // worst-case form of that: no bucket ever ages at all.
+    const cap = 100;
+    const limiter = new PerIpRateLimiter({ maxBuckets: cap, now: () => 1_000_000 });
+
+    let peak = 0;
+    for (let i = 0; i < cap * 10; i++) {
+      limiter.check(ip(i));
+      peak = Math.max(peak, limiter.size);
+    }
+
+    expect(peak).toBeLessThanOrEqual(cap);
+    // Still evicting rather than refusing new IPs.
+    expect(limiter.size).toBeGreaterThan(cap * 0.5);
+  });
+
+  it('holds the cap even when EVERY tracked bucket is in active cooldown', () => {
+    // Sparing cooling-down buckets is deliberate (see the test above), but it
+    // cannot be unconditional: if it were, an attacker who drives every tracked
+    // IP into cooldown would make the whole map unevictable and grow it without
+    // bound. The cap is a memory-safety ceiling and must hold absolutely; the
+    // last-resort pass therefore evicts the OLDEST-inserted bucket even when it
+    // is cooling down. A frozen clock keeps every cooldown permanently active.
+    const cap = 100;
+    const limiter = new PerIpRateLimiter({ maxBuckets: cap, now: () => 1_000_000 });
+
+    let peak = 0;
+    // burst defaults to 50; 60 checks per IP guarantees rejection + cooldown.
+    for (let i = 0; i < cap * 1.5; i++) {
+      for (let n = 0; n < 60; n++) limiter.check(ip(i));
+      peak = Math.max(peak, limiter.size);
+    }
+
+    expect(peak).toBeLessThanOrEqual(cap);
+  });
 });

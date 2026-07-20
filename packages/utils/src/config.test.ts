@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { getConfig } from './config.js';
+import { createRequire } from 'module';
+import { getConfig, resetConfigCache } from './config.js';
 
 // getConfig() loads .env via dotenv, which does NOT override variables already
 // present in process.env, so setting them here reliably exercises the parser.
@@ -66,5 +67,67 @@ describe('config integer validation', () => {
     delete process.env.RELAY_REQUIRE_AGENT_TOKEN;
     process.env.NODE_ENV = 'production';
     expect(getConfig().requireAgentToken).toBe(true);
+  });
+});
+
+describe('config .env read is not on the hot path', () => {
+  const require = createRequire(import.meta.url);
+  const fs = require('fs');
+
+  /** Count readFileSync calls that target a .env file while `fn` runs. */
+  function countEnvReads(fn: () => void): number {
+    const orig = fs.readFileSync;
+    let n = 0;
+    fs.readFileSync = function (p: unknown, ...rest: unknown[]) {
+      if (typeof p === 'string' && p.endsWith('.env')) n++;
+      return orig.call(this, p, ...rest);
+    };
+    try {
+      fn();
+    } finally {
+      fs.readFileSync = orig;
+    }
+    return n;
+  }
+
+  afterEach(() => {
+    delete process.env.RELAY_BURST;
+    resetConfigCache();
+  });
+
+  it('reads .env from disk at most once across many getConfig() calls', () => {
+    // getConfig() sits on the relay's WS-upgrade hot path, so every upgrade
+    // attempt — including an attacker's — used to force a synchronous
+    // readFileSync of .env. That is both a throughput problem and a DoS
+    // amplifier. Before the fix this counted 5000; the loop below is the same
+    // shape as the real hot path.
+    resetConfigCache();
+    const reads = countEnvReads(() => {
+      for (let i = 0; i < 5000; i++) getConfig();
+    });
+    expect(reads).toBeLessThanOrEqual(1);
+  });
+
+  it('still observes process.env changes made after the first getConfig()', () => {
+    // The reason this was never simply memoized: nine test files (and any
+    // programmatic embedder) mutate process.env and expect the NEXT getConfig()
+    // to see it. Only the disk read is cached — the env is re-read every call.
+    resetConfigCache();
+    expect(getConfig().relayBurst).toBe(50);
+    process.env.RELAY_BURST = '7';
+    expect(getConfig().relayBurst).toBe(7);
+    process.env.RELAY_BURST = '9';
+    expect(getConfig().relayBurst).toBe(9);
+    delete process.env.RELAY_BURST;
+    expect(getConfig().relayBurst).toBe(50);
+  });
+
+  it('resetConfigCache() forces the next getConfig() to re-read .env', () => {
+    resetConfigCache();
+    getConfig();
+    // Cached: no further reads.
+    expect(countEnvReads(() => getConfig())).toBe(0);
+    // Explicitly invalidated: reads again.
+    expect(countEnvReads(() => { resetConfigCache(); getConfig(); })).toBe(1);
   });
 });

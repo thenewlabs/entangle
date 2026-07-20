@@ -12,7 +12,35 @@ const __dirname = dirname(__filename);
 // operator started the agent in.
 const LAUNCH_DIR = process.cwd();
 
+// Whether `.env` has already been folded into process.env this process.
+//
+// Only the DISK READ is cached — never the resolved Config. getConfig() still
+// re-reads process.env on every call, so a runtime `process.env.X = ...` is
+// picked up immediately (tests and programmatic embedders rely on this).
+//
+// Caching is sound because dotenv does not override variables already present
+// in process.env: once .env has been folded in, replaying it is a no-op. The
+// one behaviour this gives up is repopulating a var that came from .env after
+// something deleted it from process.env — nothing in the tree does that, and
+// resetConfigCache() covers it explicitly.
+//
+// Why it matters: getConfig() sits on the relay's WS-upgrade hot path, so
+// before this every upgrade attempt — including an attacker's — forced a
+// synchronous readFileSync of .env. That was a DoS amplifier, not just slow.
+let envLoaded = false;
+
+/**
+ * Drop the cached `.env` load so the next getConfig() re-reads it from disk.
+ * Test seam, and the escape hatch for the deleted-var case above. Production
+ * never calls this.
+ */
+export function resetConfigCache(): void {
+  envLoaded = false;
+}
+
 export function loadConfig(): void {
+  if (envLoaded) return;
+  envLoaded = true;
   const rootDir = resolve(__dirname, '../../..');
   const envPath = resolve(rootDir, '.env');
   config({ path: envPath });

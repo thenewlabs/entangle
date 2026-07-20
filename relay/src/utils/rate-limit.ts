@@ -100,20 +100,44 @@ export class PerIpRateLimiter {
 
   /**
    * Keep the bucket map bounded. Only acts once the map reaches the hard cap,
-   * then evicts oldest-inserted, non-cooldown buckets down to a low-water mark.
-   * A Map iterates in insertion order, so this is amortized O(1) per check
-   * (each bucket is created once and evicted at most once) — no per-call scan.
-   * Buckets in active cooldown are retained so eviction can't reset a
-   * misbehaving IP's backoff.
+   * then evicts oldest-inserted buckets down to a low-water mark. A Map iterates
+   * in insertion order, so this is amortized O(1) per check (each bucket is
+   * created once and evicted at most once) — no per-call scan.
+   *
+   * Two passes, in priority order:
+   *
+   * 1. Non-cooldown buckets. Buckets in active cooldown are SPARED here so
+   *    eviction cannot reset a misbehaving IP's backoff — otherwise an attacker
+   *    could flush their own exponential backoff just by flooding fresh IPs.
+   *    This is the pass that runs in every realistic flood.
+   * 2. Last resort: if pass 1 could not free enough (every remaining bucket is
+   *    cooling down), evict oldest-inserted regardless of cooldown. The cap is a
+   *    memory-safety ceiling and must hold unconditionally; an attacker who
+   *    drives every tracked IP into cooldown must not thereby make the map
+   *    unevictable. Reaching this pass costs ~maxBuckets * burst requests from
+   *    distinct IPs, and it evicts the oldest cooldowns (closest to expiry)
+   *    first, so the most recently punished IPs keep their backoff.
+   *
+   * Note there is deliberately NO "has the bucket aged?" guard. Requiring
+   * `now - lastRefill > 0` made a flood that fits inside a single millisecond
+   * completely unevictable, letting the map grow without bound past the cap.
    */
   private evictIfNeeded(now: number): void {
     if (this.buckets.size < this.maxBuckets) return;
 
     const target = Math.floor(this.maxBuckets * 0.9);
+
+    // Pass 1 — evict idle/non-cooling buckets, oldest first.
     for (const [ip, b] of this.buckets) {
-      if (this.buckets.size <= target) break;
-      const inCooldown = b.cooldownUntil && now < b.cooldownUntil;
-      if (!inCooldown && now - b.lastRefill > 0) this.buckets.delete(ip);
+      if (this.buckets.size <= target) return;
+      const inCooldown = b.cooldownUntil !== undefined && now < b.cooldownUntil;
+      if (!inCooldown) this.buckets.delete(ip);
+    }
+
+    // Pass 2 — last resort, cooldown notwithstanding. Enforces the ceiling.
+    for (const ip of this.buckets.keys()) {
+      if (this.buckets.size <= target) return;
+      this.buckets.delete(ip);
     }
   }
 }
