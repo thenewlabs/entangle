@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-relay",
-  "version": "2.14.1",
+  "version": "2.15.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
