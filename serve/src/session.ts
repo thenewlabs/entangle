@@ -37,6 +37,28 @@ const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE
 // client in AUTH2 so it can reject stale/replayed handshakes).
 const SESSION_TTL_MS = 3600_000;
 
+/**
+ * How many failed AUTH_PW attempts one invoker connection may make before the
+ * session is terminated.
+ *
+ * Two problems this bounds, both of which were previously UNBOUNDED once a
+ * client had completed AUTH1/2/3 (which only proves it holds `S`, i.e. the
+ * capability URL — the password is the SECOND factor and was guessable for
+ * free):
+ *
+ *  • Brute force. Nothing capped guesses per connection, so a holder of the
+ *    URL could stream password attempts down a single authenticated socket.
+ *  • DoS. Every attempt runs `verifyPassword` = Argon2id at interactive limits
+ *    — ~64 MiB and hundreds of ms of CPU EACH. A few concurrent sockets
+ *    spraying guesses is a memory/CPU exhaustion vector against the agent host.
+ *
+ * `handleAuth1` already bounds the OTHER Argon2 cost (key derivation) to one
+ * per socket; this is the matching bound for the verification cost. Beyond it,
+ * an attacker must pay a fresh relay connection + handshake per N guesses, and
+ * connection setup is separately rate-limited per IP at the relay.
+ */
+export const MAX_PASSWORD_ATTEMPTS = 5;
+
 export interface Session {
   socketId: string;
   ws: WebSocket;
@@ -49,6 +71,14 @@ export interface Session {
   passwordVerified: boolean;
   requiresPassword: boolean;
   passwordHash?: string | undefined; // Argon2id encoded string
+  /** Failed AUTH_PW attempts on this connection; see {@link MAX_PASSWORD_ATTEMPTS}. */
+  passwordAttempts: number;
+  /**
+   * Set once the session is dead to this agent (currently: too many failed
+   * password attempts). Every subsequent frame on this socket is dropped, so the
+   * only way forward is a fresh relay connection + handshake.
+   */
+  terminated?: boolean;
   nonceB?: string;
   nonceC?: string;
   auth1Seen?: boolean; // one AUTH1 per session to bound Argon2 work
@@ -90,6 +120,7 @@ export function handleInvokerConnection(
     passwordVerified: !passwordHash, // If no password, consider it verified
     requiresPassword: !!passwordHash,
     passwordHash: passwordHash || undefined,
+    passwordAttempts: 0,
     ...(pipeEndpoints && { pipeEndpoints }),
     getWorkspace,
   };
@@ -142,6 +173,10 @@ async function handleFrame(
   store: { multiSession?: any },
   frame: { type: FrameType; payload: Uint8Array }
 ): Promise<void> {
+  // A terminated session is dead to us: drop EVERYTHING, including further AUTH*
+  // frames, so a locked-out guesser cannot keep spending Argon2 on this socket.
+  if (session.terminated) return;
+
   if (STREAM_FRAME_TYPES.has(frame.type)) {
     if (!session.authenticated || !session.keys) {
       output.error(`Received stream frame before authentication: type=${frame.type}`);
@@ -179,7 +214,7 @@ async function handleFrame(
       await handleAuth3(session, frame.payload);
       break;
     case FrameType.AUTH_PW:
-      await handleAuthPw(session, frame.payload);
+      await handleAuthPw(session, store, frame.payload);
       break;
     case FrameType.KEEPALIVE:
       break;
@@ -263,7 +298,37 @@ async function handleAuth3(session: Session, payload: Uint8Array): Promise<void>
   output.info(`Session authenticated: ${session.socketId}`);
 }
 
-async function handleAuthPw(session: Session, payload: Uint8Array): Promise<void> {
+/**
+ * Terminate a session after an abuse threshold is hit: tear down any streams it
+ * opened and mark it dead so `handleFrame` drops every later frame.
+ *
+ * The agent cannot close the invoker's relay socket (the WS it holds is its OWN
+ * multiplexed link to the relay — closing that would drop every other session),
+ * so termination is enforced agent-side by refusing to process the socket
+ * further. The client observes silence, its liveness watchdog fires, and it must
+ * reconnect — which is exactly the cost we want to impose per N guesses.
+ */
+function terminateSession(session: Session, store: { multiSession?: any }, reason: string): void {
+  if (session.terminated) return;
+  session.terminated = true;
+  output.warn(`Terminating session ${session.socketId}: ${reason}`);
+  if (store.multiSession) {
+    try {
+      cleanupMultiSession(store.multiSession);
+    } catch { /* best effort */ }
+    store.multiSession = undefined;
+  }
+}
+
+/**
+ * Verify the second-factor password. Exported for unit tests, which drive it
+ * directly rather than paying a full Argon2id AUTH1 handshake per case.
+ */
+export async function handleAuthPw(
+  session: Session,
+  store: { multiSession?: any },
+  payload: Uint8Array
+): Promise<void> {
   if (!session.authenticated || !session.keys) {
     sendError(session, null, ErrorCode.AUTH_FAILED, 'Not authenticated');
     return;
@@ -285,8 +350,7 @@ async function handleAuthPw(session: Session, payload: Uint8Array): Promise<void
     const { password } = decrypted.msg as { password?: string };
     const ok = typeof password === 'string' && await verifyPassword(session.passwordHash, password);
     if (!ok) {
-      output.warn(`Invalid password attempt for session: ${session.socketId}`);
-      sendError(session, null, ErrorCode.AUTH_FAILED, 'Invalid password');
+      failPasswordAttempt(session, store, 'Invalid password');
       return;
     }
 
@@ -297,9 +361,38 @@ async function handleAuthPw(session: Session, payload: Uint8Array): Promise<void
     const successEncrypted = aeadEncrypt(session.keys.K_enc, FrameType.AUTH_PW, ctr, { ok: true }, AeadDir.ServerToClient);
     sendRelayResponse(session, encodeFrame(FrameType.AUTH_PW, encode(successEncrypted)));
   } catch (error) {
+    // A malformed/undecryptable AUTH_PW counts too: it is indistinguishable from
+    // probing, and leaving it uncounted would be a trivial way to sit on a socket.
     output.error('AUTH_PW failed', error instanceof Error ? error.message : String(error));
-    sendError(session, null, ErrorCode.AUTH_FAILED, 'Password verification failed');
+    failPasswordAttempt(session, store, 'Password verification failed');
   }
+}
+
+/**
+ * Record one failed password attempt, report it, and terminate the session once
+ * {@link MAX_PASSWORD_ATTEMPTS} is reached.
+ *
+ * The error detail deliberately stays generic ('Invalid password' / the lockout
+ * notice) — it never reveals whether the password was close, and the lockout
+ * notice is sent BEFORE termination so a legitimate user's UI can explain the
+ * reconnect rather than hanging on silence.
+ */
+function failPasswordAttempt(
+  session: Session,
+  store: { multiSession?: any },
+  detail: string
+): void {
+  session.passwordAttempts += 1;
+  const remaining = MAX_PASSWORD_ATTEMPTS - session.passwordAttempts;
+  output.warn(
+    `Invalid password attempt ${session.passwordAttempts}/${MAX_PASSWORD_ATTEMPTS} for session: ${session.socketId}`
+  );
+  if (remaining > 0) {
+    sendError(session, null, ErrorCode.AUTH_FAILED, detail);
+    return;
+  }
+  sendError(session, null, ErrorCode.AUTH_FAILED, 'Too many password attempts; reconnect to try again');
+  terminateSession(session, store, 'too many failed password attempts');
 }
 
 function sendError(session: Session, commandId: string | null, code: string, detail?: string): void {
