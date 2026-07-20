@@ -73,7 +73,12 @@ function getVersion(): string {
 
 function printUsage(): void {
   const lines = [
-    'Entangle — secure blind relay for exposing CLI tools',
+    'Entangle: reach your own machine from anywhere, without handing anyone the keys.',
+    '',
+    'Run entangle serve on the machine you want to reach. It prints a capability URL',
+    'that carries its own secret. Open that URL in a browser, or point entangle',
+    'connect at it. The relay in the middle forwards encrypted frames and can read',
+    'none of them.',
     '',
     'Usage: entangle <command> [options]',
     '',
@@ -82,11 +87,19 @@ function printUsage(): void {
       ([name, { summary }]) => `  ${name.padEnd(9)}${summary}`,
     ),
     '',
-    'Run "entangle <command> --help" for command-specific options.',
-    '',
     'Options:',
     '  -v, --version  Print the entangle CLI version',
     '  -h, --help     Show this help',
+    '',
+    'Arguments after the command are forwarded verbatim, so each tool keeps its own',
+    'parsing and its own environment variables. Run "entangle <command> --help" for',
+    'the full option and environment reference of that tool.',
+    '',
+    'Getting started:',
+    '  entangle relay                     # start a relay (its own help lists the env)',
+    '  entangle serve https://your-relay  # expose this machine, prints the URL',
+    '  entangle connect \'<cap-url>\' pwd   # run one command against it',
+    '  entangle ls                        # see what is still running',
   ];
   console.log(lines.join('\n'));
 }

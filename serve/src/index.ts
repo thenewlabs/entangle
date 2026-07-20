@@ -101,7 +101,11 @@ const program = new Command();
 
 program
   .name('entangle-serve')
-  .description('Entangle secure agent for exposing CLI tools')
+  .description(
+    'Expose this machine through a capability URL. entangle-serve mints the secret,\n' +
+      'holds the terminals and runs the commands. The relay it registers with only\n' +
+      'forwards encrypted frames and never learns what any of them contain.',
+  )
   .version(getVersionInfo(import.meta.url))
   .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');
 
@@ -253,7 +257,7 @@ program
 
 program
   .command('create-cap')
-  .description('Create a new capability')
+  .description('Mint a capability and print its URL without starting the agent')
   .option('--single-run', 'Allow only one run per session (default: multiple runs allowed)')
   .action(async (options) => {
     try {
@@ -286,7 +290,7 @@ program
 program
   .command('ls')
   .alias('list')
-  .description('List running serve sessions')
+  .description('List running sessions: name, kind, liveness, start time and URL')
   .action(() => {
     const output = new OutputHandler({ mode: parseOutputMode(program.opts().outputMode) });
     cleanupStale();
@@ -367,6 +371,51 @@ program
   });
 
 program.addHelpText('after', `
+Capabilities are ephemeral. Every start mints a fresh capId and secret and
+persists nothing, so closing the agent revokes access. Pin a capability with
+--capability or ENTANGLE_CAPABILITY to keep a URL working across restarts; a
+pinned capability's origin becomes the relay.
+
+Environment:
+  RELAY_URL                Relay to register with when no URL is given
+                           (default: http://localhost:8080)
+  ENTANGLE_CAPABILITY      Capability URL to serve instead of minting a fresh
+                           one. Same effect as --capability
+  AGENT_PASSWORD           Password for the optional second factor, so it never
+                           appears in argv
+  RELAY_AGENT_TOKEN        Token presented at /agent/register when the relay
+                           requires one
+
+Execution:
+  AGENT_DEFAULT_CWD        Working directory and execution boundary for every
+                           command and terminal (default: the launch directory).
+                           This pins the initial directory only. It is not a
+                           filesystem sandbox
+  AGENT_SHELL              Shell used for terminals (default: $SHELL, else
+                           /bin/bash)
+  AGENT_ENV_PASSTHROUGH    Comma-separated env var names a caller may set on
+                           spawned processes. Everything else is dropped
+  ENTANGLE_PIPES           Named raw socket bridges, comma-separated, as
+                           name=unix:/path.sock or name=tcp:host:port. Only the
+                           names are advertised; targets stay on this machine.
+                           A malformed spec disables the whole set
+
+Limits and timing:
+  MAX_OUT_BYTES            Output cap per command (default: 10485760)
+  MAX_FRAME_BYTES          Largest frame (default: 1048576)
+  CMD_DEFAULT_WALL_MS      Wall-clock limit per command (default: 60000)
+  TTY_IDLE_TIMEOUT_MS      Idle terminal reap time (default: 1200000)
+  PIPE_IDLE_TIMEOUT_MS     Idle pipe reap time, 0 disables (default: 0)
+  AGENT_HEARTBEAT_MS       Heartbeat to the relay (default: 15000)
+  AGENT_WS_PING_MS         WebSocket ping interval, minimum 1000 (default: 20000)
+  MAX_ARG_COUNT            Arguments accepted per command (default: 256)
+  MAX_ARG_LEN              Length of a single argument (default: 16384)
+
+Sessions:
+  ENTANGLE_RUN_DIR         Directory for session sockets, logs and the registry
+                           (default: $XDG_RUNTIME_DIR/entangle, else
+                           ~/.entangle/run)
+
 Examples:
   # Mint a fresh capability and serve it on a relay
   entangle serve https://entangle.thenewlabs.com
@@ -376,6 +425,12 @@ Examples:
 
   # Mint on the configured/default relay
   entangle serve
+
+  # Give every connection its own private shell instead of a shared one
+  entangle serve --headless
+
+  # Require a password as well as the URL, entered at a prompt
+  entangle serve --password
 
   # Start a session in the background (detached) and print its URL
   entangle serve --detach

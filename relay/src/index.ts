@@ -457,13 +457,16 @@ if (isMainModule()) {
 
   program
     .name('entangle-relay')
-    .description('Entangle blind relay server')
+    .description(
+      'The blind half of entangle. Routes encrypted frames between agents and clients,\n' +
+        'and never sees the capability secret, the derived keys or a byte of plaintext.',
+    )
     .version(getVersionInfo(import.meta.url))
     .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text');
 
   program
     .command('start')
-    .description('Start the relay server')
+    .description('Start the relay server (configured entirely through the environment)')
     .action(async () => {
       try {
         await startServer(program.opts().outputMode);
@@ -474,6 +477,62 @@ if (isMainModule()) {
         process.exit(1);
       }
     });
+
+  program.addHelpText(
+    'after',
+    `
+The relay takes no configuration flags. Everything below is read from the
+environment (or a .env file next to the install) at startup.
+
+Network:
+  PORT                        Port to listen on (default: 8080)
+  HOST                        Bind address (default: 0.0.0.0)
+  PUBLIC_ORIGIN               Origin used when printing capability URLs
+                              (default: http://localhost:8080)
+  CORS_ORIGINS                Comma-separated allow-list. Empty means
+                              same-origin only (default: empty)
+  TRUST_PROXY                 Set to 1 to read the client IP from
+                              X-Forwarded-For. Only turn this on behind a
+                              proxy you control (default: off)
+
+Agent registration:
+  RELAY_AGENT_TOKEN           Shared secret an agent must present at
+                              /agent/register. Strongly recommended off-localhost
+  RELAY_REQUIRE_AGENT_TOKEN   Set to 1 to refuse registration when no token is
+                              configured. On automatically when NODE_ENV=production
+
+Limits:
+  MAX_FRAME_BYTES             Largest accepted frame (default: 1048576)
+  RELAY_RATE_RPS              Per-IP WebSocket upgrades per second (default: 10)
+  RELAY_BURST                 Per-IP upgrade burst allowance (default: 50)
+  RELAY_IDLE_TIMEOUT_MS       Idle connection reap time (default: 120000)
+  RELAY_MAX_AGENTS            Ceiling on registered agents (default: 10000)
+  RELAY_MAX_CAPS_PER_AGENT    Ceiling on capabilities per agent (default: 256)
+  LOG_LEVEL                   Log verbosity (default: info)
+
+Serving a single-page app (optional, off unless RELAY_SPA_DIR is set):
+  RELAY_SPA_DIR               Directory holding index.html. Setting it makes the
+                              relay the origin that serves the app
+  RELAY_PREVIEW_SPA_DIR       Static directory for preview hosts
+                              (default: RELAY_SPA_DIR)
+  RELAY_PREVIEW_HOST          Base preview hostname. That host and any
+                              <token>.preview.<host> subdomain serve the
+                              preview document instead of the app
+  RELAY_PREVIEW_DOC           Preview bootstrap filename (default: preview.html)
+  RELAY_VIEW_ORIGIN           Comma-separated origins allowed to frame a
+                              preview. Derived from the request host if unset
+
+Examples:
+  # Local relay on the default port
+  entangle-relay start
+
+  # Behind Caddy or nginx, terminating TLS for you
+  PUBLIC_ORIGIN=https://entangle.example.com TRUST_PROXY=1 \\
+    RELAY_AGENT_TOKEN=$TOKEN entangle-relay start
+
+  # Check it is alive
+  curl http://localhost:8080/__health`,
+  );
 
   // Default action when no command is specified
   if (process.argv.length === 2 || (process.argv.length === 4 && process.argv[2] === '--output-mode')) {

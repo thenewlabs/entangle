@@ -37,16 +37,20 @@ program
   // (e.g. `entangle-connect --cwd /srv <url> ls -la`); `--` also works.
   .enablePositionalOptions()
   .passThroughOptions()
-  .description('Invoke commands or terminal sessions on remote capabilities')
+  .description(
+    'Run a command or open a terminal on a capability URL.\n' +
+      'The secret in the #S= fragment never leaves this process: it authenticates you\n' +
+      'to the agent directly, and the relay in between stays blind.',
+  )
   .version(getVersionInfo(import.meta.url))
-  .argument('<cap-url>', 'Capability URL (e.g., https://suncoder.dev/cap/capId#S=secret)')
-  .argument('[command...]', 'Command and arguments to execute (omit for terminal mode)')
-  .option('--cwd <path>', 'Working directory')
+  .argument('<cap-url>', 'Capability URL, as https://relay/cap/<capId>#S=<secret>. Quote it so the shell keeps the fragment')
+  .argument('[command...]', 'Command and arguments to run. Omit it to open an interactive terminal')
+  .option('--cwd <path>', 'Working directory on the agent (must sit inside the agent\'s boundary)')
   .option('--cols <n>', 'Terminal columns', '80')
   .option('--rows <n>', 'Terminal rows', '24')
-  .option('--abort-after-ms <n>', 'Abort command after N milliseconds')
+  .option('--abort-after-ms <n>', 'Abort the command after N milliseconds (default: the agent\'s own wall-clock limit)')
   .option('--output-mode <mode>', 'Output mode: text or stream-json', 'text')
-  .option('--password <password>', 'Agent password (if required)')
+  .option('--password <password>', 'Password, when the agent was started with one')
   .action(async (capUrl: string, commandArgs: string[], options) => {
     try {
       // Propagate output mode to all modules in this process
@@ -91,17 +95,30 @@ program
 
 // Add examples to help text
 program.addHelpText('after', `
+Argument order matters. Everything after the capability URL belongs to the remote
+command, so put entangle-connect's own options before the URL. That is what lets
+"ls -la" or "sh -c '...'" reach the agent untouched. A bare -- works too.
+
+Quote the URL. An unquoted #S= fragment is a comment to most shells, and the
+secret would be dropped before entangle-connect ever sees it.
+
 Examples:
   # Interactive terminal
-  entangle-connect https://suncoder.dev/cap/capId#S=secret
+  entangle-connect 'https://relay.example.com/cap/capId#S=secret'
 
   # Single command
-  entangle-connect https://suncoder.dev/cap/capId#S=secret ls -la
+  entangle-connect 'https://relay.example.com/cap/capId#S=secret' ls -la
 
-  # With custom working directory
-  entangle-connect https://suncoder.dev/cap/capId#S=secret --cwd /home/user ls -la
+  # Options go before the URL, the command after it
+  entangle-connect --cwd /srv/app 'https://relay.example.com/cap/capId#S=secret' ls -la
 
-  # Terminal with custom size
-  entangle-connect https://suncoder.dev/cap/capId#S=secret --cols 120 --rows 40`);
+  # Terminal with a custom size
+  entangle-connect --cols 120 --rows 40 'https://relay.example.com/cap/capId#S=secret'
+
+  # Give up on a slow command after 5 seconds
+  entangle-connect --abort-after-ms 5000 'https://relay.example.com/cap/capId#S=secret' make build
+
+  # Machine-readable output for scripts
+  entangle-connect --output-mode stream-json 'https://relay.example.com/cap/capId#S=secret' pwd`);
 
 program.parse();
