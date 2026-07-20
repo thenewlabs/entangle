@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle",
-  "version": "2.12.0",
+  "version": "2.14.0",
   "type": "module",
   "description": "Unified Entangle CLI — one command that dispatches to serve, relay, and connect",
   "main": "./dist/index.js",
@@ -29,9 +29,9 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@thenewlabs/entangle-serve": "^2.16.0",
-    "@thenewlabs/entangle-connect": "^2.11.2",
-    "@thenewlabs/entangle-relay": "^2.12.0"
+    "@thenewlabs/entangle-serve": "^2.18.0",
+    "@thenewlabs/entangle-connect": "^2.13.0",
+    "@thenewlabs/entangle-relay": "^2.14.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
