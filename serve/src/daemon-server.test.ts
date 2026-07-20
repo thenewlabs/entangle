@@ -151,6 +151,26 @@ async function connectClient(sock: string): Promise<TestClient> {
 
 const types = (c: TestClient): string[] => c.messages.map((m) => m.t);
 
+/**
+ * Wait until every listed client has received its `exit` frame AND the daemon's
+ * exit hook has run.
+ *
+ * `shutdown()` broadcasts the exit frame and then reaches `exit(code)` through a
+ * microtask (the `beforeExit` chain), while the frame only reaches a client
+ * socket on a later macrotask. Waiting on the exit hook alone therefore returns
+ * with the broadcast still in flight, and asserting on the clients' message
+ * lists right after is a race — the flake this helper removes. Waiting on the
+ * clients too is strictly stronger: a broadcast that never reaches every client
+ * still fails the test, now by timing out here with a message instead of by a
+ * bare "expected [...] to include 'exit'".
+ */
+async function waitForShutdown(h: Harness, cs: TestClient[]): Promise<void> {
+  await waitFor(
+    () => h.exitSpy.mock.calls.length > 0 && cs.every((c) => types(c).includes('exit')),
+    { message: 'daemon did not shut down and broadcast exit to every client' }
+  );
+}
+
 describe('createDaemonServer', () => {
   it('registers the session (url empty until setUrl) with kind and workspaceRoot', async () => {
     await makeServer({
@@ -238,7 +258,7 @@ describe('createDaemonServer', () => {
     });
 
     killer.send({ t: 'kill' });
-    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'kill did not shut the daemon down' });
+    await waitForShutdown(h, [killer, bystander]);
 
     // Every attached client (not just the sender) got the exit broadcast, and
     // the session is deregistered.
@@ -260,7 +280,7 @@ describe('createDaemonServer', () => {
     await waitFor(() => types(client).includes('replay'), { message: 'no replay frame' });
 
     h.server.shutdown(0);
-    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'exit hook not called' });
+    await waitForShutdown(h, [client]);
 
     expect(types(client)).toContain('exit');
     expect(events).toEqual(['beforeExit', 'exit(0)']);
@@ -290,7 +310,7 @@ describe('createDaemonServer', () => {
     });
 
     h.server.shutdown(0, 'SIGTERM (terminated by another process)');
-    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'exit hook not called' });
+    await waitForShutdown(h, [client, bystander]);
 
     for (const c of [client, bystander]) {
       const exit = c.messages.find((m): m is Extract<DaemonToClient, { t: 'exit' }> => m.t === 'exit');
@@ -306,7 +326,7 @@ describe('createDaemonServer', () => {
     await waitFor(() => types(client).includes('replay'), { message: 'client not attached' });
 
     client.send({ t: 'kill' });
-    await waitFor(() => h.exitSpy.mock.calls.length > 0, { message: 'kill did not shut the daemon down' });
+    await waitForShutdown(h, [client]);
 
     const exit = client.messages.find((m): m is Extract<DaemonToClient, { t: 'exit' }> => m.t === 'exit');
     expect(exit?.reason).toContain('Ctrl-B q');

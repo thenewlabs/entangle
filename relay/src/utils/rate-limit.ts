@@ -17,14 +17,41 @@ export interface RateDecision {
 
 // Hard cap on tracked IPs so a flood of distinct source IPs can't grow the map
 // without bound. When exceeded, the oldest-touched buckets are evicted.
-const MAX_BUCKETS = 50_000;
+export const MAX_BUCKETS = 50_000;
+
+/**
+ * Test seam only — production constructs `PerIpRateLimiter` with no arguments
+ * and therefore gets exactly the shipped cap and the real clock.
+ *
+ * Both knobs exist so the boundedness guarantee can be tested for what it IS (a
+ * ceiling on the map) rather than for how fast the host can run 60k iterations:
+ * a small `maxBuckets` makes the cap observable in a few hundred cheap calls,
+ * and an explicit `now` removes the eviction pass's dependency on wall-clock
+ * time advancing during the flood.
+ */
+export interface RateLimiterOptions {
+  maxBuckets?: number;
+  now?: () => number;
+}
 
 export class PerIpRateLimiter {
   private buckets = new Map<string, Bucket>();
+  private readonly maxBuckets: number;
+  private readonly now: () => number;
+
+  constructor(opts: RateLimiterOptions = {}) {
+    this.maxBuckets = opts.maxBuckets ?? MAX_BUCKETS;
+    this.now = opts.now ?? Date.now;
+  }
+
+  /** Number of tracked IPs. The quantity the hard cap bounds. */
+  get size(): number {
+    return this.buckets.size;
+  }
 
   check(ip: string): RateDecision {
     const { relayRateRps, relayBurst } = getConfig();
-    const now = Date.now();
+    const now = this.now();
 
     this.evictIfNeeded(now);
 
@@ -80,9 +107,9 @@ export class PerIpRateLimiter {
    * misbehaving IP's backoff.
    */
   private evictIfNeeded(now: number): void {
-    if (this.buckets.size < MAX_BUCKETS) return;
+    if (this.buckets.size < this.maxBuckets) return;
 
-    const target = Math.floor(MAX_BUCKETS * 0.9);
+    const target = Math.floor(this.maxBuckets * 0.9);
     for (const [ip, b] of this.buckets) {
       if (this.buckets.size <= target) break;
       const inCooldown = b.cooldownUntil && now < b.cooldownUntil;

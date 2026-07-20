@@ -59,6 +59,41 @@ async function waitFor(
 
 const decode = (u: Uint8Array): string => Buffer.from(u).toString('utf8');
 
+/**
+ * Build `echo <marker>` whose SOURCE text can never match the bare marker: the
+ * literal is split by an empty shell quote, so `echo EARLY''MARK` prints
+ * `EARLYMARK` while every echo of the input line — the tty line discipline's
+ * immediate echo, and readline's later redraw of the same line — renders the
+ * quotes verbatim.
+ *
+ * This matters because a PTY echoes typed input back on the SAME stream as
+ * command output. Waiting for a plain `echo MARK` marker therefore resolves as
+ * soon as the input was echoed, which can be long before the shell has even
+ * read the line (a slow bash start emits its `setlocale` warning first). Tests
+ * that then attach a "late" viewer raced the command's real output. Waiting for
+ * the split marker instead proves the command actually RAN.
+ */
+function echoMarker(marker: string): string {
+  const cut = Math.ceil(marker.length / 2);
+  return `echo ${marker.slice(0, cut)}''${marker.slice(cut)}\n`;
+}
+
+/**
+ * Write `stty -echo; PS1=''` and resolve only once it has actually taken effect.
+ *
+ * The readiness probe is chained onto the SAME input line on purpose: the line
+ * discipline echoes input as it is RECEIVED, not as the shell reads it, so a
+ * probe written as a second line would be echoed before `stty -echo` ever ran.
+ * Chaining means observing the probe's output proves the stty already executed,
+ * hence nothing written after this resolves is echoed back.
+ */
+async function quietShell(s: SharedSession, host: () => string): Promise<void> {
+  s.write(`stty -echo; PS1=''; ${echoMarker('STTYREADY')}`);
+  await waitFor(() => host().includes('STTYREADY'), {
+    message: 'shell never became ready (stty -echo did not take effect)',
+  });
+}
+
 describe('SharedSession (integration, real PTY)', () => {
   it('emits host output for shell commands', async () => {
     const s = makeSession();
@@ -91,9 +126,26 @@ describe('SharedSession (integration, real PTY)', () => {
     let host = '';
     s.onHostData((chunk) => { host += chunk.toString('utf8'); });
 
-    // Produce some output BEFORE anyone attaches.
-    s.write('echo EARLYMARK\n');
-    await waitFor(() => host.includes('EARLYMARK'), { message: 'host never saw EARLYMARK' });
+    // Produce some output BEFORE anyone attaches, then wait for the EMULATOR to
+    // show it. Two separate races made this flaky, and the wait has to close
+    // both:
+    //  1. The marker is split in the source (see echoMarker), so matching it
+    //     proves the command RAN rather than that the tty merely echoed the
+    //     input we just wrote — otherwise the attach below overtakes the real
+    //     output and it lands on the LIVE stream instead of in the replay.
+    //  2. We poll the SNAPSHOT, not the raw host stream. The snapshot is what an
+    //     attach replays, and xterm parses writes on a microtask, so the host
+    //     stream can already carry the marker while the emulator has not parsed
+    //     it — which left the replay empty of EARLYMARK.
+    // Polling the snapshot is strictly stronger than polling the host: the
+    // emulator is fed inside the same onData that fans out to host and viewers,
+    // so a snapshot containing the marker means those bytes are already past the
+    // live stream too.
+    s.write(echoMarker('EARLYMARK'));
+    await waitFor(() => decode(s.snapshot()).includes('EARLYMARK'), {
+      message: 'emulator never showed EARLYMARK',
+    });
+    expect(host).toContain('EARLYMARK');
 
     // A late joiner gets the prior output through the serialized snapshot (the
     // emulator's current screen, which still shows EARLYMARK).
@@ -111,10 +163,12 @@ describe('SharedSession (integration, real PTY)', () => {
     expect(decode(s.getReplay())).toContain('EARLYMARK');
 
     // The late viewer still receives subsequent live output.
-    s.write('echo LATERMARK\n');
+    s.write(echoMarker('LATERMARK'));
     await waitFor(() => late.includes('LATERMARK'), { message: 'late viewer never saw LATERMARK' });
     expect(late).toContain('LATERMARK');
-    // It must NOT have received the earlier output via the live stream (only replay).
+    // The other half of the contract: the earlier output reached the late
+    // viewer through the REPLAY only. Seeing it on the live stream too would
+    // mean it is delivered twice and the viewer's screen would show it twice.
     expect(late).not.toContain('EARLYMARK');
   }, 10000);
 
@@ -138,9 +192,12 @@ describe('SharedSession (integration, real PTY)', () => {
     expect(s.viewerCount()).toBe(0);
 
     // Second marker after detach — the host still sees it, the viewer must not.
-    s.write('echo AFTERDETACH\n');
+    // The split marker means the host wait resolves on the command's OUTPUT, so
+    // by the time we assert, the bytes a still-attached viewer would have seen
+    // have demonstrably been fanned out; the delay below is then only belt and
+    // braces rather than the thing the assertion rests on.
+    s.write(echoMarker('AFTERDETACH'));
     await waitFor(() => host.includes('AFTERDETACH'), { message: 'host never saw AFTERDETACH' });
-    // Give any (erroneous) in-flight delivery a chance to land before asserting.
     await delay(100);
 
     expect(viewer).not.toContain('AFTERDETACH');
@@ -178,10 +235,11 @@ describe('SharedSession (integration, real PTY)', () => {
     s.onHostData((chunk) => { host += chunk.toString('utf8'); });
 
     // Suppress input echo + the prompt so the screen holds only program output
-    // (otherwise the shell echoes the typed marker text onto the PRIMARY screen).
-    s.write("stty -echo; PS1=''\n");
-    await waitFor(() => host.includes('stty -echo'), { message: 'shell not ready' });
-    await delay(150);
+    // (otherwise the shell echoes the typed marker text onto the PRIMARY screen
+    // and the final "no ALTFRAME_MARK on the primary" assertion is wrong).
+    // quietShell resolves only once stty has actually run, so this no longer
+    // rides on a fixed sleep.
+    await quietShell(s, () => host);
 
     // Enter the alt buffer and print a marker there; the serialized snapshot must
     // reconstruct the CURRENT (alt) frame — the marker + the 1049h enter toggle.
@@ -211,8 +269,7 @@ describe('SharedSession (integration, real PTY)', () => {
     // Quiet the prompt/echo so the buffer holds our lines cleanly, then print a
     // batch of distinct numbered lines that overflow the 24-row screen so an
     // EARLY one lands in scrollback while a LATE one is on the current screen.
-    s.write("stty -echo; PS1=''\n");
-    await waitFor(() => host.includes('stty -echo'), { message: 'shell not ready' });
+    await quietShell(s, () => host);
     s.write('for i in $(seq 0 71); do printf "SBLINE-%03d\\n" "$i"; done\n');
 
     // Poll the emulator buffer (not the raw stream) until the last line is in.

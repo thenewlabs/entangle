@@ -19,13 +19,28 @@ function makeManager(c: Collected): StreamManager {
   });
 }
 
-async function waitFor(fn: () => boolean, ms = 4000): Promise<void> {
+async function waitFor(fn: () => boolean, ms = 4000, what = 'condition'): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (fn()) return;
     await new Promise((r) => setTimeout(r, 20));
   }
-  throw new Error('timed out');
+  if (fn()) return;
+  throw new Error(`timed out after ${ms}ms waiting for ${what}`);
+}
+
+/**
+ * Build `echo <marker>` whose SOURCE text can never match the bare marker: the
+ * literal is split by an empty shell quote, so `echo DO''NE` prints `DONE`
+ * while the tty's echo of the input line renders the quotes verbatim.
+ *
+ * A PTY echoes typed input back on the same stream as command output, so
+ * waiting for a plain `echo DONE` marker resolves the moment the input is
+ * echoed — before the command has produced a single byte.
+ */
+function echoMarker(marker: string): string {
+  const cut = Math.ceil(marker.length / 2);
+  return `echo ${marker.slice(0, cut)}''${marker.slice(cut)}`;
 }
 
 describe('StreamManager exec', () => {
@@ -138,15 +153,22 @@ describe('StreamManager exec', () => {
     const sm = makeManager(c);
 
     const sid = await sm.openPtyStream({ cols: 80, rows: 24 } as any);
-    // Emit ~20KB through the terminal — 20x the ceiling.
-    sm.writeToStream(sid, Buffer.from('head -c 20000 /dev/zero | tr "\\0" a; echo DONE\n'));
-    await waitFor(() => c.data.some((d) => d.text.includes('DONE')), 6000);
+    // Emit ~20KB through the terminal — 20x the ceiling. DONE is printed only
+    // AFTER the 20KB and the marker is split in the source (see echoMarker), so
+    // observing the bare marker proves every one of those bytes was already
+    // delivered — PTY output is ordered. Previously the wait matched the tty's
+    // echo of this very command line, so it resolved with ~118 bytes delivered
+    // and the assertion below raced the actual output rather than testing it.
+    sm.writeToStream(sid, Buffer.from(`head -c 20000 /dev/zero | tr "\\0" a; ${echoMarker('DONE')}\n`));
+    await waitFor(() => c.data.some((d) => d.text.includes('DONE')), 15000, 'the PTY to emit 20KB then DONE');
 
     const delivered = c.data.reduce((n, d) => n + d.text.length, 0);
     expect(delivered).toBeGreaterThan(1000); // not cut off at the cap
     expect(c.exit).toHaveLength(0); // not closed with "Output limit exceeded"
     sm.closeStream(sid);
-  });
+    // Above the global 10s testTimeout so the waitFor's own (descriptive)
+    // timeout is what fires on a real regression, not an opaque test timeout.
+  }, 20000);
 
   it.skipIf(process.platform !== 'linux')('does NOT reap a CPU-bound interactive PTY', async () => {
     // PTYs are exempt from the CPU/memory guard; a busy interactive command
