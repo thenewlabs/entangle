@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-utils",
-  "version": "2.14.1",
+  "version": "2.14.2",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
