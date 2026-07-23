@@ -8,6 +8,7 @@ import { createServer, type Server } from 'http';
 import { getConfig, getVersionInfo, OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import { setupAgentRoute } from './routes/agent.js';
 import { setupRelayRoute } from './routes/relay.js';
+import { ShareBridge } from './routes/share.js';
 import { RoutingState } from './state/routing.js';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -99,6 +100,36 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
   // comma-separated allow-list to opt specific origins in.
   if (config.corsOrigins.length > 0) {
     app.use(cors({ origin: config.corsOrigins }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Public shares (OFF unless RELAY_SHARE_HOST is set). A request whose Host is
+  // `<subdomain>.<RELAY_SHARE_HOST>` is a plaintext HTTP tunnel to the owning
+  // agent's local port — NOT an E2E-encrypted capability. It is intercepted here
+  // FIRST, before express.json() (which would consume the body) and before the
+  // SPA/CSP middleware (a shared app serves its own arbitrary content, not the
+  // SPA, and must not inherit the SPA's strict CSP). The share bridge fully owns
+  // the response and never calls next().
+  // ---------------------------------------------------------------------------
+  const shareHost = (process.env.RELAY_SHARE_HOST || '').trim().toLowerCase();
+  const shareBridge = new ShareBridge(routing, !!shareHost);
+  const subdomainOfShareHost = (host: string): string | null => {
+    if (!shareHost) return null;
+    if (host === shareHost) return null; // the bare apex is not a share
+    const suffix = '.' + shareHost;
+    if (!host.endsWith(suffix)) return null;
+    const label = host.slice(0, host.length - suffix.length);
+    // Only a single leftmost label routes to a share (no nested subdomains).
+    return label.length > 0 && !label.includes('.') ? label : null;
+  };
+  if (shareHost) {
+    output.info(`Public shares enabled on *.${shareHost}`);
+    app.use((req, res, next) => {
+      const host = (req.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
+      const subdomain = subdomainOfShareHost(host);
+      if (subdomain === null) return next();
+      shareBridge.handleHttpRequest(req, res, subdomain);
+    });
   }
 
   const previewHost = (process.env.RELAY_PREVIEW_HOST || '').trim().toLowerCase();
@@ -433,7 +464,7 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
     
     if (url.pathname === '/agent/register') {
       wss.handleUpgrade(request, socket, head, (ws) => {
-        setupAgentRoute(ws, routing);
+        setupAgentRoute(ws, routing, shareBridge);
       });
     } else if (url.pathname.startsWith('/relay/')) {
       const parts = url.pathname.split('/');
