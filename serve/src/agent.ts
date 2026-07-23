@@ -4,6 +4,7 @@ import { getConfig, OutputHandler, parseOutputMode, userAgentHeaders, type PipeE
 import { hashPassword } from '@thenewlabs/entangle-crypto';
 import { handleInvokerConnection } from './session.js';
 import { createCapability, type CapabilityInfo } from './capability.js';
+import { PublicShareController } from './public-share.js';
 import type { SharedWorkspace } from './shared-workspace.js';
 import type { WorkspaceResolver } from './multi-session.js';
 
@@ -28,6 +29,11 @@ interface AgentOptions {
   // Called once the served capability's URL is known (used by the host UI to
   // show it). When provided, the verbose capability block is suppressed.
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
+  // Called once with a controller for PLAINTEXT public shares (an agent-opt-in
+  // HTTP tunnel on a relay subdomain, NO end-to-end encryption). An embedder
+  // (Locus) uses it to announce/list/revoke shares and to check subdomain
+  // availability. Omit to leave the feature entirely dormant.
+  onPublicShareReady?: (controller: PublicShareController) => void;
   // Serve a PIPES-ONLY capability: refuse pty/cmd, allow only the registered
   // forwarded channels. Locus mints its scoped chat-bridge cap with this set, so
   // the bridge link grants exactly one pipe and never shell/exec on the box.
@@ -49,6 +55,7 @@ interface AgentState {
   // wrapper around `sharedWorkspace`). Undefined when not serving a workspace.
   getWorkspace?: WorkspaceResolver;
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
+  publicShare?: PublicShareController;
   /** Pipes-only: refuse pty/cmd for this agent's capability. */
   pipesOnly?: boolean;
   /** Reconnect backoff attempt counter; reset to 0 on a successful registration. */
@@ -91,6 +98,13 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     ...(options.onCapabilityReady && { onCapabilityReady: options.onCapabilityReady }),
     ...(options.pipesOnly ? { pipesOnly: true } : {}),
   };
+
+  // Public-share controller (plaintext HTTP tunnels on relay subdomains). It
+  // sends over whatever the current agent socket is; the getter tracks reconnects.
+  if (options.onPublicShareReady) {
+    state.publicShare = new PublicShareController(() => state.ws, output);
+    options.onPublicShareReady(state.publicShare);
+  }
 
   output.info('Starting agent');
   if (pipeEndpoints.size > 0) {
@@ -187,6 +201,11 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
         for (const capId of state.capabilities.keys()) {
           announceCapability(state, capId);
         }
+
+        // Re-establish any public shares dropped when the previous socket closed.
+        state.publicShare?.reannounceAll();
+      } else if (state.publicShare && state.publicShare.handleMessage(msg)) {
+        // Public-share control/proxy message — handled by the controller.
       } else if (msg.type === 'INVOKER_CONNECT') {
         const { capId, socketId } = msg;
         const cap = state.capabilities.get(capId);

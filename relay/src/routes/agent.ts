@@ -1,11 +1,12 @@
 import type WebSocket from 'ws';
 import { getConfig, OutputHandler, parseOutputMode, isValidCapId, isBoundedString } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
+import type { ShareBridge } from './share.js';
 import { installLiveness, pingIntervalMs } from '../utils/liveness.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
-export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
+export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridge?: ShareBridge): void {
   let agentId: string | undefined;
   const cfg = getConfig();
   const requiredToken = cfg.agentToken;
@@ -97,6 +98,8 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState): void {
           // Send the unwrapped frame to the invoker
           invoker.ws.send(buf);
         }
+      } else if (agentId && shareBridge && shareBridge.handleAgentMessage(agentId, msg, ws)) {
+        // Public-share control/response message — handled by the share bridge.
       }
     } catch (error) {
       output.error('Failed to handle agent message', error instanceof Error ? error.message : String(error));

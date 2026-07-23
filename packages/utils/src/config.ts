@@ -157,6 +157,8 @@ export interface Config {
   // malformed value cannot disable the comparison.
   relayMaxAgents: number;
   relayMaxCapsPerAgent: number;
+  // Ceiling on the number of public-share subdomains a single agent may reserve.
+  relayMaxSharesPerAgent: number;
   // Passthrough allow-list of env var names a caller may set on spawned
   // processes. Everything else is dropped; children otherwise get a minimal env.
   agentEnvPassthrough: string[];
@@ -237,6 +239,7 @@ export function getConfig(): Config {
       process.env.NODE_ENV === 'production',
     relayMaxAgents: intEnv('RELAY_MAX_AGENTS', 10000),
     relayMaxCapsPerAgent: intEnv('RELAY_MAX_CAPS_PER_AGENT', 256),
+    relayMaxSharesPerAgent: intEnv('RELAY_MAX_SHARES_PER_AGENT', 16),
     agentEnvPassthrough: (process.env.AGENT_ENV_PASSTHROUGH || '').split(',').map(s => s.trim()).filter(Boolean),
     pipeEndpoints: pipeEndpointsFromEnv(),
   };
