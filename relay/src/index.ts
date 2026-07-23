@@ -333,6 +333,23 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
           if (p === '/sw.js' || p.startsWith('/__locus/') || p.startsWith('/assets/')) {
             return res.status(404).end();
           }
+          // `/__locus-nav/*` is the tunnel-ONLY reframing namespace: the Service Worker decodes it
+          // and pumps it over the entangle `preview` pipe to the daemon. A blind relay can never
+          // produce its bytes, so a request in this namespace reaching HERE means the SW was bypassed
+          // (a hard reload bypasses it by design) or is not yet controlling. Answering with the
+          // bootstrap HTML then MIME-lies: a `<script>`/`<link>` for a cross-origin dev-server asset
+          // (`/__locus-nav/http/localhost:5174/…app.js`) receives `text/html` and fails as
+          // "Failed to load script" — the multi-preview asset bug. A SUBRESOURCE (script/style/image/
+          // fetch) therefore 404s instead of masquerading; only a DOCUMENT navigation (a browse-mode
+          // hard reload landing on `/__locus-nav/…`) still gets the bootstrap, which re-registers the
+          // SW and heals back onto the tunnel. Sec-Fetch-* is set by every modern browser; when it is
+          // absent we treat the request as a subresource (404), never as HTML.
+          if (p.startsWith('/__locus-nav/')) {
+            const dest = (req.get('sec-fetch-dest') ?? '').toLowerCase();
+            const mode = (req.get('sec-fetch-mode') ?? '').toLowerCase();
+            const isDocumentNav = mode === 'navigate' || dest === 'document';
+            if (!isDocumentNav) return res.status(404).end();
+          }
           if (!previewHtml) return res.sendFile(previewDocPath);
           res.setHeader('Content-Type', 'text/html; charset=utf-8');
           return res.send(previewHtml);
