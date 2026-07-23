@@ -88,6 +88,12 @@ export interface Session {
   // binds to from the key+cwd in its open message (multi-workspace); a constant
   // resolver returning one workspace is the single-workspace back-compat path.
   getWorkspace?: WorkspaceResolver | undefined;
+  // PIPES-ONLY capability: when true, only `mode: 'pipe'` STREAM_OPENs are served
+  // — `pty` and `cmd` are refused. This is what makes a capability that advertises
+  // a single forwarded channel (e.g. Locus's scoped chat-bridge cap) grant ONLY
+  // that channel and never shell/exec access on the box. Defaults to false (the
+  // pre-existing behavior: a cap holder may open pty/cmd).
+  pipesOnly?: boolean;
 }
 
 // Helper to send wrapped relay responses
@@ -109,7 +115,8 @@ export function handleInvokerConnection(
   cap: CapabilityInfo,
   passwordHash?: string,
   pipeEndpoints?: Map<string, PipeEndpoint>,
-  getWorkspace?: WorkspaceResolver
+  getWorkspace?: WorkspaceResolver,
+  pipesOnly?: boolean
 ): { handleFrame: (data: Buffer) => Promise<void>; cleanup: () => void } {
   const session: Session = {
     socketId,
@@ -123,6 +130,7 @@ export function handleInvokerConnection(
     passwordAttempts: 0,
     ...(pipeEndpoints && { pipeEndpoints }),
     getWorkspace,
+    ...(pipesOnly ? { pipesOnly: true } : {}),
   };
 
   const reader = new FrameReader();
@@ -196,6 +204,7 @@ async function handleFrame(
         passwordVerified: session.passwordVerified,
         ...(session.pipeEndpoints && { pipeEndpoints: session.pipeEndpoints }),
         getWorkspace: session.getWorkspace,
+        ...(session.pipesOnly ? { pipesOnly: true } : {}),
         viewerWorkspaces: new Map<string, SharedWorkspace>(),
       };
     }
