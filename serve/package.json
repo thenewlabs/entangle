@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-serve",
-  "version": "2.19.1",
+  "version": "2.20.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -17,9 +17,9 @@
   },
   "dependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
-    "@thenewlabs/entangle-crypto": "^2.13.1",
-    "@thenewlabs/entangle-protocol": "^2.14.1",
-    "@thenewlabs/entangle-utils": "^2.14.2",
+    "@thenewlabs/entangle-crypto": "^2.14.0",
+    "@thenewlabs/entangle-protocol": "^2.15.0",
+    "@thenewlabs/entangle-utils": "^2.15.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "cborg": "^4.5.8",

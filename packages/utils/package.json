@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-utils",
-  "version": "2.14.2",
+  "version": "2.15.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -20,7 +20,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@thenewlabs/entangle-protocol": "^2.14.1",
+    "@thenewlabs/entangle-protocol": "^2.15.0",
     "dotenv": "^17.4.2",
     "pino": "^10.3.1"
   },
