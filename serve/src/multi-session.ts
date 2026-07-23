@@ -83,6 +83,10 @@ export interface MultiSession {
   // to the correct workspace by sid.
   getWorkspace?: WorkspaceResolver | undefined;
   viewerWorkspaces?: Map<string, SharedWorkspace>;
+  // PIPES-ONLY: refuse every non-pipe STREAM_OPEN (pty/cmd). Threaded from the
+  // agent so a capability can advertise a single forwarded channel and grant
+  // ONLY that channel — never shell/exec on the box. See Session.pipesOnly.
+  pipesOnly?: boolean;
 }
 
 // Tear down a single invoker session on a protocol/counter error WITHOUT
@@ -213,6 +217,14 @@ async function handleStreamOpen(
   session: MultiSession,
   message: StreamOpenMessage
 ): Promise<void> {
+  // PIPES-ONLY capability: refuse anything but `mode: 'pipe'` BEFORE any pty/cmd
+  // path (including the shared-workspace attach below). This is the single gate
+  // that turns a scoped forwarded-channel capability into exactly that — no
+  // shell, no exec — regardless of what the invoker asks for.
+  if (session.pipesOnly && message.msg?.mode !== 'pipe') {
+    await sendStreamError(session, message.msg.sid, 'This capability only permits pipe streams');
+    return;
+  }
   // In shared-workspace mode a PTY open binds a viewport to a workspace (the
   // resolver picks which); a 'cmd' open still spawns normally so one-off
   // `connect <url> ls` keeps working.

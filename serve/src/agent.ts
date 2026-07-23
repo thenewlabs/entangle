@@ -34,6 +34,10 @@ interface AgentOptions {
   // (Locus) uses it to announce/list/revoke shares and to check subdomain
   // availability. Omit to leave the feature entirely dormant.
   onPublicShareReady?: (controller: PublicShareController) => void;
+  // Serve a PIPES-ONLY capability: refuse pty/cmd, allow only the registered
+  // forwarded channels. Locus mints its scoped chat-bridge cap with this set, so
+  // the bridge link grants exactly one pipe and never shell/exec on the box.
+  pipesOnly?: boolean;
 }
 
 interface AgentState {
@@ -52,6 +56,8 @@ interface AgentState {
   getWorkspace?: WorkspaceResolver;
   onCapabilityReady?: (info: { link: string; capId: string; S: string }) => void;
   publicShare?: PublicShareController;
+  /** Pipes-only: refuse pty/cmd for this agent's capability. */
+  pipesOnly?: boolean;
   /** Reconnect backoff attempt counter; reset to 0 on a successful registration. */
   reconnectAttempts?: number;
 }
@@ -90,6 +96,7 @@ export async function startAgent(options: AgentOptions): Promise<void> {
     ...(options.password && { password: options.password }),
     ...(getWorkspace && { getWorkspace }),
     ...(options.onCapabilityReady && { onCapabilityReady: options.onCapabilityReady }),
+    ...(options.pipesOnly ? { pipesOnly: true } : {}),
   };
 
   // Public-share controller (plaintext HTTP tunnels on relay subdomains). It
@@ -212,7 +219,7 @@ async function connectToServer(state: AgentState, serverUrl: string): Promise<vo
 
         // Register synchronously (no await) so the session exists before this
         // invoker's AUTH1 arrives on the next relay message.
-        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.getWorkspace);
+        const session = handleInvokerConnection(state.ws!, socketId, cap, state.passwordHash, state.pipeEndpoints, state.getWorkspace, state.pipesOnly);
         relaySessions.set(socketId, session);
       } else if (msg.type === 'RELAY_MSG') {
         // Handle forwarded frame from invoker
