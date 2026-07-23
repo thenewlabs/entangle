@@ -1,6 +1,6 @@
 {
   "name": "@thenewlabs/entangle-relay",
-  "version": "2.16.0",
+  "version": "2.17.0",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -15,9 +15,9 @@
     "prepack": "node ../scripts/copy-web-to-server.mjs"
   },
   "dependencies": {
-    "@thenewlabs/entangle-crypto": "^2.13.1",
-    "@thenewlabs/entangle-protocol": "^2.14.1",
-    "@thenewlabs/entangle-utils": "^2.14.2",
+    "@thenewlabs/entangle-crypto": "^2.14.0",
+    "@thenewlabs/entangle-protocol": "^2.15.0",
+    "@thenewlabs/entangle-utils": "^2.15.0",
     "commander": "^15.0.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
