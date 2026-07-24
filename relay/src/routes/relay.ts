@@ -2,6 +2,7 @@ import type WebSocket from 'ws';
 import { getConfig, OutputHandler, parseOutputMode, isValidCapId } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 import { installLiveness, pingIntervalMs } from '../utils/liveness.js';
+import { getRelayHooks } from '../hooks.js';
 // import { FrameReader } from '@thenewlabs/entangle-protocol';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
@@ -73,6 +74,17 @@ export function setupRelayRoute(
         socketId: invokerId,
         frame: data.toString('base64')
       }));
+      // Meter the invoker→agent (up) direction. `data` is an opaque ciphertext
+      // frame — only its byte length is observed, never the plaintext.
+      try {
+        getRelayHooks().meter?.({
+          capId,
+          source: 'capability',
+          direction: 'up',
+          bytes: data.length,
+          label: capId,
+        });
+      } catch { /* metering must never break the data path */ }
     }
   });
   

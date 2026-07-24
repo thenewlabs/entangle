@@ -3,11 +3,22 @@ import { getConfig, OutputHandler, parseOutputMode, isValidCapId, isBoundedStrin
 import type { RoutingState } from '../state/routing.js';
 import type { ShareBridge } from './share.js';
 import { installLiveness, pingIntervalMs } from '../utils/liveness.js';
+import { getRelayHooks } from '../hooks.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridge?: ShareBridge): void {
   let agentId: string | undefined;
+  // Set (to an OPAQUE id) only when a verifyAgentToken hook accepts this socket.
+  // Never a "user" — the relay stays account-agnostic.
+  let identityId: string | undefined;
+  let machineId = 'unknown';
+  // Guards the async verifier window so a second CLIENT_HELLO can't slip through
+  // while the first is still awaiting verification.
+  let registering = false;
+  // Bound capabilities this socket has announced (only tracked for verified
+  // sockets, so onCapabilityClosed can fire per cap on disconnect).
+  const announcedCaps = new Set<string>();
   const cfg = getConfig();
   const requiredToken = cfg.agentToken;
 
@@ -16,36 +27,66 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
   // OS times the socket out.
   installLiveness(ws, pingIntervalMs());
 
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'CLIENT_HELLO') {
         // One registration per socket: a second CLIENT_HELLO would orphan the
         // first agent entry and let one connection inflate the routing maps.
-        if (agentId) {
-          output.warn(`Ignoring duplicate CLIENT_HELLO on socket for agent ${agentId}`);
+        // `registering` closes the async-verifier window against the same race.
+        if (agentId || registering) {
+          output.warn(`Ignoring duplicate CLIENT_HELLO on socket for agent ${agentId ?? '(registering)'}`);
           return;
         }
 
-        // Fail closed when configured to require authentication but no token is
-        // set: an unauthenticated control plane lets arbitrary clients register.
-        if (!requiredToken && cfg.requireAgentToken) {
-          output.warn('Rejected agent registration: authentication required but RELAY_AGENT_TOKEN is not set');
-          try { ws.close(1008, 'Agent authentication required'); } catch {}
-          return;
-        }
+        // Bound the untrusted machineId before it enters maps/logs/hooks.
+        machineId = isBoundedString(msg.machineId, 128) ? msg.machineId : 'unknown';
 
-        // Gate agent registration behind a shared token when configured, so
-        // random clients cannot register and squat capabilities.
-        if (requiredToken && msg.token !== requiredToken) {
-          output.warn('Rejected agent registration: invalid or missing token');
-          try { ws.close(1008, 'Invalid agent token'); } catch {}
-          return;
-        }
+        const hooks = getRelayHooks();
+        if (hooks.verifyAgentToken) {
+          // An injected verifier REPLACES the flat-token compare. It receives
+          // only the opaque bearer token and the self-reported machineId — never
+          // the capability secret. Returns an opaque `{ id }` or null.
+          registering = true;
+          let verified: { id: string } | null;
+          try {
+            const token = typeof msg.token === 'string' ? msg.token : '';
+            verified = await hooks.verifyAgentToken(token, machineId);
+          } catch (err) {
+            registering = false;
+            output.warn(`Rejected agent registration: verifier error: ${err instanceof Error ? err.message : String(err)}`);
+            try { ws.close(1008, 'Invalid agent token'); } catch {}
+            return;
+          }
+          registering = false;
+          // The socket may have gone away (or re-registered) during the await.
+          if (ws.readyState !== ws.OPEN || agentId) return;
+          if (!verified) {
+            output.warn('Rejected agent registration: invalid or missing token');
+            try { ws.close(1008, 'Invalid agent token'); } catch {}
+            return;
+          }
+          identityId = verified.id;
+        } else {
+          // No verifier injected — preserve today's flat-token behaviour exactly.
 
-        // Bound the untrusted machineId before it enters maps/logs.
-        const machineId = isBoundedString(msg.machineId, 128) ? msg.machineId : 'unknown';
+          // Fail closed when configured to require authentication but no token is
+          // set: an unauthenticated control plane lets arbitrary clients register.
+          if (!requiredToken && cfg.requireAgentToken) {
+            output.warn('Rejected agent registration: authentication required but RELAY_AGENT_TOKEN is not set');
+            try { ws.close(1008, 'Agent authentication required'); } catch {}
+            return;
+          }
+
+          // Gate agent registration behind a shared token when configured, so
+          // random clients cannot register and squat capabilities.
+          if (requiredToken && msg.token !== requiredToken) {
+            output.warn('Rejected agent registration: invalid or missing token');
+            try { ws.close(1008, 'Invalid agent token'); } catch {}
+            return;
+          }
+        }
 
         const newAgentId = routing.registerAgent(ws, machineId);
         if (!newAgentId) {
@@ -70,6 +111,16 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
 
         if (success) {
           output.info(`Capability announced: ${msg.capId} by agent ${agentId}`);
+          // Bind the capability to the verified opaque identity (if any). Only
+          // the routing capId + machineId leave the relay — never the secret.
+          if (identityId) {
+            announcedCaps.add(msg.capId);
+            try {
+              getRelayHooks().onCapabilityRegistered?.({ identityId, capId: msg.capId, machineId });
+            } catch (err) {
+              output.warn(`onCapabilityRegistered hook threw: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
         } else {
           output.warn(`Failed to announce capability ${msg.capId} for agent ${agentId}`);
         }
@@ -97,6 +148,17 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
           }
           // Send the unwrapped frame to the invoker
           invoker.ws.send(buf);
+          // Meter the agent→invoker (down) direction. `buf` is an opaque
+          // ciphertext frame — only its byte length is observed.
+          try {
+            getRelayHooks().meter?.({
+              capId: invoker.capId,
+              source: 'capability',
+              direction: 'down',
+              bytes: buf.length,
+              label: invoker.capId,
+            });
+          } catch { /* metering must never break the data path */ }
         }
       } else if (agentId && shareBridge && shareBridge.handleAgentMessage(agentId, msg, ws)) {
         // Public-share control/response message — handled by the share bridge.
@@ -112,5 +174,17 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
   
   ws.on('close', () => {
     output.info(`Agent disconnected: ${agentId}`);
+    // Notify the embedder that each bound capability of this verified socket is
+    // gone (final byte tallies etc. live embedder-side).
+    if (identityId) {
+      const hooks = getRelayHooks();
+      for (const capId of announcedCaps) {
+        try {
+          hooks.onCapabilityClosed?.({ capId, identityId });
+        } catch (err) {
+          output.warn(`onCapabilityClosed hook threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
   });
 }

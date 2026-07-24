@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { randomBytes } from 'crypto';
 import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
+import { getRelayHooks } from '../hooks.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -38,6 +39,10 @@ function maxPendingShares(): number {
 interface PendingRequest {
   res: Response;
   agentId: string;
+  // Subdomain (metering label) + shareId (routing id), remembered so response
+  // bytes can be metered from the agent-message side where only reqId is known.
+  subdomain: string;
+  shareId: string;
   timeout: ReturnType<typeof setTimeout>;
   headersSent: boolean;
 }
@@ -108,7 +113,14 @@ export class ShareBridge {
       else p.res.end();
     }, shareTimeoutMs());
 
-    this.pending.set(reqId, { res, agentId: info.agentId, timeout, headersSent: false });
+    this.pending.set(reqId, {
+      res,
+      agentId: info.agentId,
+      subdomain,
+      shareId: info.shareId,
+      timeout,
+      headersSent: false,
+    });
 
     // If the public client goes away, abort the upstream request too.
     res.on('close', () => {
@@ -128,6 +140,18 @@ export class ShareBridge {
 
     // Stream the request body to the agent in bounded chunks.
     req.on('data', (chunk: Buffer) => {
+      // Meter the public inbound (up) direction. Shares are a plaintext proxy by
+      // design; the subdomain is the sub-meter label so each shared app tallies
+      // separately. No capability secret is involved here.
+      try {
+        getRelayHooks().meter?.({
+          capId: info.shareId,
+          source: 'share',
+          direction: 'up',
+          bytes: chunk.length,
+          label: subdomain,
+        });
+      } catch { /* metering must never break the proxy */ }
       for (let off = 0; off < chunk.length; off += MAX_BODY_CHUNK) {
         const slice = chunk.subarray(off, off + MAX_BODY_CHUNK);
         this.send(agentWs, { type: 'SHARE_REQ_BODY', reqId, chunk: slice.toString('base64') });
@@ -207,7 +231,18 @@ export class ShareBridge {
       case 'SHARE_RES_BODY': {
         const p = this.owned(msg.reqId, agentId);
         if (!p) return true;
-        try { p.res.write(Buffer.from(String(msg.chunk ?? ''), 'base64')); } catch { /* client gone */ }
+        const body = Buffer.from(String(msg.chunk ?? ''), 'base64');
+        // Meter the public outbound (down) direction, labelled by subdomain.
+        try {
+          getRelayHooks().meter?.({
+            capId: p.shareId,
+            source: 'share',
+            direction: 'down',
+            bytes: body.length,
+            label: p.subdomain,
+          });
+        } catch { /* metering must never break the proxy */ }
+        try { p.res.write(body); } catch { /* client gone */ }
         return true;
       }
       case 'SHARE_RES_END': {
