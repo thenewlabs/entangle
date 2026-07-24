@@ -29,9 +29,9 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@thenewlabs/entangle-serve": "^2.20.0",
+    "@thenewlabs/entangle-serve": "^2.21.0",
     "@thenewlabs/entangle-connect": "^2.15.0",
-    "@thenewlabs/entangle-relay": "^2.17.0"
+    "@thenewlabs/entangle-relay": "^2.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
