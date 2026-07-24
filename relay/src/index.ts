@@ -507,23 +507,23 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
           setupRelayRoute(ws, routing, capId);
         });
       } else {
-        // A WebSocket upgrade on a public-share host (`<sub>.<shareHost>`) — tunnel it to the owning
-        // agent's local server. Everything else is not a route we serve over WS.
-        const host = (request.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
-        const shareSub = subdomainOfShareHost(host);
-        if (shareSub !== null) {
-          shareWss.handleUpgrade(request, socket, head, (clientWs) => {
-            shareBridge.acceptWebSocket(clientWs, shareSub, request.url ?? '/', request.headers as Record<string, unknown>);
-          });
-        } else {
-          socket.destroy();
-        }
+        socket.destroy();
       }
     } else {
-      socket.destroy();
+      // A WebSocket upgrade on a public-share host (`<sub>.<shareHost>`) — tunnel it to the owning
+      // agent's local server. Anything else is not a route we serve over WS.
+      const host = (request.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
+      const shareSub = subdomainOfShareHost(host);
+      if (shareSub !== null) {
+        shareWss.handleUpgrade(request, socket, head, (clientWs) => {
+          shareBridge.acceptWebSocket(clientWs, shareSub, request.url ?? '/', request.headers as Record<string, unknown>);
+        });
+      } else {
+        socket.destroy();
+      }
     }
   });
-  
+
   await new Promise<void>((resolveListen) => {
     server.listen(config.port, config.host, () => {
       output.info(`Server started on ${config.host}:${config.port}`);
