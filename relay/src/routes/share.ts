@@ -73,8 +73,20 @@ function stripHopByHop(headers: Record<string, unknown>): Record<string, string 
  * control protocol layered on the SAME agent socket used for capability routing;
  * it does not touch the E2E-encrypted STREAM_* path.
  */
+/** A tunnelled WebSocket: the public client's socket + the agent it is proxied through. */
+interface WsConn {
+  client: WebSocket;
+  agentId: string;
+  shareId: string;
+  subdomain: string;
+}
+
+/** Ceiling on a single tunnelled WS message (base64 inflates ~4/3 on the agent socket). */
+const MAX_WS_MSG = 4 * 1024 * 1024;
+
 export class ShareBridge {
   private pending = new Map<string, PendingRequest>();
+  private wsConns = new Map<string, WsConn>();
 
   /**
    * @param enabled Whether public sharing is configured on this relay
@@ -166,6 +178,56 @@ export class ShareBridge {
       this.finish(reqId);
       try { this.send(agentWs, { type: 'SHARE_ABORT', reqId }); } catch { /* best effort */ }
     });
+  }
+
+  /**
+   * Accept a public WebSocket upgrade on a share subdomain (the relay already completed the client
+   * handshake) and tunnel it to the owning agent, which dials the local target as a WS client.
+   * Same posture as {@link handleHttpRequest}: plaintext, routed purely by subdomain → agent.
+   */
+  acceptWebSocket(client: WebSocket, subdomain: string, url: string, headers: Record<string, unknown>): void {
+    const info = this.routing.lookupShare(subdomain);
+    const agentWs = info ? this.routing.getAgentWs(info.agentId) : undefined;
+    if (!info || !agentWs || agentWs.readyState !== agentWs.OPEN) {
+      try { client.close(1011, 'share offline'); } catch { /* already closing */ }
+      return;
+    }
+    if (this.wsConns.size >= maxPendingShares()) {
+      try { client.close(1013, 'relay busy'); } catch { /* already closing */ }
+      return;
+    }
+    const wsId = newId();
+    this.wsConns.set(wsId, { client, agentId: info.agentId, shareId: info.shareId, subdomain });
+
+    const protocol = typeof headers['sec-websocket-protocol'] === 'string' ? headers['sec-websocket-protocol'] : undefined;
+    this.send(agentWs, {
+      type: 'SHARE_WS_OPEN',
+      wsId,
+      shareId: info.shareId,
+      url,
+      headers: stripHopByHop(headers),
+      ...(protocol ? { protocol } : {}),
+    });
+
+    client.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      if (buf.length > MAX_WS_MSG) { try { client.close(1009, 'message too big'); } catch {} return; }
+      try {
+        getRelayHooks().meter?.({ capId: info.shareId, source: 'share', direction: 'up', bytes: buf.length, label: subdomain });
+      } catch { /* metering must never break the tunnel */ }
+      this.send(agentWs, { type: 'SHARE_WS_DATA', wsId, chunk: buf.toString('base64'), binary: isBinary });
+    });
+    const teardown = (code?: number): void => {
+      if (this.wsConns.delete(wsId)) this.send(agentWs, { type: 'SHARE_WS_CLOSE', wsId, ...(typeof code === 'number' ? { code } : {}) });
+    };
+    client.on('close', (code: number) => teardown(code));
+    client.on('error', () => teardown(1011));
+  }
+
+  private wsOwned(wsId: unknown, agentId: string): WsConn | null {
+    if (typeof wsId !== 'string') return null;
+    const c = this.wsConns.get(wsId);
+    return c && c.agentId === agentId ? c : null;
   }
 
   /**
@@ -276,6 +338,27 @@ export class ShareBridge {
           if (!p.headersSent) p.res.status(502).type('text/plain').send('Upstream error');
           else p.res.end();
         } catch { /* already ended */ }
+        return true;
+      }
+      case 'SHARE_WS_OPENED':
+        // Informational: the agent's local WS handshake completed. Nothing to do — the client end
+        // was already 101'd optimistically and any early frames are queued agent-side.
+        return true;
+      case 'SHARE_WS_DATA': {
+        const c = this.wsOwned(msg.wsId, agentId);
+        if (!c) return true;
+        const buf = Buffer.from(String(msg.chunk ?? ''), 'base64');
+        try {
+          getRelayHooks().meter?.({ capId: c.shareId, source: 'share', direction: 'down', bytes: buf.length, label: c.subdomain });
+        } catch { /* metering must never break the tunnel */ }
+        try { c.client.send(buf, { binary: !!msg.binary }); } catch { /* client gone */ }
+        return true;
+      }
+      case 'SHARE_WS_CLOSE': {
+        const c = this.wsOwned(msg.wsId, agentId);
+        if (!c) return true;
+        this.wsConns.delete(String(msg.wsId));
+        try { c.client.close(typeof msg.code === 'number' ? msg.code : 1000); } catch { /* already closing */ }
         return true;
       }
       default:

@@ -454,7 +454,20 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
     noServer: true,
     maxPayload: config.maxFrameBytes * 2,
   });
-  
+
+  // Separate server for public-share WebSocket tunnels (`<sub>.<shareHost>`). It echoes the client's
+  // first offered subprotocol (e.g. Vite's `vite-hmr`) so the browser accepts the upgrade; the agent
+  // dials the local target with the same protocol. 4 MB message ceiling.
+  const shareWss = new WebSocketServer({
+    noServer: true,
+    maxPayload: 4 * 1024 * 1024,
+    handleProtocols: (protocols: Set<string>) => {
+      for (const p of protocols) return p;
+      return false;
+    },
+  });
+
+
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url!, `http://${request.headers.host}`);
     // Determine client IP. Only trust X-Forwarded-For when explicitly behind a
@@ -494,7 +507,17 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
           setupRelayRoute(ws, routing, capId);
         });
       } else {
-        socket.destroy();
+        // A WebSocket upgrade on a public-share host (`<sub>.<shareHost>`) — tunnel it to the owning
+        // agent's local server. Everything else is not a route we serve over WS.
+        const host = (request.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
+        const shareSub = subdomainOfShareHost(host);
+        if (shareSub !== null) {
+          shareWss.handleUpgrade(request, socket, head, (clientWs) => {
+            shareBridge.acceptWebSocket(clientWs, shareSub, request.url ?? '/', request.headers as Record<string, unknown>);
+          });
+        } else {
+          socket.destroy();
+        }
       }
     } else {
       socket.destroy();

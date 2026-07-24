@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
-import type WebSocket from 'ws';
+import WebSocket from 'ws';
 import { OutputHandler } from '@thenewlabs/entangle-utils';
 
 /**
@@ -53,6 +53,8 @@ const HOP_BY_HOP = new Set([
 
 const MAX_BODY_CHUNK = 256 * 1024;
 const CONTROL_TIMEOUT_MS = 10000;
+/** Ceiling on a single tunnelled WebSocket message (base64 inflates ~4/3 on the wire). */
+const MAX_WS_MSG = 4 * 1024 * 1024;
 
 function newId(): string {
   return randomBytes(9).toString('base64url');
@@ -61,6 +63,9 @@ function newId(): string {
 export class PublicShareController {
   private shares = new Map<string, ShareEntry>(); // shareId -> entry
   private activeRequests = new Map<string, http.ClientRequest>(); // reqId -> upstream
+  // wsId -> the WebSocket dialled at the LOCAL target, with a queue for client→local
+  // messages that arrive before the local handshake completes.
+  private wsConns = new Map<string, { local: WebSocket; open: boolean; queue: Array<{ buf: Buffer; binary: boolean }> }>();
   private pendingAnnounce = new Map<string, (r: AnnounceResult) => void>(); // shareId
   private pendingChecks = new Map<string, (r: AvailabilityResult) => void>(); // reqId
 
@@ -181,9 +186,80 @@ export class PublicShareController {
         this.activeRequests.delete(msg.reqId);
         return true;
       }
+      case 'SHARE_WS_OPEN':
+        this.startWsProxy(msg);
+        return true;
+      case 'SHARE_WS_DATA': {
+        const c = this.wsConns.get(msg.wsId);
+        if (c) {
+          const buf = Buffer.from(String(msg.chunk ?? ''), 'base64');
+          if (c.open) { try { c.local.send(buf, { binary: !!msg.binary }); } catch { /* dropping on a dead socket is fine */ } }
+          else c.queue.push({ buf, binary: !!msg.binary });
+        }
+        return true;
+      }
+      case 'SHARE_WS_CLOSE': {
+        const c = this.wsConns.get(msg.wsId);
+        if (c) { this.wsConns.delete(msg.wsId); try { c.local.close(typeof msg.code === 'number' ? msg.code : 1000); } catch { /* already closing */ } }
+        return true;
+      }
       default:
         return false;
     }
+  }
+
+  /**
+   * Open a WebSocket to the LOCAL share target and relay frames to/from the public client (whose
+   * end the relay owns). Same trust posture as {@link startProxy}: the wire carries only a
+   * `shareId`, never a target, so a public client can never point this at an arbitrary address.
+   */
+  private startWsProxy(msg: any): void {
+    const wsId: string = msg.wsId;
+    const entry = this.shares.get(msg.shareId);
+    if (!entry) { this.send({ type: 'SHARE_WS_CLOSE', wsId, code: 1011, reason: 'unknown share' }); return; }
+
+    const headers: Record<string, string | string[]> = {};
+    for (const [k, v] of Object.entries((msg.headers ?? {}) as Record<string, string | string[]>)) {
+      const lk = k.toLowerCase();
+      // Drop hop-by-hop, the client's own handshake headers (the `ws` client regenerates them),
+      // and Host (set below to the local target so dev-server host allow-lists accept it).
+      if (v == null || HOP_BY_HOP.has(lk) || lk.startsWith('sec-websocket-') || lk === 'host') continue;
+      headers[k] = v;
+    }
+    headers.host = `${entry.target.host}:${entry.target.port}`;
+
+    const target = `ws://${entry.target.host}:${entry.target.port}${msg.url || '/'}`;
+    const protocols = typeof msg.protocol === 'string' && msg.protocol
+      ? msg.protocol.split(',').map((s: string) => s.trim()).filter(Boolean)
+      : [];
+    let local: WebSocket;
+    try {
+      local = new WebSocket(target, protocols, {
+        headers, perMessageDeflate: false, maxPayload: MAX_WS_MSG, handshakeTimeout: CONTROL_TIMEOUT_MS,
+      });
+    } catch {
+      this.send({ type: 'SHARE_WS_CLOSE', wsId, code: 1011 });
+      return;
+    }
+    const conn = { local, open: false, queue: [] as Array<{ buf: Buffer; binary: boolean }> };
+    this.wsConns.set(wsId, conn);
+
+    local.on('open', () => {
+      conn.open = true;
+      this.send({ type: 'SHARE_WS_OPENED', wsId, protocol: local.protocol || undefined });
+      for (const q of conn.queue) { try { local.send(q.buf, { binary: q.binary }); } catch { /* ignore */ } }
+      conn.queue = [];
+    });
+    local.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      this.send({ type: 'SHARE_WS_DATA', wsId, chunk: buf.toString('base64'), binary: isBinary });
+    });
+    local.on('close', (code: number) => { this.wsConns.delete(wsId); this.send({ type: 'SHARE_WS_CLOSE', wsId, code }); });
+    local.on('error', (err) => {
+      this.wsConns.delete(wsId);
+      this.output.warn(`Share WS upstream error: ${err instanceof Error ? err.message : String(err)}`);
+      this.send({ type: 'SHARE_WS_CLOSE', wsId, code: 1011 });
+    });
   }
 
   private startProxy(msg: any): void {
