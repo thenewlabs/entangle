@@ -28,6 +28,15 @@ export function closeIdentity(identityId: string, reason = 'account revoked'): n
   return closed;
 }
 
+// agentId -> the opaque identity that verified it, so the share bridge (which routes by agentId,
+// not by capId) can attribute a public share to the same identity its owner's capabilities bind to.
+const agentIdentity = new Map<string, string>();
+
+/** The opaque identity bound to `agentId` at registration, or undefined for an unverified agent. */
+export function identityForAgent(agentId: string): string | undefined {
+  return agentIdentity.get(agentId);
+}
+
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridge?: ShareBridge): void {
   let agentId: string | undefined;
   // Set (to an OPAQUE id) only when a verifyAgentToken hook accepts this socket.
@@ -119,6 +128,8 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
           return;
         }
         agentId = newAgentId;
+        // Remember which identity owns this agent so its public shares attribute to that identity.
+        if (identityId) agentIdentity.set(agentId, identityId);
 
         ws.send(JSON.stringify({
           type: 'ASSIGN',
@@ -204,6 +215,7 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
     output.info(`Agent disconnected: ${agentId}`);
     // Notify the embedder that each bound capability of this verified socket is
     // gone (final byte tallies etc. live embedder-side).
+    if (agentId) agentIdentity.delete(agentId);
     if (identityId) {
       // Drop this socket from the identity registry (clean up the set when empty).
       const set = identitySockets.get(identityId);

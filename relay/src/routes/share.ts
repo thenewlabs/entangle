@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import { OutputHandler, parseOutputMode } from '@thenewlabs/entangle-utils';
 import type { RoutingState } from '../state/routing.js';
 import { getRelayHooks } from '../hooks.js';
+import { identityForAgent } from './agent.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
@@ -188,13 +189,28 @@ export class ShareBridge {
             subdomain: result.subdomain,
             url: shareUrl(result.subdomain),
           });
+          // Bind the share to its owning identity so its metered bytes attribute to that user.
+          const identityId = identityForAgent(agentId);
+          if (identityId) {
+            try {
+              getRelayHooks().onShareRegistered?.({ shareId: String(msg.shareId), subdomain: result.subdomain, identityId });
+            } catch { /* a hook must never break share reservation */ }
+          }
         } else {
           this.send(agentWs, { type: 'SHARE_REJECTED', shareId: msg.shareId, reason: result.reason });
         }
         return true;
       }
       case 'REVOKE_SHARE': {
-        this.routing.releaseShare(agentId, String(msg.subdomain ?? ''));
+        const sub = String(msg.subdomain ?? '');
+        const share = this.routing.lookupShare(sub);
+        const identityId = identityForAgent(agentId);
+        this.routing.releaseShare(agentId, sub);
+        if (share && identityId) {
+          try {
+            getRelayHooks().onShareClosed?.({ shareId: share.shareId, identityId });
+          } catch { /* never break release */ }
+        }
         return true;
       }
       case 'CHECK_SHARE': {

@@ -35,6 +35,16 @@ export interface RelayHooks {
   onCapabilityClosed?(info: { capId: string; identityId: string }): void;
 
   /**
+   * Fired when a verified agent reserves a public `*.link` share. Binds the share's routing id to
+   * the owning identity so subsequent `meter({source:'share'})` events attribute to it. `subdomain`
+   * is the sub-meter label. Shares route by agent (not capId), which is why this is separate.
+   */
+  onShareRegistered?(info: { shareId: string; subdomain: string; identityId: string }): void;
+
+  /** Fired when a reserved share is released. */
+  onShareClosed?(info: { shareId: string; identityId: string }): void;
+
+  /**
    * Metering sink. Called at each relay forward site with the routing id, the
    * sub-meter source, the direction, and the wire byte count. NEVER plaintext —
    * `bytes` is the size of an opaque (ciphertext, for capabilities) frame, or a
