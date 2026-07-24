@@ -15,6 +15,11 @@ import { fileURLToPath } from 'url';
 import { existsSync, realpathSync, readFileSync } from 'fs';
 import { wsRateLimiter } from './utils/rate-limit.js';
 
+// Re-export the generic hook seam from the relay entry so an in-process embedder (locus-server)
+// can inject an agent-token verifier + metering sink after importing the bundled relay, and call
+// this BEFORE startServer(). entangle stays account-agnostic — these are opaque-identity hooks.
+export { setRelayHooks, getRelayHooks, type RelayHooks } from './hooks.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
