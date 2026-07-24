@@ -7,6 +7,27 @@ import { getRelayHooks } from '../hooks.js';
 
 const output = new OutputHandler({ mode: parseOutputMode(process.env.OUTPUT_MODE || 'text') });
 
+// Live agent sockets grouped by the opaque identity a verifier bound them to. The verifier is only
+// consulted once (at registration), so this is the LIVE kill path: an embedder (e.g. locus-server,
+// on suspend / password reset / token revoke) can force-close every current connection of an
+// identity instead of waiting for its long-lived durable socket to drop on its own.
+const identitySockets = new Map<string, Set<WebSocket>>();
+
+/**
+ * Force-close every live agent socket bound to `identityId`. Returns the number closed. Generic and
+ * account-agnostic — `identityId` is the same opaque id the verifier returned; the relay learns no
+ * domain model. Safe to call with an unknown id (no-op).
+ */
+export function closeIdentity(identityId: string, reason = 'account revoked'): number {
+  const set = identitySockets.get(identityId);
+  if (!set) return 0;
+  let closed = 0;
+  for (const ws of [...set]) {
+    try { ws.close(1008, reason); closed++; } catch {}
+  }
+  return closed;
+}
+
 export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridge?: ShareBridge): void {
   let agentId: string | undefined;
   // Set (to an OPAQUE id) only when a verifyAgentToken hook accepts this socket.
@@ -68,6 +89,10 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
             return;
           }
           identityId = verified.id;
+          // Track this socket under its identity so it can be force-closed on revoke.
+          let set = identitySockets.get(identityId);
+          if (!set) { set = new Set(); identitySockets.set(identityId, set); }
+          set.add(ws);
         } else {
           // No verifier injected — preserve today's flat-token behaviour exactly.
 
@@ -113,7 +138,10 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
           output.info(`Capability announced: ${msg.capId} by agent ${agentId}`);
           // Bind the capability to the verified opaque identity (if any). Only
           // the routing capId + machineId leave the relay — never the secret.
-          if (identityId) {
+          // Idempotent: a repeat ANNOUNCE_CAP for a cap this socket already bound
+          // must NOT re-fire the hook (routing.announceCapability returns true on a
+          // re-announce, which would otherwise open duplicate sessions embedder-side).
+          if (identityId && !announcedCaps.has(msg.capId)) {
             announcedCaps.add(msg.capId);
             try {
               getRelayHooks().onCapabilityRegistered?.({ identityId, capId: msg.capId, machineId });
@@ -177,6 +205,10 @@ export function setupAgentRoute(ws: WebSocket, routing: RoutingState, shareBridg
     // Notify the embedder that each bound capability of this verified socket is
     // gone (final byte tallies etc. live embedder-side).
     if (identityId) {
+      // Drop this socket from the identity registry (clean up the set when empty).
+      const set = identitySockets.get(identityId);
+      if (set) { set.delete(ws); if (set.size === 0) identitySockets.delete(identityId); }
+
       const hooks = getRelayHooks();
       for (const capId of announcedCaps) {
         try {

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { setupAgentRoute } from './agent.js';
+import { setupAgentRoute, closeIdentity } from './agent.js';
 import { setupRelayRoute } from './relay.js';
 import { RoutingState } from '../state/routing.js';
 import { setRelayHooks, type RelayHooks } from '../hooks.js';
@@ -292,6 +292,43 @@ describe('meter hook — capability forward sites', () => {
     // Should not throw and should still forward.
     invokerWs.emit('message', Buffer.from([1, 2]));
     expect(agentWs.jsonSent().some((m) => m.type === 'RELAY_MSG')).toBe(true);
+  });
+});
+
+describe('live kill path + idempotent announce', () => {
+  let routing: RoutingState;
+  beforeEach(() => { routing = new RoutingState(); delete process.env.RELAY_AGENT_TOKEN; });
+  afterEach(() => setRelayHooks({}));
+
+  it('closeIdentity force-closes every live socket of a verified identity (H1)', async () => {
+    setRelayHooks({ verifyAgentToken: async () => ({ id: 'ident-99' }) });
+    const a = new FakeWs();
+    const b = new FakeWs();
+    setupAgentRoute(a as any, routing);
+    setupAgentRoute(b as any, routing);
+    a.emit('message', JSON.stringify({ type: 'CLIENT_HELLO', token: 'x', machineId: 'm1' }));
+    b.emit('message', JSON.stringify({ type: 'CLIENT_HELLO', token: 'x', machineId: 'm2' }));
+    await flush();
+
+    expect(closeIdentity('nobody')).toBe(0);
+    expect(closeIdentity('ident-99', 'account suspended')).toBe(2);
+    expect(a.closed).toEqual({ code: 1008, reason: 'account suspended' });
+    expect(b.closed).toEqual({ code: 1008, reason: 'account suspended' });
+    // Registry cleaned up after the sockets closed.
+    expect(closeIdentity('ident-99')).toBe(0);
+  });
+
+  it('a repeat ANNOUNCE_CAP does not re-fire onCapabilityRegistered (M1)', async () => {
+    const registered: unknown[] = [];
+    setRelayHooks({ verifyAgentToken: async () => ({ id: 'ident-7' }), onCapabilityRegistered: (i) => registered.push(i) });
+    const ws = new FakeWs();
+    setupAgentRoute(ws as any, routing);
+    ws.emit('message', JSON.stringify({ type: 'CLIENT_HELLO', token: 'x', machineId: 'm1' }));
+    await flush();
+    ws.emit('message', JSON.stringify({ type: 'ANNOUNCE_CAP', capId: VALID_CAP }));
+    ws.emit('message', JSON.stringify({ type: 'ANNOUNCE_CAP', capId: VALID_CAP }));
+    await flush();
+    expect(registered.length).toBe(1);
   });
 });
 

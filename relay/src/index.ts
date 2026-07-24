@@ -19,6 +19,7 @@ import { wsRateLimiter } from './utils/rate-limit.js';
 // can inject an agent-token verifier + metering sink after importing the bundled relay, and call
 // this BEFORE startServer(). entangle stays account-agnostic — these are opaque-identity hooks.
 export { setRelayHooks, getRelayHooks, type RelayHooks } from './hooks.js';
+export { closeIdentity } from './routes/agent.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
