@@ -139,6 +139,19 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
   }
 
   const previewHost = (process.env.RELAY_PREVIEW_HOST || '').trim().toLowerCase();
+  // Hosted platform: a FLAT preview origin `<prefix><token>.<baseDomain>` (one prefixed label under
+  // the base domain, e.g. `view-abc.lokus.dev`) — its own origin/SW/cookies, and covered by the
+  // `*.<baseDomain>` wildcard cert (the nested `<token>.preview.<host>` scheme is two labels deep,
+  // which a single wildcard can't carry). Recognized ALONGSIDE RELAY_PREVIEW_HOST; both may be set.
+  const previewPrefix = (process.env.RELAY_PREVIEW_PREFIX || '').trim().toLowerCase();
+  const baseDomain = (process.env.RELAY_BASE_DOMAIN || '').trim().toLowerCase();
+  const matchesFlatPreview = (host: string): boolean => {
+    if (!previewPrefix || !baseDomain) return false;
+    const suffix = '.' + baseDomain;
+    if (!host.endsWith(suffix)) return false;
+    const label = host.slice(0, host.length - suffix.length);
+    return label.startsWith(previewPrefix) && label.length > previewPrefix.length && !label.includes('.');
+  };
 
   // The Locus view frames the preview origin in an iframe. Each preview now gets
   // its OWN wildcard subdomain `<token>.preview.<domain>` (own browser origin →
@@ -148,21 +161,21 @@ export async function startServer(outputMode: string = 'text'): Promise<Server> 
   // (preview.localhost:8080, p3x9.preview.localhost:8080) and in prod
   // (preview.locus.thenewlabs.com, p3x9.preview.locus.thenewlabs.com over
   // https). Nothing else is broadened.
-  const frameSources = previewHost
-    ? [
-        "'self'",
-        `http://${previewHost}:*`,
-        `https://${previewHost}:*`,
-        `http://*.${previewHost}:*`,
-        `https://*.${previewHost}:*`,
-      ]
-    : ["'self'"];
+  const frameSources = [
+    "'self'",
+    ...(previewHost
+      ? [`http://${previewHost}:*`, `https://${previewHost}:*`, `http://*.${previewHost}:*`, `https://*.${previewHost}:*`]
+      : []),
+    // Flat platform preview origins live under the base domain, so the workbench must be allowed to
+    // frame any `*.<baseDomain>` (the `view-<token>.<baseDomain>` origin it opens).
+    ...(previewPrefix && baseDomain ? [`http://*.${baseDomain}:*`, `https://*.${baseDomain}:*`] : []),
+  ];
 
   // A request is a "preview host" request iff its Host (port-stripped,
   // lowercased) EQUALS the base preview host OR ends with `.<previewHost>`
   // (i.e. a `<token>.preview.<domain>` per-preview subdomain).
   const matchesPreviewHost = (host: string): boolean =>
-    !!previewHost && (host === previewHost || host.endsWith('.' + previewHost));
+    (!!previewHost && (host === previewHost || host.endsWith('.' + previewHost))) || matchesFlatPreview(host);
 
   const isPreviewHostReq = (req: express.Request): boolean => {
     const host = (req.headers.host ?? '').split(':')[0]?.trim().toLowerCase() ?? '';
