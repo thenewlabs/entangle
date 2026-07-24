@@ -903,7 +903,7 @@ declare global {
  */
 const FLAT_KEYS = [
   'spawn', 'exec', 'execCommand', 'withCwd', 'openTerminal', 'openPipe',
-  'onStatus', 'onReconnected', 'connectionStatus', 'disconnect',
+  'onStatus', 'onReconnected', 'connectionStatus', 'disconnect', 'ensureConnected',
   'newWindow', 'nextWindow', 'prevWindow', 'selectWindow', 'closeWindow', 'onWindowState',
 ] as const;
 
@@ -1052,6 +1052,11 @@ const FLAT_KEYS = [
   api.onReconnected = (cb: () => void) => conn.onReconnected(cb);
   api.connectionStatus = () => conn.getStatus();
   api.disconnect = () => conn.close();
+  // Reconnect NOW, jumping the exponential backoff. A consumer that sees the network return (the
+  // browser's `online` event) can call this so a woken laptop / regained signal reconnects at once
+  // instead of sitting out a backoff window of up to RC_CAP. Idempotent — resolves immediately when
+  // the socket is already open — and re-enables reconnection if a prior `disconnect()` disabled it.
+  api.ensureConnected = () => conn.ensureConnected();
 
   // Shared-workspace window controls (tmux-style tab bar). These drive the
   // server SharedWorkspace over the WINDOW_CTL channel; window-state broadcasts
